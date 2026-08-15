@@ -48,16 +48,20 @@ Title: Auto-generated subtitles
 ScriptType: v4.00+
 PlayResX: {width}
 PlayResY: {height}
-WrapStyle: 0
+WrapStyle: 1
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial Black,96,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,5,2,5,60,60,60,1
+Style: Default,Arial Black,80,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,5,2,5,50,50,50,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+
+# Where the subtitle block sits vertically, as a fraction of the canvas height —
+# the TikTok "lower third", clear of both the top facecam split and bottom platform UI icons.
+SUBTITLE_Y_RATIO = 0.70
 
 
 def format_ass_timestamp(seconds: float) -> str:
@@ -138,9 +142,9 @@ def build_ass_for_clip(
     clip_end = clip["end_time"]
     segments = transcript.get("segments", [])
 
-    # Slightly above dead-center so text clears platform UI icons near the bottom.
+    # Lower third, where TikTok viewers expect captions (e.g. y=1350-1400 at 1080x1920).
     pos_x = output_w // 2
-    pos_y = int(output_h * 0.42)
+    pos_y = int(output_h * SUBTITLE_Y_RATIO)
     position_tag = f"{{\\an5\\pos({pos_x},{pos_y})}}"
 
     events = []
@@ -204,11 +208,16 @@ def build_filter_complex(
     if layout == LAYOUT_SPLIT_SCREEN:
         face_x, face_y, face_w, face_h = facecam_box
         game_x, game_y, game_w, game_h = gameplay_box
+        half_h = output_h // 2
+        # scale with force_original_aspect_ratio=increase + crop = "cover" fit: fills the
+        # target box with a uniform scale (no stretch), then trims the overhanging edges.
         return (
             f"[0:v]crop={face_w}:{face_h}:{face_x}:{face_y},"
-            f"scale={output_w}:{output_h // 2}[face];"
+            f"scale={output_w}:{half_h}:force_original_aspect_ratio=increase,"
+            f"crop={output_w}:{half_h}[face];"
             f"[0:v]crop={game_w}:{game_h}:{game_x}:{game_y},"
-            f"scale={output_w}:{output_h // 2}[game];"
+            f"scale={output_w}:{half_h}:force_original_aspect_ratio=increase,"
+            f"crop={output_w}:{half_h}[game];"
             f"[face][game]vstack=inputs=2[stacked];"
             f"[stacked]subtitles='{subtitles}'[outv]"
         )
