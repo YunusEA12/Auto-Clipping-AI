@@ -7,3 +7,5 @@ __pycache__/
 *.mkv
 *.wav
 *.tflite
+client_secret.json
+token.json
