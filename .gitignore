@@ -1,6 +1,7 @@
 venv/
 .env
 temp/
+output/
 __pycache__/
 *.mp4
 *.mkv
