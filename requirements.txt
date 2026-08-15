@@ -1,3 +1,6 @@
 yt-dlp
 ffmpeg-python
 faster-whisper
+python-dotenv
+pydantic
+openai
