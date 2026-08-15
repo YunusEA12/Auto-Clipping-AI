@@ -18,14 +18,13 @@ TOKEN_PATH = Path("tiktok_token.json")
 
 AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
 TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
-INIT_UPLOAD_URL = "https://open.tiktokapis.com/v2/post/publish/video/init/"
+# Korrigierter Endpunkt laut offizieller TikTok-Dokumentation für Video-Uploads
+INIT_UPLOAD_URL = "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/"
 
 SCOPE = "video.upload"
 REDIRECT_URI = "http://localhost:8921/callback"
-CHUNK_SIZE = 10 * 1024 * 1024  # 10MB, TikTok's recommended chunk size
+CHUNK_SIZE = 10 * 1024 * 1024  # 10MB
 
-# Unaudited apps may only post privately to the uploading creator's own account.
-DEFAULT_PRIVACY_LEVEL = "SELF_ONLY"
 DEFAULT_HASHTAGS = "#fyp #viral #shorts #gaming"
 
 
@@ -139,7 +138,13 @@ def build_caption(title: str, hashtags: str = DEFAULT_HASHTAGS) -> str:
 
 
 def upload_to_tiktok(video_path: Path, caption: str) -> str:
-    """Upload a rendered clip to TikTok as a private (self-only) post via the Content Posting API."""
+    """Upload a rendered clip to TikTok as an inbox draft via the Content Posting API.
+
+    Note: the inbox init endpoint has no `post_info`/caption field — TikTok only lets the
+    creator set the caption manually in-app when they choose to post from their inbox.
+    `caption` is accepted (and still built via `build_caption()`) so callers/CLI usage
+    stay stable and the text is ready to copy-paste, but it is not transmitted here.
+    """
     video_path = Path(video_path)
     if not video_path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")
@@ -147,28 +152,24 @@ def upload_to_tiktok(video_path: Path, caption: str) -> str:
     access_token = _get_access_token()
     video_size = video_path.stat().st_size
 
-    logger.info("Initializing TikTok upload for %s (%.1f MB)", video_path.name, video_size / 1_000_000)
+    logger.info(
+        "Initializing TikTok inbox upload for %s (%.1f MB); suggested caption: %r",
+        video_path.name, video_size / 1_000_000, caption,
+    )
     try:
         init_response = requests.post(
             INIT_UPLOAD_URL,
             headers={
                 "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json; charset=UTF-8",
+                "Content-Type": "application/json",
             },
             json={
-                "post_info": {
-                    "title": caption,
-                    "privacy_level": DEFAULT_PRIVACY_LEVEL,
-                    "disable_duet": False,
-                    "disable_comment": False,
-                    "disable_stitch": False,
-                },
                 "source_info": {
                     "source": "FILE_UPLOAD",
                     "video_size": video_size,
                     "chunk_size": min(video_size, CHUNK_SIZE),
                     "total_chunk_count": max(1, -(-video_size // CHUNK_SIZE)),
-                },
+                }
             },
             timeout=30,
         )
@@ -204,7 +205,7 @@ def upload_to_tiktok(video_path: Path, caption: str) -> str:
         logger.error("TikTok video upload failed for %s: %s", video_path, e)
         raise
 
-    logger.info("TikTok upload complete for %s: publish_id=%s", video_path.name, publish_id)
+    logger.info("TikTok upload complete (sent to inbox) for %s: publish_id=%s", video_path.name, publish_id)
     return publish_id
 
 
