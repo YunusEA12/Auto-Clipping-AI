@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
 
 from faster_whisper import WhisperModel
@@ -12,15 +13,16 @@ logger = logging.getLogger(__name__)
 
 TEMP_DIR = Path("temp")
 OUTPUT_PATH = TEMP_DIR / "transcription.json"
-MODEL_SIZE = "small"
+MODEL_SIZE = "base"
 
 
 def transcribe(audio_path: Path, model_size: str = MODEL_SIZE) -> Path:
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    logger.info("Loading faster-whisper model '%s' on CPU (int8)", model_size)
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    cpu_threads = os.cpu_count() or 4
+    logger.info("Loading faster-whisper model '%s' on CPU (int8, %d threads)", model_size, cpu_threads)
+    model = WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
 
     logger.info("Transcribing %s", audio_path)
     segments, info = model.transcribe(str(audio_path), word_timestamps=True)

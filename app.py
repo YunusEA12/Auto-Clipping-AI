@@ -23,10 +23,17 @@ CLIPS_PATH = Path("temp/clips.json")
 OUTPUT_DIR = Path("output")
 FEEDBACK_PATH = Path("feedback.json")
 
-LAYOUT_OPTIONS = {
-    "Split-Screen (Facecam + Gameplay)": process_module.LAYOUT_SPLIT_SCREEN,
-    "Blur-Background (Crayo-Style)": process_module.LAYOUT_BLUR_BACKGROUND,
+FORMAT_OPTIONS = {
+    "9:16 (TikTok)": "9:16",
+    "1:1 (Square)": "1:1",
+    "16:9 (Landscape)": "16:9",
 }
+LAYOUT_OPTIONS = {
+    "Auto (KI entscheidet)": process_module.LAYOUT_AUTO,
+    "Split-Screen": process_module.LAYOUT_SPLIT_SCREEN,
+    "Blur-Background": process_module.LAYOUT_BLUR_BACKGROUND,
+}
+HIGHLIGHT_OPTIONS = process_module.HIGHLIGHT_COLORS
 
 st.set_page_config(page_title="Auto-Clipping AI", page_icon="🎬", layout="wide")
 st.title("🎬 Auto-Clipping AI")
@@ -50,8 +57,16 @@ with col_url:
 with col_upload:
     uploaded_file = st.file_uploader("...oder lokales Video hochladen", type=["mp4", "mkv"])
 
-layout_label = st.selectbox("Video-Layout wählen", list(LAYOUT_OPTIONS.keys()))
-selected_layout = LAYOUT_OPTIONS[layout_label]
+col_format, col_layout, col_highlight = st.columns(3)
+with col_format:
+    format_label = st.selectbox("Video-Format", list(FORMAT_OPTIONS.keys()))
+    selected_format = FORMAT_OPTIONS[format_label]
+with col_layout:
+    layout_label = st.selectbox("Layout", list(LAYOUT_OPTIONS.keys()))
+    selected_layout = LAYOUT_OPTIONS[layout_label]
+with col_highlight:
+    highlight_label = st.selectbox("Untertitel-Highlight", list(HIGHLIGHT_OPTIONS.keys()))
+    selected_highlight = HIGHLIGHT_OPTIONS[highlight_label]
 
 with st.expander("⚙️ Erweiterte Optionen"):
     do_upload = st.checkbox("Automatischer Upload zu YouTube", value=False)
@@ -129,7 +144,12 @@ if start_clicked:
             analyze.analyze()
 
             status.write("🎬 Schneide & rendere Clips...")
-            process_module.process(video_path, layout=selected_layout)
+            process_module.process(
+                video_path,
+                layout=selected_layout,
+                video_format=selected_format,
+                highlight_color=selected_highlight,
+            )
 
             if do_upload:
                 status.write("☁️ Lade Clips zu YouTube hoch (privat)...")

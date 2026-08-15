@@ -17,7 +17,7 @@ TEMP_DIR = Path("temp")
 TRANSCRIPTION_PATH = TEMP_DIR / "transcription.json"
 OUTPUT_PATH = TEMP_DIR / "clips.json"
 FEEDBACK_PATH = Path("feedback.json")
-MODEL = "gpt-4o-2024-08-06"
+MODEL = "gpt-4o-mini"
 
 BASE_SYSTEM_PROMPT = """You are an expert short-form video editor who finds viral moments in raw transcripts.
 Analyze the provided timestamped transcript and select the strongest standalone clips.

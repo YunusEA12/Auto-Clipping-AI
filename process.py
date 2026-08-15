@@ -1,4 +1,4 @@
-"""Processing step: burn subtitles into 9:16 split-screen clips (facecam top / gameplay bottom) via FFmpeg."""
+"""Processing step: burn word-by-word highlighted subtitles into split-screen/blur-background clips via FFmpeg."""
 
 import argparse
 import json
@@ -6,11 +6,11 @@ import logging
 import re
 import subprocess
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 
-from vision import get_facecam_coordinates
+import vision
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -20,25 +20,40 @@ OUTPUT_DIR = Path("output")
 CLIPS_PATH = TEMP_DIR / "clips.json"
 TRANSCRIPTION_PATH = TEMP_DIR / "transcription.json"
 
-# 9:16 output canvas
-OUTPUT_W = 1080
-OUTPUT_H = 1920
+# Supported output canvases, keyed by aspect ratio label.
+VIDEO_FORMATS = {
+    "9:16": (1080, 1920),
+    "1:1": (1080, 1080),
+    "16:9": (1920, 1080),
+}
+DEFAULT_FORMAT = "9:16"
 
 LAYOUT_SPLIT_SCREEN = "split_screen"
 LAYOUT_BLUR_BACKGROUND = "blur_background"
+LAYOUT_AUTO = "auto"
 VALID_LAYOUTS = (LAYOUT_SPLIT_SCREEN, LAYOUT_BLUR_BACKGROUND)
+SELECTABLE_LAYOUTS = (LAYOUT_SPLIT_SCREEN, LAYOUT_BLUR_BACKGROUND, LAYOUT_AUTO)
 
-ASS_HEADER = """[Script Info]
+HIGHLIGHT_COLORS = {
+    "Gelb (Hormozi)": "00FFFF",
+    "Neon Grün": "00FF66",
+    "Weiß": "FFFFFF",
+}
+DEFAULT_HIGHLIGHT_COLOR = HIGHLIGHT_COLORS["Gelb (Hormozi)"]
+WORD_BASE_COLOR = "FFFFFF"
+WORDS_PER_BLOCK = 4
+
+ASS_HEADER_TEMPLATE = """[Script Info]
 Title: Auto-generated subtitles
 ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
+PlayResX: {width}
+PlayResY: {height}
 WrapStyle: 0
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,72,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,100,1
+Style: Default,Arial Black,96,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,5,2,5,60,60,60,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -66,35 +81,88 @@ def load_json(path: Path) -> dict:
         return json.load(f)
 
 
-def build_ass_for_clip(clip: dict, transcript: dict, index: int) -> Path:
+def _fallback_segment_event(seg: dict, clip_start: float, clip_end: float, position_tag: str) -> Optional[str]:
+    """Whole-segment subtitle line used when word-level timestamps are unavailable."""
+    rel_start = max(seg["start"], clip_start) - clip_start
+    rel_end = min(seg["end"], clip_end) - clip_start
+    if rel_end <= rel_start:
+        return None
+
+    text = seg["text"].strip().replace("\n", " ").upper()
+    if not text:
+        return None
+
+    return f"Dialogue: 0,{format_ass_timestamp(rel_start)},{format_ass_timestamp(rel_end)},Default,,0,0,0,,{position_tag}{text}"
+
+
+def _word_block_events(words: list, clip_start: float, clip_end: float, position_tag: str, highlight_color: str) -> List[str]:
+    """Karaoke-style word-by-word highlighting: one Dialogue line per word, timed to that word."""
+    events = []
+    for block_start in range(0, len(words), WORDS_PER_BLOCK):
+        block = words[block_start: block_start + WORDS_PER_BLOCK]
+        block_texts = [w["text"].strip().upper() for w in block]
+
+        for i, word in enumerate(block):
+            w_start = word["start"]
+            w_end = word["end"]
+            if w_end <= clip_start or w_start >= clip_end:
+                continue
+
+            rel_start = max(w_start, clip_start) - clip_start
+            rel_end = min(w_end, clip_end) - clip_start
+            if rel_end <= rel_start:
+                continue
+
+            rendered = [
+                f"{{\\c&H{highlight_color}&}}{text}{{\\c&H{WORD_BASE_COLOR}&}}" if j == i else text
+                for j, text in enumerate(block_texts)
+            ]
+            line_text = " ".join(rendered)
+
+            events.append(
+                f"Dialogue: 0,{format_ass_timestamp(rel_start)},{format_ass_timestamp(rel_end)},Default,,0,0,0,,{position_tag}{line_text}"
+            )
+
+    return events
+
+
+def build_ass_for_clip(
+    clip: dict,
+    transcript: dict,
+    index: int,
+    highlight_color: str = DEFAULT_HIGHLIGHT_COLOR,
+    output_w: int = 1080,
+    output_h: int = 1920,
+) -> Path:
     clip_start = clip["start_time"]
     clip_end = clip["end_time"]
     segments = transcript.get("segments", [])
+
+    # Slightly above dead-center so text clears platform UI icons near the bottom.
+    pos_x = output_w // 2
+    pos_y = int(output_h * 0.42)
+    position_tag = f"{{\\an5\\pos({pos_x},{pos_y})}}"
 
     events = []
     for seg in segments:
         if seg["end"] <= clip_start or seg["start"] >= clip_end:
             continue
 
-        rel_start = max(seg["start"], clip_start) - clip_start
-        rel_end = min(seg["end"], clip_end) - clip_start
-        if rel_end <= rel_start:
+        words = seg.get("words") or []
+        if not words:
+            event = _fallback_segment_event(seg, clip_start, clip_end, position_tag)
+            if event:
+                events.append(event)
             continue
 
-        text = seg["text"].strip().replace("\n", " ")
-        if not text:
-            continue
-
-        events.append(
-            f"Dialogue: 0,{format_ass_timestamp(rel_start)},{format_ass_timestamp(rel_end)},Default,,0,0,0,,{text}"
-        )
+        events.extend(_word_block_events(words, clip_start, clip_end, position_tag, highlight_color))
 
     if not events:
         raise RuntimeError(f"No subtitle events found for clip {index} ({clip_start}-{clip_end}s)")
 
     ass_path = TEMP_DIR / f"clip_{index}.ass"
     with open(ass_path, "w", encoding="utf-8") as f:
-        f.write(ASS_HEADER)
+        f.write(ASS_HEADER_TEMPLATE.format(width=output_w, height=output_h))
         f.write("\n".join(events))
         f.write("\n")
 
@@ -126,6 +194,8 @@ def escape_subtitles_path(path: Path) -> str:
 def build_filter_complex(
     layout: str,
     ass_path: Path,
+    output_w: int,
+    output_h: int,
     facecam_box: Tuple[int, int, int, int] | None = None,
     gameplay_box: Tuple[int, int, int, int] | None = None,
 ) -> str:
@@ -136,18 +206,20 @@ def build_filter_complex(
         game_x, game_y, game_w, game_h = gameplay_box
         return (
             f"[0:v]crop={face_w}:{face_h}:{face_x}:{face_y},"
-            f"scale={OUTPUT_W}:{OUTPUT_H // 2}[face];"
+            f"scale={output_w}:{output_h // 2}[face];"
             f"[0:v]crop={game_w}:{game_h}:{game_x}:{game_y},"
-            f"scale={OUTPUT_W}:{OUTPUT_H // 2}[game];"
+            f"scale={output_w}:{output_h // 2}[game];"
             f"[face][game]vstack=inputs=2[stacked];"
             f"[stacked]subtitles='{subtitles}'[outv]"
         )
 
     if layout == LAYOUT_BLUR_BACKGROUND:
+        # Blur a heavily downscaled copy, then upscale — far cheaper than blurring full-res.
+        small_w, small_h = output_w // 4, output_h // 4
         return (
-            f"[0:v]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
-            f"crop={OUTPUT_W}:{OUTPUT_H},boxblur=20:20[bg];"
-            f"[0:v]scale={OUTPUT_W}:-2[fg];"
+            f"[0:v]scale={small_w}:{small_h}:force_original_aspect_ratio=increase,"
+            f"crop={small_w}:{small_h},boxblur=20:20,scale={output_w}:{output_h}[bg];"
+            f"[0:v]scale={output_w}:-2[fg];"
             f"[bg][fg]overlay=(W-w)/2:(H-h)/2[stacked];"
             f"[stacked]subtitles='{subtitles}'[outv]"
         )
@@ -161,6 +233,8 @@ def render_clip(
     ass_path: Path,
     index: int,
     layout: str,
+    output_w: int,
+    output_h: int,
     facecam_box: Tuple[int, int, int, int] | None = None,
     gameplay_box: Tuple[int, int, int, int] | None = None,
 ) -> Path:
@@ -169,7 +243,7 @@ def render_clip(
     title_slug = slugify(clip["title"])
     output_path = OUTPUT_DIR / f"clip_{index}_{title_slug}.mp4"
 
-    filter_complex = build_filter_complex(layout, ass_path, facecam_box, gameplay_box)
+    filter_complex = build_filter_complex(layout, ass_path, output_w, output_h, facecam_box, gameplay_box)
 
     cmd = [
         "ffmpeg", "-y",
@@ -180,11 +254,12 @@ def render_clip(
         "-map", "[outv]",
         "-map", "0:a?",
         "-c:v", "libx264",
+        "-preset", "veryfast",
         "-c:a", "aac",
         str(output_path),
     ]
 
-    logger.info("Rendering clip %d -> %s", index, output_path)
+    logger.info("Rendering clip %d (layout=%s) -> %s", index, layout, output_path)
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
     if result.returncode != 0:
@@ -219,9 +294,28 @@ def find_source_video(explicit: Path | None) -> Path:
     return candidates[0]
 
 
-def process(source_video: Path | None = None, layout: str = LAYOUT_SPLIT_SCREEN) -> List[Path]:
-    if layout not in VALID_LAYOUTS:
-        raise ValueError(f"Unknown layout '{layout}', expected one of {VALID_LAYOUTS}")
+def resolve_layout(layout: str, video_path: Path, clip_start: float) -> str:
+    if layout != LAYOUT_AUTO:
+        return layout
+
+    face_present = vision.has_face(str(video_path), clip_start)
+    resolved = LAYOUT_SPLIT_SCREEN if face_present else LAYOUT_BLUR_BACKGROUND
+    logger.info("Auto-layout at %.2fs: face_present=%s -> %s", clip_start, face_present, resolved)
+    return resolved
+
+
+def process(
+    source_video: Path | None = None,
+    layout: str = LAYOUT_SPLIT_SCREEN,
+    video_format: str = DEFAULT_FORMAT,
+    highlight_color: str = DEFAULT_HIGHLIGHT_COLOR,
+) -> List[Path]:
+    if layout not in SELECTABLE_LAYOUTS:
+        raise ValueError(f"Unknown layout '{layout}', expected one of {SELECTABLE_LAYOUTS}")
+    if video_format not in VIDEO_FORMATS:
+        raise ValueError(f"Unknown video format '{video_format}', expected one of {tuple(VIDEO_FORMATS)}")
+
+    output_w, output_h = VIDEO_FORMATS[video_format]
 
     clips_data = load_json(CLIPS_PATH)
     transcript = load_json(TRANSCRIPTION_PATH)
@@ -235,18 +329,23 @@ def process(source_video: Path | None = None, layout: str = LAYOUT_SPLIT_SCREEN)
     TEMP_DIR.mkdir(exist_ok=True)
 
     gameplay_box = None
-    if layout == LAYOUT_SPLIT_SCREEN:
+    if layout in (LAYOUT_SPLIT_SCREEN, LAYOUT_AUTO):
         video_w, video_h = get_video_dimensions(video_path)
         # Gameplay is treated as the bottom half of the source frame; facecam is detected per clip.
         gameplay_box = (0, video_h // 2, video_w, video_h - video_h // 2)
 
     outputs = []
     for i, clip in enumerate(clips, start=1):
+        effective_layout = resolve_layout(layout, video_path, clip["start_time"])
+
         facecam_box = None
-        if layout == LAYOUT_SPLIT_SCREEN:
-            facecam_box = get_facecam_coordinates(str(video_path), clip["start_time"])
-        ass_path = build_ass_for_clip(clip, transcript, i)
-        output_path = render_clip(video_path, clip, ass_path, i, layout, facecam_box, gameplay_box)
+        if effective_layout == LAYOUT_SPLIT_SCREEN:
+            facecam_box = vision.get_facecam_coordinates(str(video_path), clip["start_time"])
+
+        ass_path = build_ass_for_clip(clip, transcript, i, highlight_color, output_w, output_h)
+        output_path = render_clip(
+            video_path, clip, ass_path, i, effective_layout, output_w, output_h, facecam_box, gameplay_box
+        )
         outputs.append(output_path)
 
     logger.info("Processing complete: %d clips rendered to %s", len(outputs), OUTPUT_DIR)
@@ -254,12 +353,14 @@ def process(source_video: Path | None = None, layout: str = LAYOUT_SPLIT_SCREEN)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Render 9:16 clips with burned-in subtitles.")
+    parser = argparse.ArgumentParser(description="Render clips with burned-in, word-by-word highlighted subtitles.")
     parser.add_argument("--video", type=Path, default=None, help="Path to the source video (auto-detected if omitted)")
-    parser.add_argument("--layout", choices=VALID_LAYOUTS, default=LAYOUT_SPLIT_SCREEN, help="Video layout mode")
+    parser.add_argument("--layout", choices=SELECTABLE_LAYOUTS, default=LAYOUT_SPLIT_SCREEN, help="Video layout mode")
+    parser.add_argument("--format", dest="video_format", choices=tuple(VIDEO_FORMATS), default=DEFAULT_FORMAT, help="Output aspect ratio")
+    parser.add_argument("--highlight-color", default=DEFAULT_HIGHLIGHT_COLOR, help="ASS BGR hex color for the active word (e.g. 00FFFF)")
     args = parser.parse_args()
 
-    process(args.video, args.layout)
+    process(args.video, args.layout, args.video_format, args.highlight_color)
 
 
 if __name__ == "__main__":

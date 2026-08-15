@@ -3,6 +3,7 @@
 import logging
 import urllib.request
 from pathlib import Path
+from typing import Optional
 
 import cv2
 import mediapipe as mp
@@ -45,8 +46,10 @@ def _fallback_box(frame_w: int, frame_h: int) -> tuple[int, int, int, int]:
     return 0, 0, w, h
 
 
-def get_facecam_coordinates(video_path: str, timestamp: float) -> tuple[int, int, int, int]:
-    """Detect a face at `timestamp` seconds into `video_path` and return a padded (x, y, w, h) box in pixels."""
+def _detect_raw_box(
+    video_path: str, timestamp: float
+) -> tuple[Optional[tuple[int, int, int, int]], int, int]:
+    """Read the frame at `timestamp` and return (raw_box_or_None, frame_w, frame_h)."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
@@ -73,11 +76,27 @@ def get_facecam_coordinates(video_path: str, timestamp: float) -> tuple[int, int
         result = detector.detect(mp_image)
 
     if not result.detections:
+        return None, frame_w, frame_h
+
+    box = result.detections[0].bounding_box
+    return (box.origin_x, box.origin_y, box.width, box.height), frame_w, frame_h
+
+
+def has_face(video_path: str, timestamp: float) -> bool:
+    """Cheap presence check used to decide between split-screen and blur-background layouts."""
+    raw_box, _, _ = _detect_raw_box(video_path, timestamp)
+    return raw_box is not None
+
+
+def get_facecam_coordinates(video_path: str, timestamp: float) -> tuple[int, int, int, int]:
+    """Detect a face at `timestamp` seconds into `video_path` and return a padded (x, y, w, h) box in pixels."""
+    raw_box, frame_w, frame_h = _detect_raw_box(video_path, timestamp)
+
+    if raw_box is None:
         logger.warning("No face detected at %.2fs in %s, using fallback crop", timestamp, video_path)
         return _fallback_box(frame_w, frame_h)
 
-    box = result.detections[0].bounding_box
-    x, y, w, h = box.origin_x, box.origin_y, box.width, box.height
+    x, y, w, h = raw_box
 
     pad_w = w * (PADDING_FACTOR - 1) / 2
     pad_h = h * (PADDING_FACTOR - 1) / 2
