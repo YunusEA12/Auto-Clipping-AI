@@ -1,2 +1,3 @@
 yt-dlp
 ffmpeg-python
+faster-whisper
