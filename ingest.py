@@ -5,11 +5,37 @@ import logging
 from pathlib import Path
 
 import ffmpeg
+import yt_dlp
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 TEMP_DIR = Path("temp")
+
+
+def download_from_url(url: str) -> Path:
+    """Download a YouTube/Twitch video into the project root as an .mp4."""
+    ydl_opts = {
+        "format": "mp4/bestvideo+bestaudio",
+        "outtmpl": "%(title)s.%(ext)s",
+        "merge_output_format": "mp4",
+    }
+
+    logger.info("Downloading source video from %s", url)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+    except yt_dlp.utils.DownloadError as e:
+        logger.error("Failed to download video from %s: %s", url, e)
+        raise
+
+    output_path = Path(filename)
+    if not output_path.exists():
+        raise RuntimeError(f"Download reported success but file is missing: {output_path}")
+
+    logger.info("Downloaded source video: %s", output_path)
+    return output_path
 
 
 def extract_audio(video_path: Path) -> Path:

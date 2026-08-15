@@ -101,6 +101,25 @@ def build_system_prompt() -> str:
     return BASE_SYSTEM_PROMPT + load_feedback_section()
 
 
+def save_feedback(clip_title: str, feedback_text: str) -> None:
+    """Append a piece of user feedback about a rendered clip to feedback.json."""
+    entries = []
+    if FEEDBACK_PATH.exists():
+        try:
+            with open(FEEDBACK_PATH, "r", encoding="utf-8") as f:
+                entries = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Could not read %s, starting a fresh feedback list: %s", FEEDBACK_PATH, e)
+            entries = []
+
+    entries.append({"clip_title": clip_title, "feedback": feedback_text})
+
+    with open(FEEDBACK_PATH, "w", encoding="utf-8") as f:
+        json.dump(entries, f, ensure_ascii=False, indent=2)
+
+    logger.info("Saved feedback for clip '%s'", clip_title)
+
+
 def load_transcript(path: Path) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"Transcript not found: {path}")

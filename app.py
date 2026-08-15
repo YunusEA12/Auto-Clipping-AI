@@ -22,7 +22,6 @@ ENV_PATH = Path(".env")
 CLIENT_SECRET_PATH = Path("client_secret.json")
 CLIPS_PATH = Path("temp/clips.json")
 OUTPUT_DIR = Path("output")
-FEEDBACK_PATH = Path("feedback.json")
 
 FORMAT_OPTIONS = {
     "9:16 (TikTok)": "9:16",
@@ -85,37 +84,9 @@ def resolve_source_video() -> Path:
         return dest
 
     if url:
-        import yt_dlp
-
-        ydl_opts = {
-            "format": "mp4/bestvideo+bestaudio",
-            "outtmpl": "%(title)s.%(ext)s",
-            "merge_output_format": "mp4",
-        }
-        logger.info("Downloading source video from %s", url)
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-        return Path(filename)
+        return ingest.download_from_url(url)
 
     raise ValueError("Bitte eine URL angeben oder ein Video hochladen.")
-
-
-def save_feedback(clip_title: str, feedback_text: str) -> None:
-    entries = []
-    if FEEDBACK_PATH.exists():
-        try:
-            with open(FEEDBACK_PATH, "r", encoding="utf-8") as f:
-                entries = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            entries = []
-
-    entries.append({"clip_title": clip_title, "feedback": feedback_text})
-
-    with open(FEEDBACK_PATH, "w", encoding="utf-8") as f:
-        json.dump(entries, f, ensure_ascii=False, indent=2)
-
-    logger.info("Saved feedback for clip '%s'", clip_title)
 
 
 if start_clicked:
@@ -203,7 +174,7 @@ else:
             with col_save:
                 if st.button("Feedback speichern", key=f"feedback_btn_{video_path.name}"):
                     if feedback_text:
-                        save_feedback(clip_title, feedback_text)
+                        analyze.save_feedback(clip_title, feedback_text)
                         st.success("Feedback gespeichert ✅")
                     else:
                         st.warning("Bitte zuerst ein Feedback eingeben.")
