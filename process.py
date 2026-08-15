@@ -215,13 +215,17 @@ def build_filter_complex(
         half_h = output_h // 2
         # scale with force_original_aspect_ratio=increase + crop = "cover" fit: fills the
         # target box with a uniform scale (no stretch), then trims the overhanging edges.
+        # setsar=1 pins the pixel aspect ratio to square so neither half gets re-stretched
+        # by the encoder/player after vstack — the actual cause of the "flat"-looking half.
+        # vstack (not a bare overlay) is required here: overlay alone needs a full-size base
+        # canvas to place both halves onto, or the second half never appears.
         return (
             f"[0:v]crop={face_w}:{face_h}:{face_x}:{face_y},"
             f"scale={output_w}:{half_h}:force_original_aspect_ratio=increase,"
-            f"crop={output_w}:{half_h}[face];"
+            f"crop={output_w}:{half_h},setsar=1[face];"
             f"[0:v]crop={game_w}:{game_h}:{game_x}:{game_y},"
             f"scale={output_w}:{half_h}:force_original_aspect_ratio=increase,"
-            f"crop={output_w}:{half_h}[game];"
+            f"crop={output_w}:{half_h},setsar=1[game];"
             f"[face][game]vstack=inputs=2[stacked];"
             f"[stacked]subtitles='{subtitles}'[outv]"
         )
@@ -231,8 +235,8 @@ def build_filter_complex(
         small_w, small_h = output_w // 4, output_h // 4
         return (
             f"[0:v]scale={small_w}:{small_h}:force_original_aspect_ratio=increase,"
-            f"crop={small_w}:{small_h},boxblur=20:20,scale={output_w}:{output_h}[bg];"
-            f"[0:v]scale={output_w}:-2[fg];"
+            f"crop={small_w}:{small_h},boxblur=20:20,scale={output_w}:{output_h},setsar=1[bg];"
+            f"[0:v]scale={output_w}:-2,setsar=1[fg];"
             f"[bg][fg]overlay=(W-w)/2:(H-h)/2[stacked];"
             f"[stacked]subtitles='{subtitles}'[outv]"
         )
