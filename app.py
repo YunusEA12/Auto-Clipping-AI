@@ -14,12 +14,14 @@ import transcribe
 import analyze
 import process as process_module
 import upload as upload_module
+import upload_tiktok
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 ENV_PATH = Path(".env")
 CLIENT_SECRET_PATH = Path("client_secret.json")
+TIKTOK_CLIENT_CONFIG_PATH = Path("tiktok_client_secret.json")
 CLIPS_PATH = Path("temp/clips.json")
 OUTPUT_DIR = Path("output")
 
@@ -50,6 +52,11 @@ with st.sidebar:
     else:
         st.error("❌ Fehlt — client_secret.json (YouTube)")
 
+    if TIKTOK_CLIENT_CONFIG_PATH.exists():
+        st.success("✅ Bereit — tiktok_client_secret.json (TikTok)")
+    else:
+        st.error("❌ Fehlt — tiktok_client_secret.json (TikTok)")
+
 st.subheader("Video-Quelle")
 col_url, col_upload = st.columns(2)
 with col_url:
@@ -71,6 +78,7 @@ with col_highlight:
 
 with st.expander("⚙️ Erweiterte Optionen"):
     do_upload = st.checkbox("Automatischer Upload zu YouTube", value=False)
+    do_tiktok_upload = st.checkbox("🚀 Automatisch auf TikTok hochladen", value=False)
 
 st.divider()
 start_clicked = st.button("🚀 Pipeline starten", type="primary", width="stretch")
@@ -102,6 +110,10 @@ if start_clicked:
         st.error("❌ client_secret.json fehlt. Wird für den automatischen YouTube-Upload benötigt.")
         st.stop()
 
+    if do_tiktok_upload and not TIKTOK_CLIENT_CONFIG_PATH.exists():
+        st.error("❌ tiktok_client_secret.json fehlt. Wird für den automatischen TikTok-Upload benötigt.")
+        st.stop()
+
     try:
         with st.status("Pipeline läuft...", expanded=True) as status:
             status.write("📥 Lese Quellvideo...")
@@ -117,7 +129,7 @@ if start_clicked:
             analyze.analyze()
 
             status.write("🎬 Schneide & rendere Clips...")
-            process_module.process(
+            rendered_paths = process_module.process(
                 video_path,
                 layout=selected_layout,
                 video_format=selected_format,
@@ -127,6 +139,21 @@ if start_clicked:
             if do_upload:
                 status.write("☁️ Lade Clips zu YouTube hoch (privat)...")
                 upload_module.upload_all()
+
+            if do_tiktok_upload:
+                status.write("🚀 Lade Clips zu TikTok hoch (privat)...")
+                with open(CLIPS_PATH, "r", encoding="utf-8") as f:
+                    rendered_clips_data = json.load(f)
+                rendered_clips_by_index = {
+                    i: c for i, c in enumerate(rendered_clips_data.get("clips", []), start=1)
+                }
+                for rendered_path in rendered_paths:
+                    match = re.match(r"clip_(\d+)_", rendered_path.name)
+                    idx = int(match.group(1)) if match else None
+                    rendered_clip = rendered_clips_by_index.get(idx)
+                    title = rendered_clip["title"] if rendered_clip else rendered_path.stem
+                    caption = upload_tiktok.build_caption(title)
+                    upload_tiktok.upload_to_tiktok(rendered_path, caption)
 
             status.update(label="Pipeline abgeschlossen ✅", state="complete")
     except Exception as e:
@@ -170,7 +197,7 @@ else:
                 "Was war schlecht an diesem Clip?",
                 key=f"feedback_input_{video_path.name}",
             )
-            col_save, col_delete = st.columns(2)
+            col_save, col_download, col_delete = st.columns(3)
             with col_save:
                 if st.button("Feedback speichern", key=f"feedback_btn_{video_path.name}"):
                     if feedback_text:
@@ -178,6 +205,14 @@ else:
                         st.success("Feedback gespeichert ✅")
                     else:
                         st.warning("Bitte zuerst ein Feedback eingeben.")
+            with col_download:
+                st.download_button(
+                    label="📥 Herunterladen",
+                    data=video_path.read_bytes(),
+                    file_name=os.path.basename(video_path),
+                    mime="video/mp4",
+                    key=f"download_{video_path.name}",
+                )
             with col_delete:
                 if st.button("🗑️ Clip löschen", key=f"del_{video_path.name}"):
                     os.remove(video_path)

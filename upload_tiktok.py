@@ -1,0 +1,221 @@
+"""TikTok upload step: publish rendered clips via the official TikTok Content Posting API."""
+
+import argparse
+import json
+import logging
+import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from urllib.parse import urlencode, urlparse, parse_qs
+
+import requests
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+CLIENT_CONFIG_PATH = Path("tiktok_client_secret.json")
+TOKEN_PATH = Path("tiktok_token.json")
+
+AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
+TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
+INIT_UPLOAD_URL = "https://open.tiktokapis.com/v2/post/publish/video/init/"
+
+SCOPE = "video.upload"
+REDIRECT_URI = "http://localhost:8921/callback"
+CHUNK_SIZE = 10 * 1024 * 1024  # 10MB, TikTok's recommended chunk size
+
+# Unaudited apps may only post privately to the uploading creator's own account.
+DEFAULT_PRIVACY_LEVEL = "SELF_ONLY"
+DEFAULT_HASHTAGS = "#fyp #viral #shorts #gaming"
+
+
+class _OAuthCallbackHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        query = parse_qs(urlparse(self.path).query)
+        self.server.auth_code = query.get("code", [None])[0]
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"<html><body>Authorization complete. You can close this tab.</body></html>")
+
+    def log_message(self, format, *args):
+        pass
+
+
+def _load_client_config() -> dict:
+    if not CLIENT_CONFIG_PATH.exists():
+        raise FileNotFoundError(
+            f"Missing TikTok app credentials: {CLIENT_CONFIG_PATH}. "
+            'Create a TikTok Developer app with the Content Posting API and save '
+            '{"client_key": "...", "client_secret": "..."} there.'
+        )
+    with open(CLIENT_CONFIG_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _run_oauth_flow(client_key: str, client_secret: str) -> dict:
+    params = {
+        "client_key": client_key,
+        "response_type": "code",
+        "scope": SCOPE,
+        "redirect_uri": REDIRECT_URI,
+        "state": "auto-clipping-ai",
+    }
+    auth_url = f"{AUTH_URL}?{urlencode(params)}"
+    logger.info("Opening browser for TikTok authorization")
+    webbrowser.open(auth_url)
+
+    server = HTTPServer(("localhost", 8921), _OAuthCallbackHandler)
+    server.auth_code = None
+    try:
+        while server.auth_code is None:
+            server.handle_request()
+    finally:
+        server.server_close()
+
+    response = requests.post(
+        TOKEN_URL,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        data={
+            "client_key": client_key,
+            "client_secret": client_secret,
+            "code": server.auth_code,
+            "grant_type": "authorization_code",
+            "redirect_uri": REDIRECT_URI,
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    token_data = response.json()
+    if "access_token" not in token_data:
+        raise RuntimeError(f"TikTok OAuth failed: {token_data}")
+
+    TOKEN_PATH.write_text(json.dumps(token_data), encoding="utf-8")
+    logger.info("Saved TikTok OAuth token to %s", TOKEN_PATH)
+    return token_data
+
+
+def _refresh_token(client_key: str, client_secret: str, refresh_token: str) -> dict:
+    response = requests.post(
+        TOKEN_URL,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        data={
+            "client_key": client_key,
+            "client_secret": client_secret,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    token_data = response.json()
+    if "access_token" not in token_data:
+        raise RuntimeError(f"TikTok token refresh failed: {token_data}")
+
+    TOKEN_PATH.write_text(json.dumps(token_data), encoding="utf-8")
+    return token_data
+
+
+def _get_access_token() -> str:
+    config = _load_client_config()
+    client_key = config["client_key"]
+    client_secret = config["client_secret"]
+
+    if TOKEN_PATH.exists():
+        try:
+            stored = json.loads(TOKEN_PATH.read_text(encoding="utf-8"))
+            token_data = _refresh_token(client_key, client_secret, stored["refresh_token"])
+        except (requests.RequestException, KeyError, RuntimeError, json.JSONDecodeError) as e:
+            logger.warning("Could not refresh TikTok token, re-authorizing: %s", e)
+            token_data = _run_oauth_flow(client_key, client_secret)
+    else:
+        token_data = _run_oauth_flow(client_key, client_secret)
+
+    return token_data["access_token"]
+
+
+def build_caption(title: str, hashtags: str = DEFAULT_HASHTAGS) -> str:
+    return f"{title} {hashtags}".strip()
+
+
+def upload_to_tiktok(video_path: Path, caption: str) -> str:
+    """Upload a rendered clip to TikTok as a private (self-only) post via the Content Posting API."""
+    video_path = Path(video_path)
+    if not video_path.exists():
+        raise FileNotFoundError(f"Video not found: {video_path}")
+
+    access_token = _get_access_token()
+    video_size = video_path.stat().st_size
+
+    logger.info("Initializing TikTok upload for %s (%.1f MB)", video_path.name, video_size / 1_000_000)
+    try:
+        init_response = requests.post(
+            INIT_UPLOAD_URL,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json; charset=UTF-8",
+            },
+            json={
+                "post_info": {
+                    "title": caption,
+                    "privacy_level": DEFAULT_PRIVACY_LEVEL,
+                    "disable_duet": False,
+                    "disable_comment": False,
+                    "disable_stitch": False,
+                },
+                "source_info": {
+                    "source": "FILE_UPLOAD",
+                    "video_size": video_size,
+                    "chunk_size": min(video_size, CHUNK_SIZE),
+                    "total_chunk_count": max(1, -(-video_size // CHUNK_SIZE)),
+                },
+            },
+            timeout=30,
+        )
+        init_response.raise_for_status()
+    except requests.RequestException as e:
+        logger.error("TikTok upload init failed for %s: %s", video_path, e)
+        raise
+
+    init_data = init_response.json()
+    error = init_data.get("error", {})
+    if error and error.get("code") not in (None, "ok"):
+        raise RuntimeError(f"TikTok upload init failed: {error}")
+
+    publish_id = init_data["data"]["publish_id"]
+    upload_url = init_data["data"]["upload_url"]
+
+    logger.info("Uploading video bytes to TikTok (publish_id=%s)", publish_id)
+    try:
+        with open(video_path, "rb") as f:
+            video_bytes = f.read()
+
+        upload_response = requests.put(
+            upload_url,
+            headers={
+                "Content-Type": "video/mp4",
+                "Content-Range": f"bytes 0-{video_size - 1}/{video_size}",
+            },
+            data=video_bytes,
+            timeout=300,
+        )
+        upload_response.raise_for_status()
+    except requests.RequestException as e:
+        logger.error("TikTok video upload failed for %s: %s", video_path, e)
+        raise
+
+    logger.info("TikTok upload complete for %s: publish_id=%s", video_path.name, publish_id)
+    return publish_id
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Upload a single clip to TikTok.")
+    parser.add_argument("video", type=Path, help="Path to the rendered .mp4 clip")
+    parser.add_argument("--caption", required=True, help="Caption/title to post with")
+    args = parser.parse_args()
+
+    upload_to_tiktok(args.video, args.caption)
+
+
+if __name__ == "__main__":
+    main()

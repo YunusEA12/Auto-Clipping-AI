@@ -209,22 +209,26 @@ def build_filter_complex(
     subtitles = escape_subtitles_path(ass_path)
 
     if layout == LAYOUT_SPLIT_SCREEN:
+        # Both halves go through the identical pipeline: crop out the source region,
+        # then a "cover" fit — scale up with force_original_aspect_ratio=increase (so no
+        # axis is ever stretched) and crop the overhang — to land on EXACTLY output_w x
+        # half_h (1080x960 for the default 9:16 canvas). setsar=1 pins square pixels so
+        # a player never re-stretches either half after they're vstack'd together.
+        # Single stacking step (vstack), no separate canvas/overlay scaffolding.
         face_x, face_y, face_w, face_h = facecam_box
         game_x, game_y, game_w, game_h = gameplay_box
         half_h = output_h // 2
-        # scale with force_original_aspect_ratio=increase + crop = "cover" fit: fills the
-        # target box with a uniform scale (no stretch), then trims the overhanging edges.
-        # setsar=1 pins the pixel aspect ratio to square so neither half gets re-stretched
-        # by the encoder/player after vstack — the actual cause of the "flat"-looking half.
-        # vstack (not a bare overlay) is required here: overlay alone needs a full-size base
-        # canvas to place both halves onto, or the second half never appears.
+
+        def _cover_fit(label: str, x: int, y: int, w: int, h: int) -> str:
+            return (
+                f"[0:v]crop={w}:{h}:{x}:{y},"
+                f"scale={output_w}:{half_h}:force_original_aspect_ratio=increase,"
+                f"crop={output_w}:{half_h},setsar=1[{label}]"
+            )
+
         return (
-            f"[0:v]crop={face_w}:{face_h}:{face_x}:{face_y},"
-            f"scale={output_w}:{half_h}:force_original_aspect_ratio=increase,"
-            f"crop={output_w}:{half_h},setsar=1[face];"
-            f"[0:v]crop={game_w}:{game_h}:{game_x}:{game_y},"
-            f"scale={output_w}:{half_h}:force_original_aspect_ratio=increase,"
-            f"crop={output_w}:{half_h},setsar=1[game];"
+            f"{_cover_fit('face', face_x, face_y, face_w, face_h)};"
+            f"{_cover_fit('game', game_x, game_y, game_w, game_h)};"
             f"[face][game]vstack=inputs=2[stacked];"
             f"[stacked]subtitles='{subtitles}'[outv]"
         )
