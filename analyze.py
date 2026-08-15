@@ -16,9 +16,10 @@ logger = logging.getLogger(__name__)
 TEMP_DIR = Path("temp")
 TRANSCRIPTION_PATH = TEMP_DIR / "transcription.json"
 OUTPUT_PATH = TEMP_DIR / "clips.json"
+FEEDBACK_PATH = Path("feedback.json")
 MODEL = "gpt-4o-2024-08-06"
 
-SYSTEM_PROMPT = """You are an expert short-form video editor who finds viral moments in raw transcripts.
+BASE_SYSTEM_PROMPT = """You are an expert short-form video editor who finds viral moments in raw transcripts.
 Analyze the provided timestamped transcript and select the strongest standalone clips.
 
 Prioritize moments with:
@@ -52,6 +53,36 @@ def format_timestamp(seconds: float) -> str:
     return f"{int(minutes):02d}:{secs:04.1f}"
 
 
+def load_feedback_section() -> str:
+    if not FEEDBACK_PATH.exists():
+        return ""
+
+    try:
+        with open(FEEDBACK_PATH, "r", encoding="utf-8") as f:
+            feedback_entries = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Could not read %s, ignoring past feedback: %s", FEEDBACK_PATH, e)
+        return ""
+
+    if not feedback_entries:
+        return ""
+
+    lines = [
+        f"- (Clip \"{entry.get('clip_title', 'unbekannt')}\"): {entry.get('feedback', '')}"
+        for entry in feedback_entries
+    ]
+    logger.info("Loaded %d past feedback entries from %s", len(lines), FEEDBACK_PATH)
+    return (
+        "\n\nWICHTIGE REGELN AUS VERGANGENEM FEEDBACK "
+        "(du MUSST diese bei der Auswahl neuer Szenen zwingend berücksichtigen):\n"
+        + "\n".join(lines)
+    )
+
+
+def build_system_prompt() -> str:
+    return BASE_SYSTEM_PROMPT + load_feedback_section()
+
+
 def load_transcript(path: Path) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"Transcript not found: {path}")
@@ -70,13 +101,14 @@ def build_prompt_text(transcript: dict) -> str:
 
 def select_clips(transcript_text: str, model: str = MODEL) -> ClipSelection:
     client = OpenAI()
+    system_prompt = build_system_prompt()
 
     logger.info("Sending transcript to %s for scene selection", model)
     try:
         completion = client.chat.completions.parse(
             model=model,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Transcript:\n{transcript_text}"},
             ],
             response_format=ClipSelection,

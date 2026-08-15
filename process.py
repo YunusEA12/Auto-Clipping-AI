@@ -24,6 +24,10 @@ TRANSCRIPTION_PATH = TEMP_DIR / "transcription.json"
 OUTPUT_W = 1080
 OUTPUT_H = 1920
 
+LAYOUT_SPLIT_SCREEN = "split_screen"
+LAYOUT_BLUR_BACKGROUND = "blur_background"
+VALID_LAYOUTS = (LAYOUT_SPLIT_SCREEN, LAYOUT_BLUR_BACKGROUND)
+
 ASS_HEADER = """[Script Info]
 Title: Auto-generated subtitles
 ScriptType: v4.00+
@@ -119,30 +123,53 @@ def escape_subtitles_path(path: Path) -> str:
     return p
 
 
+def build_filter_complex(
+    layout: str,
+    ass_path: Path,
+    facecam_box: Tuple[int, int, int, int] | None = None,
+    gameplay_box: Tuple[int, int, int, int] | None = None,
+) -> str:
+    subtitles = escape_subtitles_path(ass_path)
+
+    if layout == LAYOUT_SPLIT_SCREEN:
+        face_x, face_y, face_w, face_h = facecam_box
+        game_x, game_y, game_w, game_h = gameplay_box
+        return (
+            f"[0:v]crop={face_w}:{face_h}:{face_x}:{face_y},"
+            f"scale={OUTPUT_W}:{OUTPUT_H // 2}[face];"
+            f"[0:v]crop={game_w}:{game_h}:{game_x}:{game_y},"
+            f"scale={OUTPUT_W}:{OUTPUT_H // 2}[game];"
+            f"[face][game]vstack=inputs=2[stacked];"
+            f"[stacked]subtitles='{subtitles}'[outv]"
+        )
+
+    if layout == LAYOUT_BLUR_BACKGROUND:
+        return (
+            f"[0:v]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
+            f"crop={OUTPUT_W}:{OUTPUT_H},boxblur=20:20[bg];"
+            f"[0:v]scale={OUTPUT_W}:-2[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[stacked];"
+            f"[stacked]subtitles='{subtitles}'[outv]"
+        )
+
+    raise ValueError(f"Unknown layout: {layout}")
+
+
 def render_clip(
     source_video: Path,
     clip: dict,
     ass_path: Path,
     index: int,
-    facecam_box: Tuple[int, int, int, int],
-    gameplay_box: Tuple[int, int, int, int],
+    layout: str,
+    facecam_box: Tuple[int, int, int, int] | None = None,
+    gameplay_box: Tuple[int, int, int, int] | None = None,
 ) -> Path:
     start = clip["start_time"]
     end = clip["end_time"]
     title_slug = slugify(clip["title"])
     output_path = OUTPUT_DIR / f"clip_{index}_{title_slug}.mp4"
 
-    face_x, face_y, face_w, face_h = facecam_box
-    game_x, game_y, game_w, game_h = gameplay_box
-
-    filter_complex = (
-        f"[0:v]crop={face_w}:{face_h}:{face_x}:{face_y},"
-        f"scale={OUTPUT_W}:{OUTPUT_H // 2}[face];"
-        f"[0:v]crop={game_w}:{game_h}:{game_x}:{game_y},"
-        f"scale={OUTPUT_W}:{OUTPUT_H // 2}[game];"
-        f"[face][game]vstack=inputs=2[stacked];"
-        f"[stacked]subtitles='{escape_subtitles_path(ass_path)}'[outv]"
-    )
+    filter_complex = build_filter_complex(layout, ass_path, facecam_box, gameplay_box)
 
     cmd = [
         "ffmpeg", "-y",
@@ -192,7 +219,10 @@ def find_source_video(explicit: Path | None) -> Path:
     return candidates[0]
 
 
-def process(source_video: Path | None = None) -> List[Path]:
+def process(source_video: Path | None = None, layout: str = LAYOUT_SPLIT_SCREEN) -> List[Path]:
+    if layout not in VALID_LAYOUTS:
+        raise ValueError(f"Unknown layout '{layout}', expected one of {VALID_LAYOUTS}")
+
     clips_data = load_json(CLIPS_PATH)
     transcript = load_json(TRANSCRIPTION_PATH)
     video_path = find_source_video(source_video)
@@ -204,15 +234,19 @@ def process(source_video: Path | None = None) -> List[Path]:
     OUTPUT_DIR.mkdir(exist_ok=True)
     TEMP_DIR.mkdir(exist_ok=True)
 
-    video_w, video_h = get_video_dimensions(video_path)
-    # Gameplay is treated as the bottom half of the source frame; facecam is detected per clip.
-    gameplay_box = (0, video_h // 2, video_w, video_h - video_h // 2)
+    gameplay_box = None
+    if layout == LAYOUT_SPLIT_SCREEN:
+        video_w, video_h = get_video_dimensions(video_path)
+        # Gameplay is treated as the bottom half of the source frame; facecam is detected per clip.
+        gameplay_box = (0, video_h // 2, video_w, video_h - video_h // 2)
 
     outputs = []
     for i, clip in enumerate(clips, start=1):
-        facecam_box = get_facecam_coordinates(str(video_path), clip["start_time"])
+        facecam_box = None
+        if layout == LAYOUT_SPLIT_SCREEN:
+            facecam_box = get_facecam_coordinates(str(video_path), clip["start_time"])
         ass_path = build_ass_for_clip(clip, transcript, i)
-        output_path = render_clip(video_path, clip, ass_path, i, facecam_box, gameplay_box)
+        output_path = render_clip(video_path, clip, ass_path, i, layout, facecam_box, gameplay_box)
         outputs.append(output_path)
 
     logger.info("Processing complete: %d clips rendered to %s", len(outputs), OUTPUT_DIR)
@@ -220,11 +254,12 @@ def process(source_video: Path | None = None) -> List[Path]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Render 9:16 split-screen clips with burned-in subtitles.")
+    parser = argparse.ArgumentParser(description="Render 9:16 clips with burned-in subtitles.")
     parser.add_argument("--video", type=Path, default=None, help="Path to the source video (auto-detected if omitted)")
+    parser.add_argument("--layout", choices=VALID_LAYOUTS, default=LAYOUT_SPLIT_SCREEN, help="Video layout mode")
     args = parser.parse_args()
 
-    process(args.video)
+    process(args.video, args.layout)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,12 @@ ENV_PATH = Path(".env")
 CLIENT_SECRET_PATH = Path("client_secret.json")
 CLIPS_PATH = Path("temp/clips.json")
 OUTPUT_DIR = Path("output")
+FEEDBACK_PATH = Path("feedback.json")
+
+LAYOUT_OPTIONS = {
+    "Split-Screen (Facecam + Gameplay)": process_module.LAYOUT_SPLIT_SCREEN,
+    "Blur-Background (Crayo-Style)": process_module.LAYOUT_BLUR_BACKGROUND,
+}
 
 st.set_page_config(page_title="Auto-Clipping AI", page_icon="🎬", layout="wide")
 st.title("🎬 Auto-Clipping AI")
@@ -44,11 +50,14 @@ with col_url:
 with col_upload:
     uploaded_file = st.file_uploader("...oder lokales Video hochladen", type=["mp4", "mkv"])
 
+layout_label = st.selectbox("Video-Layout wählen", list(LAYOUT_OPTIONS.keys()))
+selected_layout = LAYOUT_OPTIONS[layout_label]
+
 with st.expander("⚙️ Erweiterte Optionen"):
     do_upload = st.checkbox("Automatischer Upload zu YouTube", value=False)
 
 st.divider()
-start_clicked = st.button("🚀 Pipeline starten", type="primary", use_container_width=True)
+start_clicked = st.button("🚀 Pipeline starten", type="primary", width="stretch")
 
 
 def resolve_source_video() -> Path:
@@ -73,6 +82,23 @@ def resolve_source_video() -> Path:
         return Path(filename)
 
     raise ValueError("Bitte eine URL angeben oder ein Video hochladen.")
+
+
+def save_feedback(clip_title: str, feedback_text: str) -> None:
+    entries = []
+    if FEEDBACK_PATH.exists():
+        try:
+            with open(FEEDBACK_PATH, "r", encoding="utf-8") as f:
+                entries = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            entries = []
+
+    entries.append({"clip_title": clip_title, "feedback": feedback_text})
+
+    with open(FEEDBACK_PATH, "w", encoding="utf-8") as f:
+        json.dump(entries, f, ensure_ascii=False, indent=2)
+
+    logger.info("Saved feedback for clip '%s'", clip_title)
 
 
 if start_clicked:
@@ -103,7 +129,7 @@ if start_clicked:
             analyze.analyze()
 
             status.write("🎬 Schneide & rendere Clips...")
-            process_module.process(video_path)
+            process_module.process(video_path, layout=selected_layout)
 
             if do_upload:
                 status.write("☁️ Lade Clips zu YouTube hoch (privat)...")
@@ -133,6 +159,8 @@ else:
         index = int(match.group(1)) if match else None
         clip = clips_by_index.get(index)
 
+        clip_title = clip["title"] if clip else video_path.name
+
         col_video, col_info = st.columns([1, 1])
         with col_video:
             st.video(str(video_path))
@@ -144,4 +172,15 @@ else:
             else:
                 st.markdown(f"### {video_path.name}")
                 st.caption("Keine KI-Metadaten gefunden.")
+
+            feedback_text = st.text_input(
+                "Was war schlecht an diesem Clip?",
+                key=f"feedback_input_{video_path.name}",
+            )
+            if st.button("Feedback speichern", key=f"feedback_btn_{video_path.name}"):
+                if feedback_text:
+                    save_feedback(clip_title, feedback_text)
+                    st.success("Feedback gespeichert ✅")
+                else:
+                    st.warning("Bitte zuerst ein Feedback eingeben.")
         st.divider()
