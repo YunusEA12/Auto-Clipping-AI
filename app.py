@@ -39,7 +39,40 @@ LAYOUT_OPTIONS = {
 HIGHLIGHT_OPTIONS = process_module.HIGHLIGHT_COLORS
 
 st.set_page_config(page_title="Auto-Clipping AI", page_icon="🎬", layout="wide")
+
+# Base look (dark background, accent color, rounded cards) comes from .streamlit/config.toml.
+# This CSS only adds what the theme system can't: a gradient CTA button and a bit of card
+# elevation/hover polish. Selectors use `.st-key-*` (from each widget's own `key=`) instead of
+# Streamlit's internal DOM classes, which are not guaranteed stable across versions.
+st.markdown(
+    """
+    <style>
+    .st-key-analyze_btn button, .st-key-render_btn button {
+        background: linear-gradient(135deg, #8B5CF6 0%, #EC4899 100%);
+        border: none;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+        box-shadow: 0 4px 14px rgba(139, 92, 246, 0.35);
+    }
+    .st-key-analyze_btn button:hover, .st-key-render_btn button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 6px 20px rgba(139, 92, 246, 0.5);
+    }
+    .st-key-setup_card, .st-key-editor_card, [class*="st-key-clip_card_"] {
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+    }
+    h1 {
+        font-weight: 700;
+        letter-spacing: -0.5px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.title("🎬 Auto-Clipping AI")
+st.caption("Von der langen VOD zum geschnittenen, untertitelten Short — automatisiert.")
 
 with st.sidebar:
     st.header("Systemstatus")
@@ -58,31 +91,33 @@ with st.sidebar:
     else:
         st.error("❌ Fehlt — tiktok_client_secret.json (TikTok)")
 
-st.subheader("Video-Quelle")
-col_url, col_upload = st.columns(2)
-with col_url:
-    url = st.text_input("YouTube/Twitch-URL", placeholder="https://...")
-with col_upload:
-    uploaded_file = st.file_uploader("...oder lokales Video hochladen", type=["mp4", "mkv"])
+with st.container(border=True, key="setup_card"):
+    st.subheader("Video-Quelle")
+    col_url, col_upload = st.columns(2)
+    with col_url:
+        url = st.text_input("YouTube/Twitch-URL", placeholder="https://...")
+    with col_upload:
+        uploaded_file = st.file_uploader("...oder lokales Video hochladen", type=["mp4", "mkv"])
 
-st.subheader("🎛️ Individuelle Einstellungen")
-col_format, col_layout, col_highlight = st.columns(3)
-with col_format:
-    format_label = st.selectbox("Video-Format", list(FORMAT_OPTIONS.keys()))
-    selected_format = FORMAT_OPTIONS[format_label]
-with col_layout:
-    layout_label = st.selectbox("Layout", list(LAYOUT_OPTIONS.keys()))
-    selected_layout = LAYOUT_OPTIONS[layout_label]
-with col_highlight:
-    highlight_label = st.selectbox("Untertitel-Highlight", list(HIGHLIGHT_OPTIONS.keys()))
-    selected_highlight = HIGHLIGHT_OPTIONS[highlight_label]
+    st.subheader("🎛️ Individuelle Einstellungen")
+    col_format, col_layout, col_highlight = st.columns(3)
+    with col_format:
+        format_label = st.selectbox("Video-Format", list(FORMAT_OPTIONS.keys()))
+        selected_format = FORMAT_OPTIONS[format_label]
+    with col_layout:
+        layout_label = st.selectbox("Layout", list(LAYOUT_OPTIONS.keys()))
+        selected_layout = LAYOUT_OPTIONS[layout_label]
+    with col_highlight:
+        highlight_label = st.selectbox("Untertitel-Highlight", list(HIGHLIGHT_OPTIONS.keys()))
+        selected_highlight = HIGHLIGHT_OPTIONS[highlight_label]
 
-with st.expander("⚙️ Erweiterte Optionen"):
-    do_upload = st.checkbox("Automatischer Upload zu YouTube", value=False)
-    do_tiktok_upload = st.checkbox("🚀 Automatisch auf TikTok hochladen", value=False)
+    with st.expander("⚙️ Erweiterte Optionen"):
+        do_upload = st.checkbox("Automatischer Upload zu YouTube", value=False)
+        do_tiktok_upload = st.checkbox("🚀 Automatisch auf TikTok hochladen", value=False)
 
-st.divider()
-analyze_clicked = st.button("🔍 Transkribieren & Analysieren", type="primary", width="stretch")
+    analyze_clicked = st.button(
+        "🔍 Transkribieren & Analysieren", type="primary", width="stretch", key="analyze_btn"
+    )
 
 
 def resolve_source_video() -> Path:
@@ -170,34 +205,35 @@ if analyze_clicked:
         st.error(f"Fehler bei Transkription/Analyse: {e}")
 
 if st.session_state.get("transcript") is not None:
-    st.divider()
-    st.subheader("✏️ Untertitel bearbeiten")
-    st.caption("Korrigiere Tippfehler oder falsch erkannte Wörter (z. B. Gaming-Slang), bevor die Clips gerendert werden.")
+    with st.container(border=True, key="editor_card"):
+        st.subheader("✏️ Untertitel bearbeiten")
+        st.caption("Korrigiere Tippfehler oder falsch erkannte Wörter (z. B. Gaming-Slang), bevor die Clips gerendert werden.")
 
-    rows = build_editable_segments(st.session_state["transcript"], st.session_state["clips_data"])
-    if rows:
-        edited_df = st.data_editor(
-            pd.DataFrame(rows),
-            column_config={
-                "segment_index": None,
-                "clip_title": st.column_config.TextColumn("Clip", disabled=True),
-                "start": st.column_config.NumberColumn("Start (s)", disabled=True),
-                "end": st.column_config.NumberColumn("Ende (s)", disabled=True),
-                "text": st.column_config.TextColumn("Text", width="large"),
-            },
-            hide_index=True,
-            width="stretch",
-            key="subtitle_editor",
+        rows = build_editable_segments(st.session_state["transcript"], st.session_state["clips_data"])
+        if rows:
+            edited_df = st.data_editor(
+                pd.DataFrame(rows),
+                column_config={
+                    "segment_index": None,
+                    "clip_title": st.column_config.TextColumn("Clip", disabled=True),
+                    "start": st.column_config.NumberColumn("Start (s)", disabled=True),
+                    "end": st.column_config.NumberColumn("Ende (s)", disabled=True),
+                    "text": st.column_config.TextColumn("Text", width="large"),
+                },
+                hide_index=True,
+                width="stretch",
+                key="subtitle_editor",
+            )
+
+            if st.button("✅ Änderungen übernehmen"):
+                changed = apply_subtitle_edits(st.session_state["transcript"], edited_df)
+                st.success(f"{changed} Untertitel-Segment(e) aktualisiert ✅" if changed else "Keine Änderungen erkannt.")
+        else:
+            st.info("Keine Untertitel-Segmente für die ausgewählten Clips gefunden.")
+
+        render_clicked = st.button(
+            "🎬 Clips rendern", type="primary", width="stretch", key="render_btn"
         )
-
-        if st.button("✅ Änderungen übernehmen"):
-            changed = apply_subtitle_edits(st.session_state["transcript"], edited_df)
-            st.success(f"{changed} Untertitel-Segment(e) aktualisiert ✅" if changed else "Keine Änderungen erkannt.")
-    else:
-        st.info("Keine Untertitel-Segmente für die ausgewählten Clips gefunden.")
-
-    st.divider()
-    render_clicked = st.button("🎬 Clips rendern", type="primary", width="stretch")
 
     if render_clicked:
         if do_upload and not CLIENT_SECRET_PATH.exists():
@@ -255,48 +291,48 @@ else:
             clips_data = json.load(f)
         clips_by_index = {i: c for i, c in enumerate(clips_data.get("clips", []), start=1)}
 
-    for video_path in video_files:
+    for position, video_path in enumerate(video_files):
         match = re.match(r"clip_(\d+)_", video_path.name)
         index = int(match.group(1)) if match else None
         clip = clips_by_index.get(index)
 
         clip_title = clip["title"] if clip else video_path.name
 
-        col_video, col_info = st.columns([1, 1])
-        with col_video:
-            st.video(str(video_path))
-        with col_info:
-            if clip:
-                st.markdown(f"### {clip['title']}")
-                st.markdown(f"**Viral Score:** {clip['viral_score']}/10")
-                st.write(clip["hook_explanation"])
-            else:
-                st.markdown(f"### {video_path.name}")
-                st.caption("Keine KI-Metadaten gefunden.")
+        with st.container(border=True, key=f"clip_card_{position}"):
+            col_video, col_info = st.columns([1, 1])
+            with col_video:
+                st.video(str(video_path))
+            with col_info:
+                if clip:
+                    st.markdown(f"### {clip['title']}")
+                    st.markdown(f"**Viral Score:** {clip['viral_score']}/10")
+                    st.write(clip["hook_explanation"])
+                else:
+                    st.markdown(f"### {video_path.name}")
+                    st.caption("Keine KI-Metadaten gefunden.")
 
-            feedback_text = st.text_input(
-                "Was war schlecht an diesem Clip?",
-                key=f"feedback_input_{video_path.name}",
-            )
-            col_save, col_download, col_delete = st.columns(3)
-            with col_save:
-                if st.button("Feedback speichern", key=f"feedback_btn_{video_path.name}"):
-                    if feedback_text:
-                        analyze.save_feedback(clip_title, feedback_text)
-                        st.success("Feedback gespeichert ✅")
-                    else:
-                        st.warning("Bitte zuerst ein Feedback eingeben.")
-            with col_download:
-                st.download_button(
-                    label="📥 Herunterladen",
-                    data=video_path.read_bytes(),
-                    file_name=os.path.basename(video_path),
-                    mime="video/mp4",
-                    key=f"download_{video_path.name}",
+                feedback_text = st.text_input(
+                    "Was war schlecht an diesem Clip?",
+                    key=f"feedback_input_{video_path.name}",
                 )
-            with col_delete:
-                if st.button("🗑️ Clip löschen", key=f"del_{video_path.name}"):
-                    os.remove(video_path)
-                    logger.info("Deleted clip %s", video_path)
-                    st.rerun()
-        st.divider()
+                col_save, col_download, col_delete = st.columns(3)
+                with col_save:
+                    if st.button("Feedback speichern", key=f"feedback_btn_{video_path.name}"):
+                        if feedback_text:
+                            analyze.save_feedback(clip_title, feedback_text)
+                            st.success("Feedback gespeichert ✅")
+                        else:
+                            st.warning("Bitte zuerst ein Feedback eingeben.")
+                with col_download:
+                    st.download_button(
+                        label="📥 Herunterladen",
+                        data=video_path.read_bytes(),
+                        file_name=os.path.basename(video_path),
+                        mime="video/mp4",
+                        key=f"download_{video_path.name}",
+                    )
+                with col_delete:
+                    if st.button("🗑️ Clip löschen", key=f"del_{video_path.name}"):
+                        os.remove(video_path)
+                        logger.info("Deleted clip %s", video_path)
+                        st.rerun()

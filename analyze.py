@@ -17,6 +17,7 @@ TEMP_DIR = Path("temp")
 TRANSCRIPTION_PATH = TEMP_DIR / "transcription.json"
 OUTPUT_PATH = TEMP_DIR / "clips.json"
 FEEDBACK_PATH = Path("feedback.json")
+TOP_PERFORMERS_PATH = Path("top_performers.json")
 MODEL = "gpt-4o-mini"
 
 MIN_CLIP_DURATION = 10
@@ -108,8 +109,33 @@ def load_feedback_section() -> str:
     )
 
 
+def load_top_performers_section() -> str:
+    """Optional few-shot examples: title/hook pairs from clips that performed well on this
+    channel, so the LLM learns the house style instead of guessing at "viral" in the abstract."""
+    if not TOP_PERFORMERS_PATH.exists():
+        return ""
+
+    try:
+        with open(TOP_PERFORMERS_PATH, "r", encoding="utf-8") as f:
+            examples = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Could not read %s, skipping few-shot examples: %s", TOP_PERFORMERS_PATH, e)
+        return ""
+
+    if not examples:
+        return ""
+
+    lines = [f"- \"{ex.get('title', 'Untitled')}\": {ex.get('hook', '')}" for ex in examples]
+    logger.info("Loaded %d top-performer example(s) from %s", len(lines), TOP_PERFORMERS_PATH)
+    return (
+        "\n\nTOP-PERFORMING REFERENCE CLIPS ON THIS CHANNEL "
+        "(study why these hooks/titles worked and apply the same pattern when judging new clips):\n"
+        + "\n".join(lines)
+    )
+
+
 def build_system_prompt() -> str:
-    return BASE_SYSTEM_PROMPT + load_feedback_section()
+    return BASE_SYSTEM_PROMPT + load_top_performers_section() + load_feedback_section()
 
 
 def save_feedback(clip_title: str, feedback_text: str) -> None:
