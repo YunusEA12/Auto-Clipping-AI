@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import re
 import shutil
 from pathlib import Path
@@ -57,6 +58,7 @@ with col_url:
 with col_upload:
     uploaded_file = st.file_uploader("...oder lokales Video hochladen", type=["mp4", "mkv"])
 
+st.subheader("🎛️ Individuelle Einstellungen")
 col_format, col_layout, col_highlight = st.columns(3)
 with col_format:
     format_label = st.selectbox("Video-Format", list(FORMAT_OPTIONS.keys()))
@@ -197,10 +199,17 @@ else:
                 "Was war schlecht an diesem Clip?",
                 key=f"feedback_input_{video_path.name}",
             )
-            if st.button("Feedback speichern", key=f"feedback_btn_{video_path.name}"):
-                if feedback_text:
-                    save_feedback(clip_title, feedback_text)
-                    st.success("Feedback gespeichert ✅")
-                else:
-                    st.warning("Bitte zuerst ein Feedback eingeben.")
+            col_save, col_delete = st.columns(2)
+            with col_save:
+                if st.button("Feedback speichern", key=f"feedback_btn_{video_path.name}"):
+                    if feedback_text:
+                        save_feedback(clip_title, feedback_text)
+                        st.success("Feedback gespeichert ✅")
+                    else:
+                        st.warning("Bitte zuerst ein Feedback eingeben.")
+            with col_delete:
+                if st.button("🗑️ Clip löschen", key=f"del_{video_path.name}"):
+                    os.remove(video_path)
+                    logger.info("Deleted clip %s", video_path)
+                    st.rerun()
         st.divider()

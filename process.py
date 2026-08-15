@@ -162,13 +162,17 @@ def build_ass_for_clip(
         events.extend(_word_block_events(words, clip_start, clip_end, position_tag, highlight_color))
 
     if not events:
-        raise RuntimeError(f"No subtitle events found for clip {index} ({clip_start}-{clip_end}s)")
+        logger.warning(
+            "No transcribed words found for clip %d (%.2fs-%.2fs); writing subtitle-free .ass",
+            index, clip_start, clip_end,
+        )
 
     ass_path = TEMP_DIR / f"clip_{index}.ass"
     with open(ass_path, "w", encoding="utf-8") as f:
         f.write(ASS_HEADER_TEMPLATE.format(width=output_w, height=output_h))
-        f.write("\n".join(events))
-        f.write("\n")
+        if events:
+            f.write("\n".join(events))
+            f.write("\n")
 
     logger.info("Wrote subtitles: %s (%d lines)", ass_path, len(events))
     return ass_path

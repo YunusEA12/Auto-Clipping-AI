@@ -19,17 +19,35 @@ OUTPUT_PATH = TEMP_DIR / "clips.json"
 FEEDBACK_PATH = Path("feedback.json")
 MODEL = "gpt-4o-mini"
 
-BASE_SYSTEM_PROMPT = """You are an expert short-form video editor who finds viral moments in raw transcripts.
-Analyze the provided timestamped transcript and select the strongest standalone clips.
+MIN_CLIP_DURATION = 15
+MAX_CLIP_DURATION = 60
+MIN_CLIPS_TARGET = 5
+MAX_CLIPS_TARGET = 10
+
+BASE_SYSTEM_PROMPT = f"""You are a highly-paid TikTok & YouTube Shorts strategist. Your goal is absolute
+virality, extremely high watch-time, and perfect hooks. You have selected clips that generated
+millions of views for top creators.
+
+Analyze the ENTIRE provided timestamped transcript from start to finish and hunt for EVERY
+potentially viral moment — do not stop after the first few good ones, keep scanning the whole
+transcript.
 
 Prioritize moments with:
 - Humor (jokes, punchlines, funny reactions)
 - Strong emotion (surprise, excitement, anger, vulnerability)
 - Action or a clear narrative beat (a story with a setup and payoff)
-- A hook in the first few seconds that makes someone stop scrolling
+- Controversial, surprising, or bold statements
 
 Rules:
-- Each clip must be between 30 and 60 seconds long.
+- Volume: Depending on the video length, return at least {MIN_CLIPS_TARGET} and up to
+  {MAX_CLIPS_TARGET} clips. Scan the full transcript for distinct viral moments instead of
+  settling for a handful — a long transcript with few clips returned is a failure.
+- Length: Each clip MUST be at least {MIN_CLIP_DURATION} seconds and at most {MAX_CLIP_DURATION}
+  seconds long. Clips shorter than {MIN_CLIP_DURATION} seconds are useless and must never be
+  returned.
+- Hooks: Every clip MUST begin exactly on its hook — a controversial, exciting, or funny
+  statement that grabs attention in the first moment. Trim away dead air, silence, or filler
+  before the hook; do not start a clip mid-thought or with a slow lead-in.
 - start_time and end_time must be timestamps that actually occur in the transcript (in seconds).
 - Only select clips that work as a standalone moment without extra context.
 - Do not invent content that is not present in the transcript.
@@ -121,7 +139,18 @@ def select_clips(transcript_text: str, model: str = MODEL) -> ClipSelection:
     if parsed is None or not parsed.clips:
         raise RuntimeError("LLM returned no valid clips")
 
-    return parsed
+    valid_clips = [
+        clip for clip in parsed.clips
+        if MIN_CLIP_DURATION <= (clip.end_time - clip.start_time) <= MAX_CLIP_DURATION
+    ]
+    dropped = len(parsed.clips) - len(valid_clips)
+    if dropped:
+        logger.warning("Dropped %d clip(s) outside the %d-%ds duration bounds", dropped, MIN_CLIP_DURATION, MAX_CLIP_DURATION)
+
+    if not valid_clips:
+        raise RuntimeError("LLM returned no clips within the allowed duration bounds")
+
+    return ClipSelection(clips=valid_clips)
 
 
 def analyze(transcription_path: Path = TRANSCRIPTION_PATH, model: str = MODEL) -> Path:
