@@ -7,6 +7,7 @@ import re
 import shutil
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 import ingest
@@ -81,7 +82,7 @@ with st.expander("⚙️ Erweiterte Optionen"):
     do_tiktok_upload = st.checkbox("🚀 Automatisch auf TikTok hochladen", value=False)
 
 st.divider()
-start_clicked = st.button("🚀 Pipeline starten", type="primary", width="stretch")
+analyze_clicked = st.button("🔍 Transkribieren & Analysieren", type="primary", width="stretch")
 
 
 def resolve_source_video() -> Path:
@@ -97,7 +98,45 @@ def resolve_source_video() -> Path:
     raise ValueError("Bitte eine URL angeben oder ein Video hochladen.")
 
 
-if start_clicked:
+def build_editable_segments(transcript: dict, clips_data: dict) -> list:
+    """Segments that actually overlap a selected clip — the only ones that end up as subtitles."""
+    rows = []
+    for seg_idx, seg in enumerate(transcript.get("segments", [])):
+        for clip in clips_data.get("clips", []):
+            if seg["end"] <= clip["start_time"] or seg["start"] >= clip["end_time"]:
+                continue
+            rows.append(
+                {
+                    "segment_index": seg_idx,
+                    "clip_title": clip["title"],
+                    "start": round(seg["start"], 2),
+                    "end": round(seg["end"], 2),
+                    "text": seg["text"],
+                }
+            )
+            break
+    return rows
+
+
+def apply_subtitle_edits(transcript: dict, edited_df: pd.DataFrame) -> int:
+    """Write edited text back into the transcript. Edited segments lose their word-level
+    timestamps (no longer valid for arbitrary new text) and fall back to whole-segment
+    subtitle rendering, which process.py already handles safely."""
+    segments = transcript.get("segments", [])
+    changed = 0
+    for _, row in edited_df.iterrows():
+        idx = int(row["segment_index"])
+        new_text = str(row["text"]).strip()
+        if idx < len(segments) and new_text and new_text != segments[idx]["text"]:
+            segments[idx]["text"] = new_text
+            segments[idx]["words"] = []
+            changed += 1
+    if changed:
+        logger.info("%d subtitle segment(s) edited by user", changed)
+    return changed
+
+
+if analyze_clicked:
     if shutil.which("ffmpeg") is None:
         st.error("FFmpeg ist nicht installiert oder nicht im PATH. Bitte installiere es.")
         st.stop()
@@ -106,16 +145,8 @@ if start_clicked:
         st.error("❌ .env fehlt. Bitte lege eine .env-Datei mit deinem LLM-API-Key an, bevor du startest.")
         st.stop()
 
-    if do_upload and not CLIENT_SECRET_PATH.exists():
-        st.error("❌ client_secret.json fehlt. Wird für den automatischen YouTube-Upload benötigt.")
-        st.stop()
-
-    if do_tiktok_upload and not TIKTOK_CLIENT_CONFIG_PATH.exists():
-        st.error("❌ tiktok_client_secret.json fehlt. Wird für den automatischen TikTok-Upload benötigt.")
-        st.stop()
-
     try:
-        with st.status("Pipeline läuft...", expanded=True) as status:
+        with st.status("Transkription & Analyse laufen...", expanded=True) as status:
             status.write("📥 Lese Quellvideo...")
             video_path = resolve_source_video()
 
@@ -123,42 +154,92 @@ if start_clicked:
             wav_path = ingest.extract_audio(video_path)
 
             status.write("📝 Transkribiere (faster-whisper)...")
-            transcribe.transcribe(wav_path)
+            transcription_path = transcribe.transcribe(wav_path)
 
             status.write("🤖 KI-Analyse der Szenen...")
             analyze.analyze()
 
-            status.write("🎬 Schneide & rendere Clips...")
-            rendered_paths = process_module.process(
-                video_path,
-                layout=selected_layout,
-                video_format=selected_format,
-                highlight_color=selected_highlight,
-            )
+            st.session_state["video_path"] = str(video_path)
+            st.session_state["transcript"] = analyze.load_transcript(transcription_path)
+            with open(CLIPS_PATH, "r", encoding="utf-8") as f:
+                st.session_state["clips_data"] = json.load(f)
 
-            if do_upload:
-                status.write("☁️ Lade Clips zu YouTube hoch (privat)...")
-                upload_module.upload_all()
-
-            if do_tiktok_upload:
-                status.write("🚀 Lade Clips zu TikTok hoch (privat)...")
-                with open(CLIPS_PATH, "r", encoding="utf-8") as f:
-                    rendered_clips_data = json.load(f)
-                rendered_clips_by_index = {
-                    i: c for i, c in enumerate(rendered_clips_data.get("clips", []), start=1)
-                }
-                for rendered_path in rendered_paths:
-                    match = re.match(r"clip_(\d+)_", rendered_path.name)
-                    idx = int(match.group(1)) if match else None
-                    rendered_clip = rendered_clips_by_index.get(idx)
-                    title = rendered_clip["title"] if rendered_clip else rendered_path.stem
-                    caption = upload_tiktok.build_caption(title)
-                    upload_tiktok.upload_to_tiktok(rendered_path, caption)
-
-            status.update(label="Pipeline abgeschlossen ✅", state="complete")
+            status.update(label="Analyse abgeschlossen ✅ — jetzt Untertitel prüfen", state="complete")
     except Exception as e:
-        logger.exception("Pipeline failed")
-        st.error(f"Fehler in der Pipeline: {e}")
+        logger.exception("Analysis failed")
+        st.error(f"Fehler bei Transkription/Analyse: {e}")
+
+if st.session_state.get("transcript") is not None:
+    st.divider()
+    st.subheader("✏️ Untertitel bearbeiten")
+    st.caption("Korrigiere Tippfehler oder falsch erkannte Wörter (z. B. Gaming-Slang), bevor die Clips gerendert werden.")
+
+    rows = build_editable_segments(st.session_state["transcript"], st.session_state["clips_data"])
+    if rows:
+        edited_df = st.data_editor(
+            pd.DataFrame(rows),
+            column_config={
+                "segment_index": None,
+                "clip_title": st.column_config.TextColumn("Clip", disabled=True),
+                "start": st.column_config.NumberColumn("Start (s)", disabled=True),
+                "end": st.column_config.NumberColumn("Ende (s)", disabled=True),
+                "text": st.column_config.TextColumn("Text", width="large"),
+            },
+            hide_index=True,
+            width="stretch",
+            key="subtitle_editor",
+        )
+
+        if st.button("✅ Änderungen übernehmen"):
+            changed = apply_subtitle_edits(st.session_state["transcript"], edited_df)
+            st.success(f"{changed} Untertitel-Segment(e) aktualisiert ✅" if changed else "Keine Änderungen erkannt.")
+    else:
+        st.info("Keine Untertitel-Segmente für die ausgewählten Clips gefunden.")
+
+    st.divider()
+    render_clicked = st.button("🎬 Clips rendern", type="primary", width="stretch")
+
+    if render_clicked:
+        if do_upload and not CLIENT_SECRET_PATH.exists():
+            st.error("❌ client_secret.json fehlt. Wird für den automatischen YouTube-Upload benötigt.")
+            st.stop()
+
+        if do_tiktok_upload and not TIKTOK_CLIENT_CONFIG_PATH.exists():
+            st.error("❌ tiktok_client_secret.json fehlt. Wird für den automatischen TikTok-Upload benötigt.")
+            st.stop()
+
+        try:
+            with st.status("Clips werden gerendert...", expanded=True) as status:
+                status.write("🎬 Schneide & rendere Clips...")
+                rendered_paths = process_module.process(
+                    Path(st.session_state["video_path"]),
+                    layout=selected_layout,
+                    video_format=selected_format,
+                    highlight_color=selected_highlight,
+                    transcript=st.session_state["transcript"],
+                )
+
+                if do_upload:
+                    status.write("☁️ Lade Clips zu YouTube hoch (privat)...")
+                    upload_module.upload_all()
+
+                if do_tiktok_upload:
+                    status.write("🚀 Lade Clips zu TikTok hoch (privat)...")
+                    clips_by_index = {
+                        i: c for i, c in enumerate(st.session_state["clips_data"].get("clips", []), start=1)
+                    }
+                    for rendered_path in rendered_paths:
+                        match = re.match(r"clip_(\d+)_", rendered_path.name)
+                        idx = int(match.group(1)) if match else None
+                        rendered_clip = clips_by_index.get(idx)
+                        title = rendered_clip["title"] if rendered_clip else rendered_path.stem
+                        caption = upload_tiktok.build_caption(title)
+                        upload_tiktok.upload_to_tiktok(rendered_path, caption)
+
+                status.update(label="Rendering abgeschlossen ✅", state="complete")
+        except Exception as e:
+            logger.exception("Rendering failed")
+            st.error(f"Fehler beim Rendern: {e}")
 
 st.divider()
 st.subheader("Ergebnisse")

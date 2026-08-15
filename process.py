@@ -334,7 +334,11 @@ def process(
     layout: str = LAYOUT_SPLIT_SCREEN,
     video_format: str = DEFAULT_FORMAT,
     highlight_color: str = DEFAULT_HIGHLIGHT_COLOR,
+    transcript: dict | None = None,
 ) -> List[Path]:
+    """Render clips. `transcript`, if given, overrides temp/transcription.json — this is
+    how manually-edited subtitle text (e.g. from the Streamlit editor) reaches the renderer
+    instead of the raw Whisper output."""
     if layout not in SELECTABLE_LAYOUTS:
         raise ValueError(f"Unknown layout '{layout}', expected one of {SELECTABLE_LAYOUTS}")
     if video_format not in VIDEO_FORMATS:
@@ -343,7 +347,8 @@ def process(
     output_w, output_h = VIDEO_FORMATS[video_format]
 
     clips_data = load_json(CLIPS_PATH)
-    transcript = load_json(TRANSCRIPTION_PATH)
+    if transcript is None:
+        transcript = load_json(TRANSCRIPTION_PATH)
     video_path = find_source_video(source_video)
 
     clips = clips_data.get("clips", [])

@@ -29,6 +29,9 @@ def transcribe(audio_path: Path, model_size: str = MODEL_SIZE) -> Path:
 
     logger.info("Detected language '%s' (probability %.2f)", info.language, info.language_probability)
 
+    # Plain list of dicts (start/end/text/words) rather than faster-whisper's own objects —
+    # this is the editable contract: the Streamlit subtitle editor and process.py's renderer
+    # both read/write this exact JSON shape instead of anything tied to the transcription lib.
     result_segments = []
     for segment in segments:
         words = [
