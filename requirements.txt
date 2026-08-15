@@ -12,3 +12,4 @@ google-auth-oauthlib
 streamlit
 requests
 pandas
+numpy

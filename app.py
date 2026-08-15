@@ -191,8 +191,8 @@ if analyze_clicked:
             status.write("📝 Transkribiere (faster-whisper)...")
             transcription_path = transcribe.transcribe(wav_path)
 
-            status.write("🤖 KI-Analyse der Szenen...")
-            analyze.analyze()
+            status.write("🤖 KI-Analyse der Szenen (inkl. Emotional-Energy-Scoring)...")
+            analyze.analyze(transcription_path, audio_path=wav_path)
 
             st.session_state["video_path"] = str(video_path)
             st.session_state["transcript"] = analyze.load_transcript(transcription_path)
@@ -305,7 +305,9 @@ else:
             with col_info:
                 if clip:
                     st.markdown(f"### {clip['title']}")
-                    st.markdown(f"**Viral Score:** {clip['viral_score']}/10")
+                    col_viral, col_energy = st.columns(2)
+                    col_viral.markdown(f"**Viral Score:** {clip['viral_score']}/10")
+                    col_energy.markdown(f"**🔥 Energie-Level:** {clip.get('energy_rating', '–')}/10")
                     st.write(clip["hook_explanation"])
                 else:
                     st.markdown(f"### {video_path.name}")

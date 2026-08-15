@@ -3,9 +3,11 @@
 import argparse
 import json
 import logging
+import wave
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Tuple
 
+import numpy as np
 from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel, Field
@@ -24,6 +26,17 @@ MIN_CLIP_DURATION = 10
 MAX_CLIP_DURATION = 60
 MIN_CLIPS_TARGET = 5
 MAX_CLIPS_TARGET = 10
+
+ENERGY_WINDOW_SECONDS = 2.0
+ENERGY_SPIKE_THRESHOLD_STD = 1.5
+
+# High-engagement keywords (German + English, streaming/gaming-flavored) — clips containing
+# these words tend to mark genuine reactions rather than neutral narration.
+TRIGGER_WORDS = [
+    "krass", "wahnsinn", "digga", "alter", "geil", "hammer", "unglaublich",
+    "ehrlich", "kein bock", "warte", "bro", "was zur",
+    "insane", "crazy", "no way", "let's go", "oh my god", "clutch", "wild",
+]
 
 BASE_SYSTEM_PROMPT = f"""You are a highly-paid TikTok & YouTube Shorts strategist AND a master storyteller /
 content director. Your goal is absolute virality, extremely high watch-time, and perfect hooks —
@@ -60,6 +73,13 @@ Rules:
 - Payoff integrity: When you select a moment for its aha-moment, joke, hard fact, or emotional
   reaction, always include its full setup and its full payoff in the same clip — never split a
   setup from its punchline/answer across the clip boundary.
+- Energy priority: The user message may include a list of AUDIO ENERGY SPIKES — timestamps
+  where the raw audio loudness suddenly surged (shouting, laughing, a sudden reaction). Give
+  strong preference to clips where a high energy spike coincides with a strong content hook
+  (a question, tension, or reveal) over clips that only have content OR only have loud audio.
+- Trigger words: These words mark genuine high-engagement reactions rather than neutral
+  narration — prefer clips that contain one or more of them when otherwise similar:
+  {', '.join(TRIGGER_WORDS)}
 - start_time and end_time must be timestamps that actually occur in the transcript (in seconds).
 - Only select clips that work as a standalone moment without extra context.
 - Do not invent content that is not present in the transcript.
@@ -72,6 +92,11 @@ class Clip(BaseModel):
     title: str = Field(description="Short, catchy title for the clip")
     hook_explanation: str = Field(description="Why this moment is a good/viral hook")
     viral_score: int = Field(description="Viral potential score from 1 (low) to 10 (high)", ge=1, le=10)
+    energy_rating: int = Field(
+        description="Emotional/audio energy rating from 1 (calm) to 10 (explosive) — how much "
+        "the audio energy spikes and the content hook reinforce each other in this clip",
+        ge=1, le=10,
+    )
 
 
 class ClipSelection(BaseModel):
@@ -164,6 +189,106 @@ def load_transcript(path: Path) -> dict:
         return json.load(f)
 
 
+def calculate_energy_score(audio_segment: np.ndarray) -> float:
+    """Loudness VARIANCE within a chunk of PCM samples, not just raw volume.
+
+    Splits the segment into ~20 sub-frames, computes RMS loudness per sub-frame, and
+    returns the standard deviation across those sub-frames. A shout or burst of laughter
+    swings loudness up and down hard (high variance); steady narration stays flat (low
+    variance) even if it's not quiet — variance is a better "something just happened"
+    signal than raw volume alone.
+    """
+    if audio_segment.size == 0:
+        return 0.0
+
+    frame_size = max(1, len(audio_segment) // 20)
+    frame_rms = [
+        np.sqrt(np.mean(np.square(audio_segment[i:i + frame_size])))
+        for i in range(0, len(audio_segment), frame_size)
+        if len(audio_segment[i:i + frame_size]) > 0
+    ]
+    return float(np.std(frame_rms)) if frame_rms else 0.0
+
+
+def _load_pcm_samples(wav_path: Path) -> Tuple[np.ndarray, int]:
+    with wave.open(str(wav_path), "rb") as wf:
+        sample_rate = wf.getframerate()
+        raw = wf.readframes(wf.getnframes())
+    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float64)
+    return samples, sample_rate
+
+
+def scan_energy_windows(wav_path: Path, window_seconds: float = ENERGY_WINDOW_SECONDS) -> List[Tuple[float, float]]:
+    """Energy score for every fixed-size window across the whole track: [(timestamp, score), ...]."""
+    if not wav_path.exists():
+        logger.warning("Audio file not found for energy analysis: %s", wav_path)
+        return []
+
+    try:
+        samples, sample_rate = _load_pcm_samples(wav_path)
+    except (wave.Error, OSError) as e:
+        logger.warning("Could not read audio for energy analysis, skipping: %s", e)
+        return []
+
+    window_size = int(window_seconds * sample_rate)
+    if window_size <= 0 or samples.size == 0:
+        return []
+
+    return [
+        (start / sample_rate, calculate_energy_score(samples[start:start + window_size]))
+        for start in range(0, len(samples), window_size)
+    ]
+
+
+def find_energy_spikes(window_scores: List[Tuple[float, float]]) -> List[dict]:
+    """Statistical outlier windows — the audio equivalent of "a moment just happened"."""
+    if not window_scores:
+        return []
+
+    values = np.array([score for _, score in window_scores])
+    mean, std = float(values.mean()), float(values.std())
+    if std == 0:
+        return []
+
+    threshold = mean + ENERGY_SPIKE_THRESHOLD_STD * std
+    spikes = [
+        {"timestamp": round(ts, 1), "energy_score": round(score, 1)}
+        for ts, score in window_scores
+        if score > threshold
+    ]
+    logger.info("Detected %d energy spike(s) (mean=%.1f, std=%.1f)", len(spikes), mean, std)
+    return spikes
+
+
+def build_energy_prompt_section(spikes: List[dict]) -> str:
+    if not spikes:
+        return ""
+    lines = [f"[{format_timestamp(s['timestamp'])}] ENERGY SPIKE (intensity={s['energy_score']:.0f})" for s in spikes]
+    return (
+        "\n\nAUDIO ENERGY SPIKES (moments where the raw audio loudness suddenly surged — "
+        "likely shouting, laughing, or a sudden reaction; cross-reference these timestamps "
+        "with the transcript above):\n" + "\n".join(lines)
+    )
+
+
+def rate_clip_energy(clip: Clip, window_scores: List[Tuple[float, float]]) -> int:
+    """Real 1-10 energy rating for a clip's time range, measured from the actual audio
+    rather than trusting the LLM's own guess — the peak windowed score inside the clip,
+    normalized against the full track's observed range."""
+    if not window_scores:
+        return clip.energy_rating
+
+    all_scores = [score for _, score in window_scores]
+    clip_scores = [score for ts, score in window_scores if clip.start_time <= ts < clip.end_time]
+
+    lo, hi = min(all_scores), max(all_scores)
+    if not clip_scores or hi == lo:
+        return clip.energy_rating
+
+    normalized = (max(clip_scores) - lo) / (hi - lo)
+    return max(1, min(10, round(1 + normalized * 9)))
+
+
 def build_prompt_text(transcript: dict) -> str:
     segments = transcript.get("segments", [])
     if not segments:
@@ -173,9 +298,15 @@ def build_prompt_text(transcript: dict) -> str:
     return "\n".join(lines)
 
 
-def select_clips(transcript_text: str, model: str = MODEL) -> ClipSelection:
+def select_clips(
+    transcript_text: str,
+    energy_spikes: Optional[List[dict]] = None,
+    window_scores: Optional[List[Tuple[float, float]]] = None,
+    model: str = MODEL,
+) -> ClipSelection:
     client = OpenAI()
     system_prompt = build_system_prompt()
+    energy_section = build_energy_prompt_section(energy_spikes or [])
 
     logger.info("Sending transcript to %s for scene selection", model)
     try:
@@ -183,7 +314,7 @@ def select_clips(transcript_text: str, model: str = MODEL) -> ClipSelection:
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Transcript:\n{transcript_text}"},
+                {"role": "user", "content": f"Transcript:\n{transcript_text}{energy_section}"},
             ],
             response_format=ClipSelection,
         )
@@ -202,6 +333,12 @@ def select_clips(transcript_text: str, model: str = MODEL) -> ClipSelection:
     dropped = len(parsed.clips) - len(valid_clips)
     if dropped:
         logger.warning("Dropped %d clip(s) outside the %d-%ds duration bounds", dropped, MIN_CLIP_DURATION, MAX_CLIP_DURATION)
+
+    if window_scores:
+        valid_clips = [
+            clip.model_copy(update={"energy_rating": rate_clip_energy(clip, window_scores)})
+            for clip in valid_clips
+        ]
 
     # No raise here on empty: the caller (analyze()) has the raw transcript and can fall
     # back to the longest available segment instead of failing the whole pipeline.
@@ -250,17 +387,39 @@ def find_longest_segment_fallback(transcript: dict) -> "ClipSelection":
         title="Highlight-Moment",
         hook_explanation="Automatisch ausgewählt: längstes verfügbares zusammenhängendes Segment (Fallback, da die KI keine passenden Clips fand).",
         viral_score=5,
+        energy_rating=5,
     )
     return ClipSelection(clips=[fallback_clip])
 
 
-def analyze(transcription_path: Path = TRANSCRIPTION_PATH, model: str = MODEL) -> Path:
+def find_audio_path() -> Optional[Path]:
+    """Best-effort discovery of the extracted .wav when the caller doesn't pass one explicitly."""
+    candidates = list(TEMP_DIR.glob("*.wav"))
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        logger.warning("Multiple .wav files found in %s, skipping energy analysis: %s", TEMP_DIR, candidates)
+    return None
+
+
+def analyze(transcription_path: Path = TRANSCRIPTION_PATH, model: str = MODEL, audio_path: Optional[Path] = None) -> Path:
     load_dotenv()
 
     transcript = load_transcript(transcription_path)
     transcript_text = build_prompt_text(transcript)
 
-    selection = select_clips(transcript_text, model)
+    if audio_path is None:
+        audio_path = find_audio_path()
+
+    window_scores: List[Tuple[float, float]] = []
+    energy_spikes: List[dict] = []
+    if audio_path is not None:
+        window_scores = scan_energy_windows(audio_path)
+        energy_spikes = find_energy_spikes(window_scores)
+    else:
+        logger.info("No audio file available; skipping emotional-energy scoring")
+
+    selection = select_clips(transcript_text, energy_spikes, window_scores, model)
     if not selection.clips:
         selection = find_longest_segment_fallback(transcript)
 
@@ -276,9 +435,10 @@ def main():
     parser = argparse.ArgumentParser(description="Select viral clips from a transcript via an LLM.")
     parser.add_argument("transcript", type=Path, nargs="?", default=TRANSCRIPTION_PATH, help="Path to transcription.json")
     parser.add_argument("--model", default=MODEL, help="LLM model name")
+    parser.add_argument("--audio", type=Path, default=None, help="Path to the extracted .wav (auto-detected if omitted)")
     args = parser.parse_args()
 
-    analyze(args.transcript, args.model)
+    analyze(args.transcript, args.model, args.audio)
 
 
 if __name__ == "__main__":
