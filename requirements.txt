@@ -4,3 +4,5 @@ faster-whisper
 python-dotenv
 pydantic
 openai
+opencv-python-headless
+mediapipe

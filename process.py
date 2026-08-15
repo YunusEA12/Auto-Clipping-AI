@@ -6,7 +6,11 @@ import logging
 import re
 import subprocess
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
+
+import cv2
+
+from vision import get_facecam_coordinates
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -19,18 +23,6 @@ TRANSCRIPTION_PATH = TEMP_DIR / "transcription.json"
 # 9:16 output canvas
 OUTPUT_W = 1080
 OUTPUT_H = 1920
-
-# Crop regions read from the SOURCE video's own coordinate space.
-# Adjust these to match where the facecam and gameplay actually sit in your source footage.
-FACECAM_X = 0
-FACECAM_Y = 0
-FACECAM_W = 1920
-FACECAM_H = 540
-
-GAMEPLAY_X = 0
-GAMEPLAY_Y = 540
-GAMEPLAY_W = 1920
-GAMEPLAY_H = 540
 
 ASS_HEADER = """[Script Info]
 Title: Auto-generated subtitles
@@ -106,22 +98,47 @@ def build_ass_for_clip(clip: dict, transcript: dict, index: int) -> Path:
     return ass_path
 
 
+def get_video_dimensions(video_path: Path) -> Tuple[int, int]:
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+    try:
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    finally:
+        cap.release()
+
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"Could not determine dimensions for video: {video_path}")
+    return width, height
+
+
 def escape_subtitles_path(path: Path) -> str:
     p = str(path.resolve()).replace("\\", "/")
     p = p.replace(":", "\\:")
     return p
 
 
-def render_clip(source_video: Path, clip: dict, ass_path: Path, index: int) -> Path:
+def render_clip(
+    source_video: Path,
+    clip: dict,
+    ass_path: Path,
+    index: int,
+    facecam_box: Tuple[int, int, int, int],
+    gameplay_box: Tuple[int, int, int, int],
+) -> Path:
     start = clip["start_time"]
     end = clip["end_time"]
     title_slug = slugify(clip["title"])
     output_path = OUTPUT_DIR / f"clip_{index}_{title_slug}.mp4"
 
+    face_x, face_y, face_w, face_h = facecam_box
+    game_x, game_y, game_w, game_h = gameplay_box
+
     filter_complex = (
-        f"[0:v]crop={FACECAM_W}:{FACECAM_H}:{FACECAM_X}:{FACECAM_Y},"
+        f"[0:v]crop={face_w}:{face_h}:{face_x}:{face_y},"
         f"scale={OUTPUT_W}:{OUTPUT_H // 2}[face];"
-        f"[0:v]crop={GAMEPLAY_W}:{GAMEPLAY_H}:{GAMEPLAY_X}:{GAMEPLAY_Y},"
+        f"[0:v]crop={game_w}:{game_h}:{game_x}:{game_y},"
         f"scale={OUTPUT_W}:{OUTPUT_H // 2}[game];"
         f"[face][game]vstack=inputs=2[stacked];"
         f"[stacked]subtitles='{escape_subtitles_path(ass_path)}'[outv]"
@@ -187,10 +204,15 @@ def process(source_video: Path | None = None) -> List[Path]:
     OUTPUT_DIR.mkdir(exist_ok=True)
     TEMP_DIR.mkdir(exist_ok=True)
 
+    video_w, video_h = get_video_dimensions(video_path)
+    # Gameplay is treated as the bottom half of the source frame; facecam is detected per clip.
+    gameplay_box = (0, video_h // 2, video_w, video_h - video_h // 2)
+
     outputs = []
     for i, clip in enumerate(clips, start=1):
+        facecam_box = get_facecam_coordinates(str(video_path), clip["start_time"])
         ass_path = build_ass_for_clip(clip, transcript, i)
-        output_path = render_clip(video_path, clip, ass_path, i)
+        output_path = render_clip(video_path, clip, ass_path, i, facecam_box, gameplay_box)
         outputs.append(output_path)
 
     logger.info("Processing complete: %d clips rendered to %s", len(outputs), OUTPUT_DIR)
