@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import shutil
 from pathlib import Path
 
 import streamlit as st
@@ -37,12 +38,16 @@ with st.sidebar:
         st.error("❌ Fehlt — client_secret.json (YouTube)")
 
 st.subheader("Video-Quelle")
-url = st.text_input("YouTube/Twitch-URL", placeholder="https://...")
-uploaded_file = st.file_uploader("...oder lokales Video hochladen", type=["mp4", "mkv"])
+col_url, col_upload = st.columns(2)
+with col_url:
+    url = st.text_input("YouTube/Twitch-URL", placeholder="https://...")
+with col_upload:
+    uploaded_file = st.file_uploader("...oder lokales Video hochladen", type=["mp4", "mkv"])
 
-st.subheader("Optionen")
-do_upload = st.checkbox("Automatischer Upload zu YouTube", value=False)
+with st.expander("⚙️ Erweiterte Optionen"):
+    do_upload = st.checkbox("Automatischer Upload zu YouTube", value=False)
 
+st.divider()
 start_clicked = st.button("🚀 Pipeline starten", type="primary", use_container_width=True)
 
 
@@ -71,6 +76,18 @@ def resolve_source_video() -> Path:
 
 
 if start_clicked:
+    if shutil.which("ffmpeg") is None:
+        st.error("FFmpeg ist nicht installiert oder nicht im PATH. Bitte installiere es.")
+        st.stop()
+
+    if not ENV_PATH.exists():
+        st.error("❌ .env fehlt. Bitte lege eine .env-Datei mit deinem LLM-API-Key an, bevor du startest.")
+        st.stop()
+
+    if do_upload and not CLIENT_SECRET_PATH.exists():
+        st.error("❌ client_secret.json fehlt. Wird für den automatischen YouTube-Upload benötigt.")
+        st.stop()
+
     try:
         with st.status("Pipeline läuft...", expanded=True) as status:
             status.write("📥 Lese Quellvideo...")
@@ -116,10 +133,15 @@ else:
         index = int(match.group(1)) if match else None
         clip = clips_by_index.get(index)
 
-        st.video(str(video_path))
-        if clip:
-            st.markdown(f"**{clip['title']}** — Viral Score: {clip['viral_score']}/10")
-            st.caption(clip["hook_explanation"])
-        else:
-            st.markdown(f"**{video_path.name}**")
+        col_video, col_info = st.columns([1, 1])
+        with col_video:
+            st.video(str(video_path))
+        with col_info:
+            if clip:
+                st.markdown(f"### {clip['title']}")
+                st.markdown(f"**Viral Score:** {clip['viral_score']}/10")
+                st.write(clip["hook_explanation"])
+            else:
+                st.markdown(f"### {video_path.name}")
+                st.caption("Keine KI-Metadaten gefunden.")
         st.divider()
