@@ -19,7 +19,7 @@ OUTPUT_PATH = TEMP_DIR / "clips.json"
 FEEDBACK_PATH = Path("feedback.json")
 MODEL = "gpt-4o-mini"
 
-MIN_CLIP_DURATION = 15
+MIN_CLIP_DURATION = 10
 MAX_CLIP_DURATION = 60
 MIN_CLIPS_TARGET = 5
 MAX_CLIPS_TARGET = 10
@@ -166,10 +166,55 @@ def select_clips(transcript_text: str, model: str = MODEL) -> ClipSelection:
     if dropped:
         logger.warning("Dropped %d clip(s) outside the %d-%ds duration bounds", dropped, MIN_CLIP_DURATION, MAX_CLIP_DURATION)
 
-    if not valid_clips:
-        raise RuntimeError("LLM returned no clips within the allowed duration bounds")
-
+    # No raise here on empty: the caller (analyze()) has the raw transcript and can fall
+    # back to the longest available segment instead of failing the whole pipeline.
     return ClipSelection(clips=valid_clips)
+
+
+def find_longest_segment_fallback(transcript: dict) -> "ClipSelection":
+    """Pick the longest contiguous run of transcript segments (10-60s) as a single clip.
+
+    Used when the LLM returns zero clips within the duration bounds — e.g. a short test
+    chunk with no single moment the model considered strong enough — so the pipeline can
+    still produce something instead of failing outright.
+    """
+    segments = transcript.get("segments", [])
+    if not segments:
+        raise RuntimeError("Cannot build a fallback clip: transcript has no segments")
+
+    # Segments separated by more than this many seconds of silence are not "contiguous" —
+    # merging across a real gap would splice unrelated, disconnected moments into one clip.
+    max_gap_seconds = 1.5
+
+    best = None  # (start_idx, end_idx, duration)
+    for i in range(len(segments)):
+        start = segments[i]["start"]
+        for j in range(i, len(segments)):
+            if j > i and (segments[j]["start"] - segments[j - 1]["end"]) > max_gap_seconds:
+                break  # gap breaks contiguity; extending further would no longer be one span
+            duration = segments[j]["end"] - start
+            if duration > MAX_CLIP_DURATION:
+                break
+            if duration >= MIN_CLIP_DURATION and (best is None or duration > best[2]):
+                best = (i, j, duration)
+
+    if best is None:
+        raise RuntimeError(
+            f"No contiguous transcript span of at least {MIN_CLIP_DURATION}s was found for a fallback clip"
+        )
+
+    i, j, duration = best
+    logger.warning(
+        "LLM returned no clips within bounds; falling back to the longest available segment (%.1fs)", duration
+    )
+    fallback_clip = Clip(
+        start_time=segments[i]["start"],
+        end_time=segments[j]["end"],
+        title="Highlight-Moment",
+        hook_explanation="Automatisch ausgewählt: längstes verfügbares zusammenhängendes Segment (Fallback, da die KI keine passenden Clips fand).",
+        viral_score=5,
+    )
+    return ClipSelection(clips=[fallback_clip])
 
 
 def analyze(transcription_path: Path = TRANSCRIPTION_PATH, model: str = MODEL) -> Path:
@@ -179,6 +224,8 @@ def analyze(transcription_path: Path = TRANSCRIPTION_PATH, model: str = MODEL) -
     transcript_text = build_prompt_text(transcript)
 
     selection = select_clips(transcript_text, model)
+    if not selection.clips:
+        selection = find_longest_segment_fallback(transcript)
 
     TEMP_DIR.mkdir(exist_ok=True)
     with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
