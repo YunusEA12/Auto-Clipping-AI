@@ -234,12 +234,17 @@ def build_filter_complex(
         )
 
     if layout == LAYOUT_BLUR_BACKGROUND:
+        # setsar=1 right at the source reference (not just on the outputs) so a source
+        # with non-square sample-aspect-ratio metadata can never throw off the "-2"
+        # auto-height math below — the likely cause of an unexpectedly tiny foreground.
         # Blur a heavily downscaled copy, then upscale — far cheaper than blurring full-res.
         small_w, small_h = output_w // 4, output_h // 4
         return (
-            f"[0:v]scale={small_w}:{small_h}:force_original_aspect_ratio=increase,"
+            f"[0:v]setsar=1,scale={small_w}:{small_h}:force_original_aspect_ratio=increase,"
             f"crop={small_w}:{small_h},boxblur=20:20,scale={output_w}:{output_h},setsar=1[bg];"
-            f"[0:v]scale={output_w}:-2,setsar=1[fg];"
+            # Full width, height preserved proportionally and centered — the sharp
+            # foreground stays the dominant element instead of a small lost strip.
+            f"[0:v]setsar=1,scale={output_w}:-2,setsar=1[fg];"
             f"[bg][fg]overlay=(W-w)/2:(H-h)/2[stacked];"
             f"[stacked]subtitles='{subtitles}'[outv]"
         )
@@ -351,8 +356,12 @@ def process(
     gameplay_box = None
     if layout in (LAYOUT_SPLIT_SCREEN, LAYOUT_AUTO):
         video_w, video_h = get_video_dimensions(video_path)
-        # Gameplay is treated as the bottom half of the source frame; facecam is detected per clip.
-        gameplay_box = (0, video_h // 2, video_w, video_h - video_h // 2)
+        # Gameplay uses the FULL source frame (not a fixed bottom-half slice): a fixed
+        # bottom-half box would frequently overlap the actual facecam region — streamer
+        # webcams are commonly positioned in a bottom corner — causing both halves to
+        # show near-identical content. The full frame is always visually distinct from
+        # the zoomed-in facecam crop above it, so the two halves never duplicate.
+        gameplay_box = (0, 0, video_w, video_h)
 
     outputs = []
     for i, clip in enumerate(clips, start=1):

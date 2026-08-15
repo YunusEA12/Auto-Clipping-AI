@@ -43,17 +43,20 @@ def _ensure_model() -> Path:
     return MODEL_PATH
 
 
-def _fallback_box(frame_w: int, frame_h: int) -> tuple[int, int, int, int]:
-    """Top-center crop with a moderate aspect ratio, used when no face is detected.
+FALLBACK_CORNER = "top_right"  # or "top_left" — where streamer webcams classically sit
 
-    A full-width/half-height slice is very wide (e.g. ~3.55:1 for a 1920x1080 source).
-    Cover-fitting that into a near-square split-screen half (1080:960, ~1.125:1) forces
-    an extreme zoom that keeps only a sliver of the width — the "flat"/broken-looking
-    facecam half. Capping the width keeps the crop close to a normal webcam aspect.
+
+def _fallback_box(frame_w: int, frame_h: int) -> tuple[int, int, int, int]:
+    """Top-left or top-right screen quadrant, used when no face is detected.
+
+    Streamer webcams classically sit in a corner of the frame, not smeared across
+    the full width — a full-width slice cover-fit into a near-square split-screen
+    half forces an extreme zoom (the "flat"/broken-looking facecam half). A single
+    quadrant keeps a moderate, corner-anchored aspect close to a normal webcam.
     """
+    w = frame_w // 2
     h = frame_h // 2
-    w = min(frame_w, int(h * 1.5))
-    x = (frame_w - w) // 2
+    x = frame_w - w if FALLBACK_CORNER == "top_right" else 0
     return x, 0, w, h
 
 
@@ -100,7 +103,13 @@ def has_face(video_path: str, timestamp: float) -> bool:
 
 
 def get_facecam_coordinates(video_path: str, timestamp: float) -> tuple[int, int, int, int]:
-    """Detect a face at `timestamp` seconds into `video_path` and return a padded (x, y, w, h) box in pixels."""
+    """Detect a face at `timestamp` seconds into `video_path` and return a padded (x, y, w, h) box in pixels.
+
+    Detection runs once, at the clip's start_time, and that single box is used as a
+    static crop for the whole clip's render — so there is no per-frame jitter or
+    flicker within a clip by construction (no frame-by-frame re-detection to disagree
+    with itself).
+    """
     raw_box, frame_w, frame_h = _detect_raw_box(video_path, timestamp)
 
     if raw_box is None:
