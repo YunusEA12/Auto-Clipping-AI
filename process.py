@@ -6,7 +6,7 @@ import logging
 import re
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 import cv2
 
@@ -357,16 +357,17 @@ def resolve_layout(layout: str, video_path: Path, clip_start: float) -> str:
     return resolved
 
 
-def process(
+def process_clips_iter(
     source_video: Path | None = None,
     layout: str = LAYOUT_SPLIT_SCREEN,
     video_format: str = DEFAULT_FORMAT,
     highlight_color: str = DEFAULT_HIGHLIGHT_COLOR,
     transcript: dict | None = None,
-) -> List[Path]:
-    """Render clips. `transcript`, if given, overrides temp/transcription.json — this is
-    how manually-edited subtitle text (e.g. from the Streamlit editor) reaches the renderer
-    instead of the raw Whisper output."""
+) -> Iterator[Tuple[int, int, dict, Path]]:
+    """Render clips one at a time, yielding (position, total, clip, output_path) as each one
+    finishes — lets a caller (e.g. the Streamlit UI) show real per-clip progress instead of
+    blocking on the whole batch. `process()` below is a thin wrapper for callers that just
+    want the final list. `transcript`, if given, overrides temp/transcription.json."""
     if layout not in SELECTABLE_LAYOUTS:
         raise ValueError(f"Unknown layout '{layout}', expected one of {SELECTABLE_LAYOUTS}")
     if video_format not in VIDEO_FORMATS:
@@ -396,7 +397,7 @@ def process(
         # the zoomed-in facecam crop above it, so the two halves never duplicate.
         gameplay_box = (0, 0, video_w, video_h)
 
-    outputs = []
+    total = len(clips)
     for i, clip in enumerate(clips, start=1):
         effective_layout = resolve_layout(layout, video_path, clip["start_time"])
 
@@ -408,10 +409,26 @@ def process(
         output_path = render_clip(
             video_path, clip, ass_path, i, effective_layout, output_w, output_h, facecam_box, gameplay_box
         )
-        outputs.append(output_path)
+        yield i, total, clip, output_path
 
-    logger.info("Processing complete: %d clips rendered to %s", len(outputs), OUTPUT_DIR)
-    return outputs
+    logger.info("Processing complete: %d clips rendered to %s", total, OUTPUT_DIR)
+
+
+def process(
+    source_video: Path | None = None,
+    layout: str = LAYOUT_SPLIT_SCREEN,
+    video_format: str = DEFAULT_FORMAT,
+    highlight_color: str = DEFAULT_HIGHLIGHT_COLOR,
+    transcript: dict | None = None,
+) -> List[Path]:
+    """Render all clips and return the output paths. See process_clips_iter() for a
+    version that yields progress per clip instead of blocking until everything is done."""
+    return [
+        output_path
+        for _, _, _, output_path in process_clips_iter(
+            source_video, layout, video_format, highlight_color, transcript
+        )
+    ]
 
 
 def main():
