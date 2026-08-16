@@ -347,7 +347,7 @@ def main():
     parser.add_argument(
         "--auto-upload", action="store_true",
         help="After auto-rendering, also upload each clip to TikTok via browser automation "
-        "(requires --auto-render, and a saved login from upload_tiktok_browser_login.py)",
+        "(requires --auto-render, and exported session cookies in tiktok_cookies.json)",
     )
     parser.add_argument(
         "--max-workers", type=int, default=DEFAULT_MAX_WORKERS,

@@ -12,4 +12,5 @@ token.json
 feedback.json
 tiktok_client_secret.json
 tiktok_token.json
+tiktok_cookies.json
 .tiktok_browser_profile/

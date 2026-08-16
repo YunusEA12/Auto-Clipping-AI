@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 ENV_PATH = Path(".env")
 CLIENT_SECRET_PATH = Path("client_secret.json")
-TIKTOK_BROWSER_PROFILE = upload_tiktok_browser.USER_DATA_DIR
+TIKTOK_COOKIES_PATH = upload_tiktok_browser.COOKIES_PATH
 TEMP_DIR = Path("temp")
 OUTPUT_DIR = Path("output")
 
@@ -89,10 +89,10 @@ with st.sidebar:
     else:
         st.error("❌ Fehlt — client_secret.json (YouTube)")
 
-    if TIKTOK_BROWSER_PROFILE.exists():
-        st.success("✅ Bereit — TikTok-Browser-Login gespeichert")
+    if TIKTOK_COOKIES_PATH.exists():
+        st.success("✅ Bereit — tiktok_cookies.json gefunden")
     else:
-        st.warning("⚠️ TikTok-Browser-Login fehlt (einmalig `python upload_tiktok_browser_login.py` ausführen)")
+        st.warning("⚠️ tiktok_cookies.json fehlt (Session-Cookies für den TikTok-Upload-Bot exportieren)")
 
     st.divider()
     st.header("🕴️ Streamer-Mitarbeiter")
@@ -160,10 +160,10 @@ if process_clicked:
         st.error("❌ client_secret.json fehlt. Wird für den automatischen YouTube-Upload benötigt.")
         st.stop()
 
-    if do_tiktok_upload and not TIKTOK_BROWSER_PROFILE.exists():
+    if do_tiktok_upload and not TIKTOK_COOKIES_PATH.exists():
         st.error(
-            "❌ Kein TikTok-Browser-Login gefunden. Führe einmalig "
-            "`python upload_tiktok_browser_login.py` aus, bevor du den Auto-Upload aktivierst."
+            "❌ tiktok_cookies.json fehlt. Exportiere deine TikTok-Session-Cookies in diese "
+            "Datei, bevor du den Auto-Upload aktivierst."
         )
         st.stop()
 
