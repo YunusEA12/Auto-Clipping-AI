@@ -17,14 +17,14 @@ import profiles
 import transcribe
 import analyze
 import upload as upload_module
-import upload_tiktok
+import upload_tiktok_browser
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 ENV_PATH = Path(".env")
 CLIENT_SECRET_PATH = Path("client_secret.json")
-TIKTOK_CLIENT_CONFIG_PATH = Path("tiktok_client_secret.json")
+TIKTOK_BROWSER_PROFILE = upload_tiktok_browser.USER_DATA_DIR
 TEMP_DIR = Path("temp")
 OUTPUT_DIR = Path("output")
 
@@ -89,10 +89,10 @@ with st.sidebar:
     else:
         st.error("❌ Fehlt — client_secret.json (YouTube)")
 
-    if TIKTOK_CLIENT_CONFIG_PATH.exists():
-        st.success("✅ Bereit — tiktok_client_secret.json (TikTok)")
+    if TIKTOK_BROWSER_PROFILE.exists():
+        st.success("✅ Bereit — TikTok-Browser-Login gespeichert")
     else:
-        st.error("❌ Fehlt — tiktok_client_secret.json (TikTok)")
+        st.warning("⚠️ TikTok-Browser-Login fehlt (einmalig `python upload_tiktok_browser_login.py` ausführen)")
 
     st.divider()
     st.header("🕴️ Streamer-Mitarbeiter")
@@ -160,8 +160,11 @@ if process_clicked:
         st.error("❌ client_secret.json fehlt. Wird für den automatischen YouTube-Upload benötigt.")
         st.stop()
 
-    if do_tiktok_upload and not TIKTOK_CLIENT_CONFIG_PATH.exists():
-        st.error("❌ tiktok_client_secret.json fehlt. Wird für den automatischen TikTok-Upload benötigt.")
+    if do_tiktok_upload and not TIKTOK_BROWSER_PROFILE.exists():
+        st.error(
+            "❌ Kein TikTok-Browser-Login gefunden. Führe einmalig "
+            "`python upload_tiktok_browser_login.py` aus, bevor du den Auto-Upload aktivierst."
+        )
         st.stop()
 
     try:
@@ -208,17 +211,13 @@ if process_clicked:
         ):
             with clip_status, st.spinner(f"Clip {i}/{total}: {clip['title']}"):
                 upload_status = "rendered"
-                hashtags = clip.get("hashtags") or []
-                hashtags_str = " ".join(
-                    h if h.startswith("#") else f"#{h}" for h in hashtags
-                ) or upload_tiktok.DEFAULT_HASHTAGS
+                hashtags = clip.get("hashtags") or upload_tiktok_browser.DEFAULT_HASHTAGS
 
                 if do_tiktok_upload:
-                    caption = upload_tiktok.build_caption(
-                        clip["title"], hashtags_str, clip.get("description", "")
+                    success = upload_tiktok_browser.try_upload_to_tiktok_browser(
+                        output_path, clip.get("description", clip["title"]), hashtags
                     )
-                    publish_id = upload_tiktok.try_upload_to_tiktok(output_path, caption)
-                    upload_status = "uploaded" if publish_id else "failed"
+                    upload_status = "uploaded" if success else "failed"
 
                 if do_notify:
                     notify.send_notification(

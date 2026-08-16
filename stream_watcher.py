@@ -24,7 +24,7 @@ import notify
 import process as process_module
 import profiles
 import transcribe
-import upload_tiktok
+import upload_tiktok_browser
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -182,15 +182,13 @@ def render_hot_clips(
 
     for clip, output_path in zip(hot_clips, rendered):
         upload_status = "rendered"
-        hashtags = clip.get("hashtags") or []
-        hashtags_str = " ".join(
-            h if h.startswith("#") else f"#{h}" for h in hashtags
-        ) or upload_tiktok.DEFAULT_HASHTAGS
+        hashtags = clip.get("hashtags") or upload_tiktok_browser.DEFAULT_HASHTAGS
 
         if auto_upload:
-            caption = upload_tiktok.build_caption(clip["title"], hashtags_str, clip.get("description", ""))
-            publish_id = upload_tiktok.try_upload_to_tiktok(output_path, caption)
-            upload_status = "uploaded" if publish_id else "failed"
+            success = upload_tiktok_browser.try_upload_to_tiktok_browser(
+                output_path, clip.get("description", clip["title"]), hashtags
+            )
+            upload_status = "uploaded" if success else "failed"
 
         notify.send_notification(
             title=clip["title"],
@@ -348,7 +346,8 @@ def main():
     )
     parser.add_argument(
         "--auto-upload", action="store_true",
-        help="After auto-rendering, also upload each clip to TikTok (requires --auto-render)",
+        help="After auto-rendering, also upload each clip to TikTok via browser automation "
+        "(requires --auto-render, and a saved login from upload_tiktok_browser_login.py)",
     )
     parser.add_argument(
         "--max-workers", type=int, default=DEFAULT_MAX_WORKERS,
