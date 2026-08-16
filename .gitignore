@@ -10,6 +10,7 @@ __pycache__/
 client_secret.json
 token.json
 feedback.json
+ai_guidelines.txt
 tiktok_client_secret.json
 tiktok_token.json
 tiktok_cookies.json
