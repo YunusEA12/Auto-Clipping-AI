@@ -3,12 +3,15 @@
 import argparse
 import json
 import logging
+import os
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Optional
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
+from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -42,14 +45,26 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
 
 
 def _load_client_config() -> dict:
-    if not CLIENT_CONFIG_PATH.exists():
-        raise FileNotFoundError(
-            f"Missing TikTok app credentials: {CLIENT_CONFIG_PATH}. "
-            'Create a TikTok Developer app with the Content Posting API and save '
-            '{"client_key": "...", "client_secret": "..."} there.'
-        )
-    with open(CLIENT_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    """Load {client_key, client_secret} from tiktok_client_secret.json, falling back to
+    the TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET environment variables (.env) if the file
+    doesn't exist — useful for headless/CI-style setups without a checked-in secrets file."""
+    if CLIENT_CONFIG_PATH.exists():
+        with open(CLIENT_CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    load_dotenv()
+    client_key = os.environ.get("TIKTOK_CLIENT_KEY")
+    client_secret = os.environ.get("TIKTOK_CLIENT_SECRET")
+    if client_key and client_secret:
+        return {"client_key": client_key, "client_secret": client_secret}
+
+    raise FileNotFoundError(
+        f"Missing TikTok app credentials: {CLIENT_CONFIG_PATH} not found, and "
+        "TIKTOK_CLIENT_KEY/TIKTOK_CLIENT_SECRET are not set in .env. "
+        'Create a TikTok Developer app with the Content Posting API and either save '
+        '{"client_key": "...", "client_secret": "..."} to tiktok_client_secret.json, '
+        "or set those two variables in .env."
+    )
 
 
 def _run_oauth_flow(client_key: str, client_secret: str) -> dict:
@@ -115,7 +130,9 @@ def _refresh_token(client_key: str, client_secret: str, refresh_token: str) -> d
     return token_data
 
 
-def _get_access_token() -> str:
+def _get_access_token(interactive: bool = True) -> str:
+    """`interactive=False` (used by automated pipelines) never opens a browser: if there's
+    no valid cached/refreshable token, it raises instead of blocking on human input."""
     config = _load_client_config()
     client_key = config["client_key"]
     client_secret = config["client_secret"]
@@ -124,12 +141,24 @@ def _get_access_token() -> str:
         try:
             stored = json.loads(TOKEN_PATH.read_text(encoding="utf-8"))
             token_data = _refresh_token(client_key, client_secret, stored["refresh_token"])
+            return token_data["access_token"]
         except (requests.RequestException, KeyError, RuntimeError, json.JSONDecodeError) as e:
-            logger.warning("Could not refresh TikTok token, re-authorizing: %s", e)
-            token_data = _run_oauth_flow(client_key, client_secret)
-    else:
-        token_data = _run_oauth_flow(client_key, client_secret)
+            logger.warning("Could not refresh TikTok token: %s", e)
+            if not interactive:
+                raise RuntimeError(
+                    "TikTok token missing or expired, and interactive re-authorization is "
+                    "disabled. Run `python upload_tiktok.py <video> --caption ...` once "
+                    "manually to (re-)authorize, then retry."
+                ) from e
 
+    elif not interactive:
+        raise RuntimeError(
+            "No cached TikTok token, and interactive re-authorization is disabled. Run "
+            "`python upload_tiktok.py <video> --caption ...` once manually to authorize first."
+        )
+
+    logger.info("Starting interactive TikTok authorization...")
+    token_data = _run_oauth_flow(client_key, client_secret)
     return token_data["access_token"]
 
 
@@ -137,7 +166,7 @@ def build_caption(title: str, hashtags: str = DEFAULT_HASHTAGS) -> str:
     return f"{title} {hashtags}".strip()
 
 
-def upload_to_tiktok(video_path: Path, caption: str) -> str:
+def upload_to_tiktok(video_path: Path, caption: str, interactive: bool = True) -> str:
     """Upload a rendered clip to TikTok as an inbox draft via the Content Posting API.
 
     Note: the inbox init endpoint has no `post_info`/caption field — TikTok only lets the
@@ -149,7 +178,7 @@ def upload_to_tiktok(video_path: Path, caption: str) -> str:
     if not video_path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")
 
-    access_token = _get_access_token()
+    access_token = _get_access_token(interactive)
     video_size = video_path.stat().st_size
 
     logger.info(
@@ -207,6 +236,22 @@ def upload_to_tiktok(video_path: Path, caption: str) -> str:
 
     logger.info("TikTok upload complete (sent to inbox) for %s: publish_id=%s", video_path.name, publish_id)
     return publish_id
+
+
+def try_upload_to_tiktok(video_path: Path, caption: str) -> Optional[str]:
+    """Non-raising wrapper for automated/unattended pipelines (e.g. stream_watcher.py).
+
+    Catches every failure mode — missing tiktok_client_secret.json, missing/expired token,
+    network errors, a bad API response — logs it, and returns None instead of propagating,
+    so one failed upload never crashes an unattended watch loop. Never opens a browser for
+    interactive OAuth (no human is present to click through it); if no valid token is
+    already cached, it fails cleanly instead.
+    """
+    try:
+        return upload_to_tiktok(video_path, caption, interactive=False)
+    except Exception as e:
+        logger.error("TikTok upload failed for %s, continuing without upload: %s", video_path, e)
+        return None
 
 
 def main():

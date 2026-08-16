@@ -20,9 +20,11 @@ from typing import List, Optional
 
 import analyze
 import ingest
+import notify
 import process as process_module
 import profiles
 import transcribe
+import upload_tiktok
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -135,10 +137,17 @@ def _cleanup(path: Optional[Path]) -> None:
             logger.warning("Could not delete %s: %s", path, e)
 
 
-def render_hot_clips(video_chunk_path: Path, hot_clips: List[dict], transcript: dict) -> List[Path]:
+def render_hot_clips(
+    video_chunk_path: Path,
+    hot_clips: List[dict],
+    transcript: dict,
+    auto_upload: bool = False,
+) -> List[Path]:
     """Bridge into the existing rendering pipeline (vision.py facecam detection + process.py
     FFmpeg rendering) for exactly the flagged hot clips, cut straight from this chunk's own
-    recorded video."""
+    recorded video. If `auto_upload`, each rendered clip is also pushed to TikTok. Either
+    way, a Discord notification is sent at the end of the chain for every rendered clip —
+    whether the upload succeeded, failed, or wasn't attempted at all."""
     analyze.OUTPUT_PATH.parent.mkdir(exist_ok=True)
     with open(analyze.OUTPUT_PATH, "w", encoding="utf-8") as f:
         json.dump({"clips": hot_clips}, f, ensure_ascii=False)
@@ -159,6 +168,21 @@ def render_hot_clips(video_chunk_path: Path, hot_clips: List[dict], transcript: 
         "Auto-rendered %d clip(s) from %s -> %s",
         len(rendered), video_chunk_path.name, [p.name for p in rendered],
     )
+
+    for clip, output_path in zip(hot_clips, rendered):
+        upload_status = "rendered"
+        if auto_upload:
+            caption = upload_tiktok.build_caption(clip["title"])
+            publish_id = upload_tiktok.try_upload_to_tiktok(output_path, caption)
+            upload_status = "uploaded" if publish_id else "failed"
+
+        notify.send_notification(
+            title=clip["title"],
+            energy=clip.get("energy_rating", 0),
+            filepath=output_path,
+            upload_status=upload_status,
+        )
+
     return rendered
 
 
@@ -167,6 +191,7 @@ def process_chunk(
     energy_threshold: int = ENERGY_THRESHOLD,
     profile: Optional[dict] = None,
     auto_render: bool = False,
+    auto_upload: bool = False,
 ) -> List[dict]:
     """Extract audio, transcribe, and analyze one chunk; return the clips that clear the
     energy threshold. Optionally auto-renders them straight from the chunk's own video.
@@ -215,7 +240,7 @@ def process_chunk(
 
         if auto_render:
             transcript = analyze.load_transcript(transcription_path)
-            render_hot_clips(chunk_path, hot_clips, transcript)
+            render_hot_clips(chunk_path, hot_clips, transcript, auto_upload)
             _cleanup(chunk_path)
         else:
             logger.info("Keeping raw chunk %s for manual rendering (auto-render disabled)", chunk_path)
@@ -246,15 +271,16 @@ def watch_stream(
     profile: Optional[dict] = None,
     auto_render: bool = False,
     max_workers: int = DEFAULT_MAX_WORKERS,
+    auto_upload: bool = False,
 ) -> None:
     """Record chunks continuously; each finished chunk is handed to a background worker
-    for transcription/analysis (and optional rendering) while the NEXT chunk starts
+    for transcription/analysis (and optional rendering/upload) while the NEXT chunk starts
     recording immediately — recording is never blocked waiting on processing."""
     logger.info(
         "Starting stream watcher for %s (chunk_duration=%ds, energy_threshold=%d, "
-        "profile=%s, auto_render=%s, max_workers=%d)",
+        "profile=%s, auto_render=%s, auto_upload=%s, max_workers=%d)",
         url, chunk_duration, energy_threshold,
-        profile.get("name") if profile else None, auto_render, max_workers,
+        profile.get("name") if profile else None, auto_render, auto_upload, max_workers,
     )
 
     chunk_count = 0
@@ -270,7 +296,9 @@ def watch_stream(
                     continue
 
                 futures.append(
-                    executor.submit(process_chunk, chunk_path, energy_threshold, profile, auto_render)
+                    executor.submit(
+                        process_chunk, chunk_path, energy_threshold, profile, auto_render, auto_upload
+                    )
                 )
                 futures = _drain_completed(futures)
                 chunk_count += 1
@@ -301,10 +329,17 @@ def main():
         help="Immediately render (facecam crop, subtitles, FFmpeg) any hot clips found",
     )
     parser.add_argument(
+        "--auto-upload", action="store_true",
+        help="After auto-rendering, also upload each clip to TikTok (requires --auto-render)",
+    )
+    parser.add_argument(
         "--max-workers", type=int, default=DEFAULT_MAX_WORKERS,
         help="Background worker threads for chunk processing",
     )
     args = parser.parse_args()
+
+    if args.auto_upload and not args.auto_render:
+        parser.error("--auto-upload requires --auto-render (there's nothing rendered to upload otherwise)")
 
     profile_dict = None
     if args.profile:
@@ -320,7 +355,7 @@ def main():
 
     watch_stream(
         url, args.chunk_duration, args.max_chunks, energy_threshold,
-        profile_dict, args.auto_render, args.max_workers,
+        profile_dict, args.auto_render, args.max_workers, args.auto_upload,
     )
 
 
