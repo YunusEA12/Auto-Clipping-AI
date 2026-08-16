@@ -1,0 +1,7 @@
+{
+  "name": "Default Streamer",
+  "stream_url": "",
+  "energy_threshold": 7,
+  "trigger_words": [],
+  "context_prompt": ""
+}

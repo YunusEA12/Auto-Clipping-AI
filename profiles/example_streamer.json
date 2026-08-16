@@ -1,0 +1,7 @@
+{
+  "name": "BastiGHG",
+  "stream_url": "https://www.twitch.tv/bastighg",
+  "energy_threshold": 6,
+  "trigger_words": ["digga", "alter", "rage", "ehrenlos", "gg", "was zur hölle"],
+  "context_prompt": "Achte besonders auf Rage-Momente und knappe, spannungsgeladene Runden in Valorant. Dieser Streamer ist bekannt für lautstarke, emotionale Ausbrüche bei knappen Clutches und für trockenen, ironischen Humor in ruhigeren Phasen."
+}

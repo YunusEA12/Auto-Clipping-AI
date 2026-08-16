@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import analyze
+import profiles
 import transcribe
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -104,17 +105,21 @@ def log_hot_clip(chunk_path: Path, clip: dict) -> None:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def process_chunk(chunk_path: Path, energy_threshold: int = ENERGY_THRESHOLD) -> List[dict]:
+def process_chunk(
+    chunk_path: Path, energy_threshold: int = ENERGY_THRESHOLD, profile: Optional[dict] = None
+) -> List[dict]:
     """Transcribe + analyze one chunk, return the clips that clear the energy threshold.
 
     Narrative coherence (logical start/end, no mid-sentence cuts, payoff integrity) is
     already enforced by analyze.py's system prompt — any clip the LLM returns at all
     already satisfies those rules, so here we only need to additionally filter by energy.
+    `profile` (a streamer's context_prompt/trigger_words) is passed straight through to
+    analyze.analyze(), which injects it into the LLM's system prompt.
     """
     logger.info("Processing chunk %s", chunk_path)
     try:
         transcription_path = transcribe.transcribe(chunk_path)
-        clips_path = analyze.analyze(transcription_path, audio_path=chunk_path)
+        clips_path = analyze.analyze(transcription_path, audio_path=chunk_path, profile=profile)
     except Exception as e:
         logger.error("Failed to analyze chunk %s: %s", chunk_path, e)
         return []
@@ -146,11 +151,12 @@ def watch_stream(
     chunk_duration: int = DEFAULT_CHUNK_DURATION,
     max_chunks: Optional[int] = None,
     energy_threshold: int = ENERGY_THRESHOLD,
+    profile: Optional[dict] = None,
 ) -> None:
     """Continuously record and analyze chunks until `max_chunks` is hit (or forever)."""
     logger.info(
-        "Starting stream watcher for %s (chunk_duration=%ds, energy_threshold=%d)",
-        url, chunk_duration, energy_threshold,
+        "Starting stream watcher for %s (chunk_duration=%ds, energy_threshold=%d, profile=%s)",
+        url, chunk_duration, energy_threshold, profile.get("name") if profile else None,
     )
     chunk_count = 0
     while max_chunks is None or chunk_count < max_chunks:
@@ -164,7 +170,7 @@ def watch_stream(
         # Sequential by design for this prototype: analyze the chunk we just captured
         # before recording the next one. A future version could record chunk N+1 in a
         # background thread/process while chunk N is still being transcribed/analyzed.
-        process_chunk(chunk_path, energy_threshold)
+        process_chunk(chunk_path, energy_threshold, profile)
         chunk_count += 1
 
 
@@ -172,7 +178,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Watch a livestream, chunk it, and flag high-energy viral moments."
     )
-    parser.add_argument("--url", required=True, help="Livestream URL (Twitch, YouTube, etc.)")
+    parser.add_argument("--url", default=None, help="Livestream URL (Twitch, YouTube, etc.); falls back to the profile's stream_url")
+    parser.add_argument("--profile", default=None, help="Streamer profile name (profiles/<name>.json)")
     parser.add_argument(
         "--chunk-duration", type=int, default=DEFAULT_CHUNK_DURATION, help="Seconds per recorded chunk"
     )
@@ -180,11 +187,24 @@ def main():
         "--max-chunks", type=int, default=None, help="Stop after N chunks (omit to run until interrupted)"
     )
     parser.add_argument(
-        "--energy-threshold", type=int, default=ENERGY_THRESHOLD, help="Minimum energy_rating to flag a clip"
+        "--energy-threshold", type=int, default=None,
+        help="Minimum energy_rating to flag a clip (defaults to the profile's, or 7 without a profile)",
     )
     args = parser.parse_args()
 
-    watch_stream(args.url, args.chunk_duration, args.max_chunks, args.energy_threshold)
+    profile_dict = None
+    if args.profile:
+        profile_dict = profiles.load_profile(args.profile).model_dump()
+
+    url = args.url or (profile_dict["stream_url"] if profile_dict else None)
+    if not url:
+        parser.error("--url is required unless --profile points to a profile with a stream_url set")
+
+    energy_threshold = args.energy_threshold
+    if energy_threshold is None:
+        energy_threshold = profile_dict["energy_threshold"] if profile_dict else ENERGY_THRESHOLD
+
+    watch_stream(url, args.chunk_duration, args.max_chunks, energy_threshold, profile_dict)
 
 
 if __name__ == "__main__":

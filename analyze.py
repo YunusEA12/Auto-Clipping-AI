@@ -159,8 +159,39 @@ def load_top_performers_section() -> str:
     )
 
 
-def build_system_prompt() -> str:
-    return BASE_SYSTEM_PROMPT + load_top_performers_section() + load_feedback_section()
+def build_profile_section(profile: Optional[dict]) -> str:
+    """Streamer-specific context injected on top of the general rules — the "Streamer-
+    Mitarbeiter" multi-agent piece: each creator gets their own house style without
+    touching the base prompt. Accepts a plain dict (profiles.StreamerProfile.model_dump())
+    so this module doesn't need to depend on the profiles module."""
+    if not profile:
+        return ""
+
+    parts = []
+    context_prompt = (profile.get("context_prompt") or "").strip()
+    if context_prompt:
+        parts.append(f"STREAMER-SPECIFIC CONTEXT for {profile.get('name', 'this streamer')}:\n{context_prompt}")
+
+    trigger_words = profile.get("trigger_words") or []
+    if trigger_words:
+        parts.append(
+            f"STREAMER-SPECIFIC TRIGGER WORDS for {profile.get('name', 'this streamer')} "
+            "(in addition to the general trigger words above — prioritize clips containing "
+            f"these): {', '.join(trigger_words)}"
+        )
+
+    if not parts:
+        return ""
+    return "\n\n" + "\n\n".join(parts)
+
+
+def build_system_prompt(profile: Optional[dict] = None) -> str:
+    return (
+        BASE_SYSTEM_PROMPT
+        + load_top_performers_section()
+        + load_feedback_section()
+        + build_profile_section(profile)
+    )
 
 
 def save_feedback(clip_title: str, feedback_text: str) -> None:
@@ -303,9 +334,10 @@ def select_clips(
     energy_spikes: Optional[List[dict]] = None,
     window_scores: Optional[List[Tuple[float, float]]] = None,
     model: str = MODEL,
+    profile: Optional[dict] = None,
 ) -> ClipSelection:
     client = OpenAI()
-    system_prompt = build_system_prompt()
+    system_prompt = build_system_prompt(profile)
     energy_section = build_energy_prompt_section(energy_spikes or [])
 
     logger.info("Sending transcript to %s for scene selection", model)
@@ -402,7 +434,12 @@ def find_audio_path() -> Optional[Path]:
     return None
 
 
-def analyze(transcription_path: Path = TRANSCRIPTION_PATH, model: str = MODEL, audio_path: Optional[Path] = None) -> Path:
+def analyze(
+    transcription_path: Path = TRANSCRIPTION_PATH,
+    model: str = MODEL,
+    audio_path: Optional[Path] = None,
+    profile: Optional[dict] = None,
+) -> Path:
     load_dotenv()
 
     transcript = load_transcript(transcription_path)
@@ -419,7 +456,7 @@ def analyze(transcription_path: Path = TRANSCRIPTION_PATH, model: str = MODEL, a
     else:
         logger.info("No audio file available; skipping emotional-energy scoring")
 
-    selection = select_clips(transcript_text, energy_spikes, window_scores, model)
+    selection = select_clips(transcript_text, energy_spikes, window_scores, model, profile)
     if not selection.clips:
         selection = find_longest_segment_fallback(transcript)
 
@@ -436,9 +473,15 @@ def main():
     parser.add_argument("transcript", type=Path, nargs="?", default=TRANSCRIPTION_PATH, help="Path to transcription.json")
     parser.add_argument("--model", default=MODEL, help="LLM model name")
     parser.add_argument("--audio", type=Path, default=None, help="Path to the extracted .wav (auto-detected if omitted)")
+    parser.add_argument("--profile", default=None, help="Streamer profile name (profiles/<name>.json)")
     args = parser.parse_args()
 
-    analyze(args.transcript, args.model, args.audio)
+    profile_dict = None
+    if args.profile:
+        import profiles as profiles_module
+        profile_dict = profiles_module.load_profile(args.profile).model_dump()
+
+    analyze(args.transcript, args.model, args.audio, profile_dict)
 
 
 if __name__ == "__main__":
