@@ -95,6 +95,12 @@ Rules:
   narration — prefer clips that contain one or more of them when otherwise similar, but their
   absence is not a reason to reject an otherwise good clip:
   {', '.join(TRIGGER_WORDS)}
+- Description/caption: Every clip also needs a ready-to-post TikTok/Shorts caption — a short,
+  punchy hook written for social media (not a plain summary of the clip), copy-paste ready for
+  the creator to post as-is.
+- Hashtags: Every clip needs 5 to 7 viral, content-relevant hashtags, each including the
+  leading '#' (e.g. "#gaming", "#twitchclips", "#viral", "#fy"). Mix broad reach tags (#fyp,
+  #viral, #shorts) with a couple specific to the actual content of the clip.
 - start_time and end_time must be timestamps that actually occur in the transcript (in seconds).
 - Only select clips that work as a standalone moment without extra context.
 - Do not invent content that is not present in the transcript.
@@ -111,6 +117,14 @@ class Clip(BaseModel):
         description="Emotional/audio energy rating from 1 (calm) to 10 (explosive) — how much "
         "the audio energy spikes and the content hook reinforce each other in this clip",
         ge=1, le=10,
+    )
+    description: str = Field(
+        description="A ready-to-post TikTok/Shorts caption with a strong hook — written for "
+        "social media, copy-paste ready, not just a plain summary of the clip"
+    )
+    hashtags: List[str] = Field(
+        description="5 to 7 viral, content-relevant hashtags, each including the leading '#' "
+        "(e.g. '#gaming', '#twitchclips', '#viral', '#fy')"
     )
 
 
@@ -468,6 +482,8 @@ def find_longest_segment_fallback(transcript: dict) -> "ClipSelection":
         hook_explanation="Automatisch ausgewählt: längstes verfügbares zusammenhängendes Segment (Fallback, da die KI keine passenden Clips fand).",
         viral_score=5,
         energy_rating=5,
+        description="Das solltest du dir ansehen 👀",
+        hashtags=["#gaming", "#twitchclips", "#viral", "#fy", "#stream"],
     )
     return ClipSelection(clips=[fallback_clip])
 

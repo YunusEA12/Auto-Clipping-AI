@@ -208,9 +208,15 @@ if process_clicked:
         ):
             with clip_status, st.spinner(f"Clip {i}/{total}: {clip['title']}"):
                 upload_status = "rendered"
+                hashtags = clip.get("hashtags") or []
+                hashtags_str = " ".join(
+                    h if h.startswith("#") else f"#{h}" for h in hashtags
+                ) or upload_tiktok.DEFAULT_HASHTAGS
 
                 if do_tiktok_upload:
-                    caption = upload_tiktok.build_caption(clip["title"])
+                    caption = upload_tiktok.build_caption(
+                        clip["title"], hashtags_str, clip.get("description", "")
+                    )
                     publish_id = upload_tiktok.try_upload_to_tiktok(output_path, caption)
                     upload_status = "uploaded" if publish_id else "failed"
 
@@ -220,6 +226,8 @@ if process_clicked:
                         energy=clip.get("energy_rating", 0),
                         filepath=output_path,
                         upload_status=upload_status,
+                        description=clip.get("description", ""),
+                        hashtags=hashtags,
                     )
 
             progress_bar.progress(i / total, text=f"{i}/{total} Clips gerendert")
@@ -276,6 +284,10 @@ else:
                     col_viral.markdown(f"**Viral Score:** {clip['viral_score']}/10")
                     col_energy.markdown(f"**🔥 Energie-Level:** {clip.get('energy_rating', '–')}/10")
                     st.write(clip["hook_explanation"])
+                    if clip.get("description"):
+                        st.markdown(f"**📝 Caption:** {clip['description']}")
+                    if clip.get("hashtags"):
+                        st.caption(" ".join(clip["hashtags"]))
                 else:
                     st.markdown(f"### {video_path.name}")
                     st.caption("Keine KI-Metadaten gefunden.")

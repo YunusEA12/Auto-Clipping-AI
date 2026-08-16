@@ -182,8 +182,13 @@ def render_hot_clips(
 
     for clip, output_path in zip(hot_clips, rendered):
         upload_status = "rendered"
+        hashtags = clip.get("hashtags") or []
+        hashtags_str = " ".join(
+            h if h.startswith("#") else f"#{h}" for h in hashtags
+        ) or upload_tiktok.DEFAULT_HASHTAGS
+
         if auto_upload:
-            caption = upload_tiktok.build_caption(clip["title"])
+            caption = upload_tiktok.build_caption(clip["title"], hashtags_str, clip.get("description", ""))
             publish_id = upload_tiktok.try_upload_to_tiktok(output_path, caption)
             upload_status = "uploaded" if publish_id else "failed"
 
@@ -192,6 +197,8 @@ def render_hot_clips(
             energy=clip.get("energy_rating", 0),
             filepath=output_path,
             upload_status=upload_status,
+            description=clip.get("description", ""),
+            hashtags=hashtags,
         )
 
     return rendered

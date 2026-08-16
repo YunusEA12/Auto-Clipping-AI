@@ -162,8 +162,12 @@ def _get_access_token(interactive: bool = True) -> str:
     return token_data["access_token"]
 
 
-def build_caption(title: str, hashtags: str = DEFAULT_HASHTAGS) -> str:
-    return f"{title} {hashtags}".strip()
+def build_caption(title: str, hashtags: str = DEFAULT_HASHTAGS, description: str = "") -> str:
+    """Caption text ready to paste when posting from the TikTok inbox draft. Prefers the
+    AI-generated `description` (a social-media-ready hook from analyze.py) over the plain
+    clip `title` when available."""
+    base = description.strip() or title
+    return f"{base} {hashtags}".strip()
 
 
 def upload_to_tiktok(video_path: Path, caption: str, interactive: bool = True) -> str:

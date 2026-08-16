@@ -3,6 +3,7 @@
 import logging
 import os
 from pathlib import Path
+from typing import List, Optional
 
 import requests
 from dotenv import load_dotenv
@@ -18,10 +19,21 @@ STATUS_EMOJI = {
 }
 
 
-def send_notification(title: str, energy: int, filepath: Path, upload_status: str) -> bool:
+def send_notification(
+    title: str,
+    energy: int,
+    filepath: Path,
+    upload_status: str,
+    description: str = "",
+    hashtags: Optional[List[str]] = None,
+) -> bool:
     """Post a formatted Discord webhook notification. Never raises — a missing/broken
     webhook must never take down the rendering/upload pipeline that calls this. Returns
     True if the message was actually sent, False if skipped or failed.
+
+    `description`/`hashtags` (from analyze.py's AI-generated caption/hashtags for this clip)
+    are included so the finished caption is ready to copy-paste from the phone when posting,
+    without having to open the project.
     """
     load_dotenv()
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
@@ -33,13 +45,19 @@ def send_notification(title: str, energy: int, filepath: Path, upload_status: st
     energy_bar = "🔥" * energy + "▫️" * (10 - energy)
     status_emoji = STATUS_EMOJI.get(upload_status, "ℹ️")
 
-    content = (
-        f"**🎬 Neuer Clip gerendert!**\n"
-        f"**Titel:** {title}\n"
-        f"**Energie-Level:** {energy_bar} ({energy}/10)\n"
-        f"**Datei:** `{Path(filepath).name}`\n"
-        f"**Status:** {status_emoji} {upload_status}"
-    )
+    lines = [
+        "**🎬 Neuer Clip gerendert!**",
+        f"**Titel:** {title}",
+    ]
+    if description:
+        lines.append(f"**Beschreibung:** {description}")
+    lines.append(f"**Energie-Level:** {energy_bar} ({energy}/10)")
+    if hashtags:
+        hashtags_line = " ".join(h if h.startswith("#") else f"#{h}" for h in hashtags)
+        lines.append(f"**Hashtags:** {hashtags_line}")
+    lines.append(f"**Datei:** `{Path(filepath).name}`")
+    lines.append(f"**Status:** {status_emoji} {upload_status}")
+    content = "\n".join(lines)
 
     try:
         response = requests.post(webhook_url, json={"content": content}, timeout=10)
