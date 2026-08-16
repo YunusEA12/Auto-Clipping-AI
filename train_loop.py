@@ -233,7 +233,10 @@ def save_guidelines(positive: List[str], negative: List[str]) -> None:
     )
 
 
-def run_training_loop(clips_path: Optional[Path] = None, model: str = MODEL) -> Path:
+def run_training_loop(clips_path: Optional[Path] = None, model: str = MODEL) -> Tuple[Path, CriticBatch]:
+    """Run the critic over a batch of clips, update ai_guidelines.txt, and return
+    (guidelines_path, batch) — `batch` (the per-clip reward_score verdicts) is what lets a
+    caller like auto_pilot.py decide which clips to purge, without re-running the critic."""
     load_dotenv()
 
     if clips_path is None:
@@ -283,7 +286,7 @@ def run_training_loop(clips_path: Optional[Path] = None, model: str = MODEL) -> 
         _dedupe(existing_negative + new_negative),
     )
 
-    return analyze.AI_GUIDELINES_PATH
+    return analyze.AI_GUIDELINES_PATH, batch
 
 
 def main():
