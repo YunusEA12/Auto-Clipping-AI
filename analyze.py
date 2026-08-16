@@ -20,6 +20,7 @@ TRANSCRIPTION_PATH = TEMP_DIR / "transcription.json"
 OUTPUT_PATH = TEMP_DIR / "clips.json"
 FEEDBACK_PATH = Path("feedback.json")
 TOP_PERFORMERS_PATH = Path("top_performers.json")
+AI_GUIDELINES_PATH = Path("ai_guidelines.txt")
 MODEL = "gpt-4o-mini"
 
 MIN_CLIP_DURATION = 8
@@ -214,12 +215,41 @@ def build_profile_section(profile: Optional[dict]) -> str:
     return "\n\n" + "\n\n".join(parts)
 
 
+def load_ai_guidelines_section() -> str:
+    """Learned guidelines from train_loop.py's critic pass over past clips — a running,
+    self-updating rulebook of what to repeat and what to never do again."""
+    if not AI_GUIDELINES_PATH.exists():
+        return ""
+
+    try:
+        content = AI_GUIDELINES_PATH.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        logger.warning("Could not read %s, skipping learned guidelines: %s", AI_GUIDELINES_PATH, e)
+        return ""
+
+    if not content:
+        return ""
+
+    logger.info("Loaded learned guidelines from %s", AI_GUIDELINES_PATH)
+    return (
+        "\n\nLEARNED GUIDELINES FROM PAST TRAINING FEEDBACK (a critic model reviewed "
+        "previously selected clips and derived these — treat them as hard constraints, not "
+        "soft suggestions):\n" + content +
+        "\n\nIf a candidate segment matches ANY characteristic listed under "
+        '"[-] PENALTIES (NEVER DO THIS)" above, discard it immediately and do not include it '
+        "at all — do not merely down-rank it. Segments matching a "
+        '"[+] POSITIVE REWARDS (DO THIS)" pattern should be prioritized over otherwise '
+        "similar candidates."
+    )
+
+
 def build_system_prompt(profile: Optional[dict] = None) -> str:
     return (
         BASE_SYSTEM_PROMPT
         + load_top_performers_section()
         + load_feedback_section()
         + build_profile_section(profile)
+        + load_ai_guidelines_section()
     )
 
 
@@ -250,6 +280,15 @@ def clips_path_for(transcription_path: Path) -> Path:
     if stem.endswith("_transcription"):
         stem = stem[: -len("_transcription")]
     return TEMP_DIR / f"{stem}_clips.json"
+
+
+def transcription_path_for(clips_path: Path) -> Path:
+    """Inverse of clips_path_for(): the *_transcription.json matching a given *_clips.json,
+    used by train_loop.py to pull back the transcript context for clips it's evaluating."""
+    stem = clips_path.stem
+    if stem.endswith("_clips"):
+        stem = stem[: -len("_clips")]
+    return TEMP_DIR / f"{stem}_transcription.json"
 
 
 def load_transcript(path: Path) -> dict:
