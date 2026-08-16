@@ -1,14 +1,20 @@
-# CLAUDE.md — Auto-Clipping Pipeline Rules
+# CLAUDE.md — Auto-Clipping & Stream-Monitoring Pipeline Rules
 
 ## Always Do First
 - **Check Environment:** Always verify that the virtual environment (`venv`) is active and `.env` variables (API keys) are loaded before running scripts.
 - **Modularity Check:** Ensure any new code fits into the modular pipeline: Ingestion -> Transcription -> Analysis -> Vision -> Processing -> Upload -> UI. Do not mix these domains in a single file.
 
+## Core Architecture & Workflow
+- **Two-Phase Pipeline:** 
+  1. *Phase 1 (Analysis & Prep):* Ingestion -> Audio Extraction -> Whisper Transcription -> LLM Analysis & Energy Scoring -> Interactive Subtitle Editor (`app.py`).
+  2. *Phase 2 (Production):* Facecam Detection -> FFmpeg Rendering -> Auto-Upload (TikTok/YouTube).
+- **Analysis Rules:** Strict narrative coherence (complete sentences, setup + punchline in the same clip) and prioritization of high emotional energy spikes (RMS variance).
+
 ## Local Hardware & Processing Limits
-- **CPU & GPU Constraints:** The system runs on 32GB RAM with an Intel integrated GPU. DO NOT use CUDA-exclusive libraries. 
+- **CPU & GPU Constraints:** The system runs on 32GB RAM with an Intel integrated GPU. DO NOT use CUDA-exclusive libraries.
 - **Local AI (Text/Audio):** Use CPU-optimized libraries like `faster-whisper` (CTranslate2) or Intel OpenVINO for local speech-to-text.
-- **Local AI (Vision):** Use `mediapipe` (specifically the modern Tasks API) for lightweight, CPU-based face detection and dynamic cropping.
-- **Cloud AI:** Heavy natural language processing and scene selection must be offloaded to external LLM APIs (OpenAI/Claude) with strict Pydantic Structured Outputs.
+- **Local AI (Vision):** Use `mediapipe` (Tasks API) for lightweight, CPU-based face detection and dynamic cropping.
+- **Cloud AI:** Offload heavy natural language processing and clip selection to external LLM APIs (OpenAI/Claude) with strict Pydantic Structured Outputs.
 
 ## Video Output Defaults
 - **Format:** 9:16 vertical video (1080x1920 resolution).
@@ -20,12 +26,16 @@
 - **Test Chunks:** Never process a full VOD during testing. Always use FFmpeg to extract a 1- to 3-minute test sample before running the full pipeline.
 - **File Management:** Save intermediate files (`.wav`, `.json`, `.ass`) in `/temp` and final videos in `/output`.
 - **Log, don't print:** Use Python's `logging` module.
-- **Web UI:** Use `streamlit` for the frontend. The `app.py` must only import and orchestrate the backend modules, not duplicate their logic.
+- **Web UI:** Use `streamlit` for the frontend. Custom styling must rely on `.streamlit/config.toml` and targeted key-based CSS selectors.
+
+## Roadmap & Future Milestones
+- **Live-Stream-Watcher-Bot (`stream_watcher.py`):** Real-time stream ingestion (via Streamlink/FFmpeg chunking), continuous background transcription, and automatic trigger detection.
+- **Multi-Agent Architecture ("Streamer-Mitarbeiter"):** Dedicated profile prompts per creator (custom humor style, inside jokes, specific keywords, and individual clipping thresholds).
 
 ## Git & Security (CRITICAL)
 - **Auto-Commit Rule:** At the end of every successful task/feature, automatically stage changes (`git add .`), create a Conventional Commit, and run `git push`.
-- **Secret Protection:** NEVER commit `.env`, `client_secret.json`, or `token.json`. Always ensure they are in `.gitignore`. 
-- **Large Files:** NEVER commit `temp/` files, `output/` files, or any raw video/audio (`*.mp4`, `*.wav`).
+- **Secret Protection:** NEVER commit `.env`, `client_secret.json`, `tiktok_client_secret.json`, or `tiktok_token.json`. Always ensure they are in `.gitignore`.
+- **Large Files:** NEVER commit `temp/` files, `output/` files, or any raw media (`*.mp4`, `*.wav`, `*.ts`).
 
 ## Hard Rules
 - Do not introduce heavy C++ compilation dependencies unless absolutely necessary.

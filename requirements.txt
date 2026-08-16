@@ -13,3 +13,4 @@ streamlit
 requests
 pandas
 numpy
+streamlink
