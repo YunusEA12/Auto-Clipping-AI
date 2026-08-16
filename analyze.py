@@ -64,6 +64,11 @@ Look for (any of these is enough — a clip does NOT need to hit several at once
 - Informative or interesting moments that are simply worth watching, even without a big reaction
 
 Rules:
+- SINNHAFTIGKEIT (top priority — applies before every other rule below): Ein Clip MUSS
+  logisch zusammenhängend sein. Er muss einen klaren Anfang, einen nachvollziehbaren
+  Kontext und ein abgeschlossenes Ende haben. Halbe Sätze oder zusammenhangsloses Gefasel
+  (ohne Pointe) MÜSSEN ignoriert werden. Wenn ein Segment inhaltlich keinen Sinn ergibt,
+  gib lieber eine leere Liste [] zurück, anstatt einen unlogischen Clip zu erzwingen.
 - Quality gate, not a quota: Only extract a clip if it clearly has high viral potential (strong
   hook, clear narrative arc, real energy or genuine interest). If the whole transcript is boring,
   none of it has the context needed for a standalone clip, or every candidate violates a

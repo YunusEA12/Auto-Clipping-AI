@@ -31,6 +31,10 @@ LAYOUT_BLUR_BACKGROUND = "blur_background"
 LAYOUT_AUTO = "auto"
 SELECTABLE_LAYOUTS = (LAYOUT_SPLIT_SCREEN, LAYOUT_BLUR_BACKGROUND, LAYOUT_AUTO)
 
+# Facecam gets the top third of the canvas, gameplay the bottom two-thirds — TikTok's
+# standard "reaction on top, content below" reaction-cam layout.
+SPLIT_SCREEN_FACE_RATIO = 1 / 3
+
 HIGHLIGHT_COLORS = {
     "Gelb (Hormozi)": "00FFFF",
     "Neon Grün": "00FF66",
@@ -207,26 +211,39 @@ def build_filter_complex(
     subtitles = escape_subtitles_path(ass_path)
 
     if layout == LAYOUT_SPLIT_SCREEN:
-        # Both halves go through the identical pipeline: crop out the source region,
-        # then a "cover" fit — scale up with force_original_aspect_ratio=increase (so no
-        # axis is ever stretched) and crop the overhang — to land on EXACTLY output_w x
-        # half_h (1080x960 for the default 9:16 canvas). setsar=1 pins square pixels so
-        # a player never re-stretches either half after they're vstack'd together.
-        # Single stacking step (vstack), no separate canvas/overlay scaffolding.
+        # TikTok's standard "reaction on top, content below" split: the facecam gets the
+        # top third, the gameplay gets the bottom two-thirds — not an even 50/50 stack,
+        # since the facecam is a reaction reference, not the main attraction.
         face_x, face_y, face_w, face_h = facecam_box
         game_x, game_y, game_w, game_h = gameplay_box
-        half_h = output_h // 2
+        face_zone_h = int(output_h * SPLIT_SCREEN_FACE_RATIO)
+        game_zone_h = output_h - face_zone_h
 
-        def _cover_fit(label: str, x: int, y: int, w: int, h: int) -> str:
-            return (
-                f"[0:v]crop={w}:{h}:{x}:{y},"
-                f"scale={output_w}:{half_h}:force_original_aspect_ratio=increase,"
-                f"crop={output_w}:{half_h},setsar=1[{label}]"
-            )
+        # Facecam: "cover" fit — scale up with force_original_aspect_ratio=increase (so no
+        # axis is ever stretched) and crop the overhang — fills its zone edge-to-edge with
+        # no gaps, since a tight face crop rarely needs to show its full source frame.
+        face_filter = (
+            f"[0:v]crop={face_w}:{face_h}:{face_x}:{face_y},"
+            f"scale={output_w}:{face_zone_h}:force_original_aspect_ratio=increase,"
+            f"crop={output_w}:{face_zone_h},setsar=1[face]"
+        )
+
+        # Gameplay: "contain" fit instead — scaled to the full zone width with the ENTIRE
+        # frame preserved (force_original_aspect_ratio=decrease, i.e. shrink-to-fit rather
+        # than crop-to-fill), so nothing at the edges of the actual gameplay is lost. Any
+        # resulting letterbox gap is filled with a heavily blurred, cover-fit copy of the
+        # same footage rather than flat black, matching the polish of LAYOUT_BLUR_BACKGROUND.
+        game_filter = (
+            f"[0:v]crop={game_w}:{game_h}:{game_x}:{game_y},setsar=1,split=2[game_src][game_src2];"
+            f"[game_src]scale={output_w}:{game_zone_h}:force_original_aspect_ratio=increase,"
+            f"crop={output_w}:{game_zone_h},boxblur=20:20[game_bg];"
+            f"[game_src2]scale={output_w}:{game_zone_h}:force_original_aspect_ratio=decrease[game_fg];"
+            f"[game_bg][game_fg]overlay=(W-w)/2:(H-h)/2[game]"
+        )
 
         return (
-            f"{_cover_fit('face', face_x, face_y, face_w, face_h)};"
-            f"{_cover_fit('game', game_x, game_y, game_w, game_h)};"
+            f"{face_filter};"
+            f"{game_filter};"
             f"[face][game]vstack=inputs=2[stacked];"
             f"[stacked]subtitles='{subtitles}'[outv]"
         )
