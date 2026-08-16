@@ -28,6 +28,7 @@ import json
 import logging
 import random
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -49,6 +50,33 @@ DEFAULT_PURGE_THRESHOLD = 0
 DEFAULT_COOLDOWN_SECONDS = 30
 DEFAULT_ERROR_COOLDOWN_SECONDS = 90
 
+# Telemetry file the Streamlit "Agent Control Center" dashboard (app.py) polls to show what
+# this process is doing right now — there's no direct connection between the two processes,
+# just this JSON file on disk.
+AGENT_STATE_PATH = Path("agent_state.json")
+
+
+def update_agent_state(**updates) -> dict:
+    """Merge `updates` into agent_state.json and write it back. Called at every phase
+    transition in the loop below so app.py's Live Radar tab always reflects the agent's
+    current phase, not just its state at the end of a cycle."""
+    state = {}
+    if AGENT_STATE_PATH.exists():
+        try:
+            state = json.loads(AGENT_STATE_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            state = {}
+
+    state.update(updates)
+    state["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+    try:
+        AGENT_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as e:
+        logger.warning("Could not write %s: %s", AGENT_STATE_PATH, e)
+
+    return state
+
 
 def _trim_to_batch(clips_path: Path, batch_size: int) -> list:
     """Keep only the top `batch_size` candidates (by viral_score, then energy_rating) from
@@ -68,41 +96,6 @@ def _trim_to_batch(clips_path: Path, batch_size: int) -> list:
         json.dump({"clips": batch}, f, ensure_ascii=False, indent=2)
 
     return batch
-
-
-def run_collection_phase(
-    video_path: Path,
-    profile: Optional[dict],
-    layout: str,
-    video_format: str,
-    highlight_color: str,
-) -> Tuple[Path, Dict[str, Path]]:
-    """Phase 1 (Collect): ingest -> transcribe -> analyze -> trim to a small batch -> render.
-    Returns (clips_path, {clip_title: rendered_output_path}) — the dict is empty if the
-    quality gate in analyze.py found nothing worth clipping this cycle (a valid outcome,
-    not a failure)."""
-    wav_path = ingest.extract_audio(video_path)
-    transcription_path = transcribe.transcribe(wav_path)
-    clips_path = analyze.analyze(transcription_path, audio_path=wav_path, profile=profile)
-
-    with open(clips_path, "r", encoding="utf-8") as f:
-        clips_data = json.load(f)
-    if not clips_data.get("clips"):
-        return clips_path, {}
-
-    batch_size = random.randint(BATCH_SIZE_MIN, BATCH_SIZE_MAX)
-    batch = _trim_to_batch(clips_path, batch_size)
-    logger.info("Phase 1 (Collect): %d Clip(s) für diesen Zyklus ausgewählt", len(batch))
-
-    transcript = analyze.load_transcript(transcription_path)
-    rendered: Dict[str, Path] = {}
-    for i, total, clip, output_path in process_module.process_clips_iter(
-        video_path, layout=layout, video_format=video_format,
-        highlight_color=highlight_color, transcript=transcript,
-    ):
-        rendered[clip["title"]] = output_path
-
-    return clips_path, rendered
 
 
 def purge_low_scoring_clips(
@@ -150,24 +143,71 @@ def run_cycle(
     highlight_color: str,
     purge_threshold: int,
     critic_model: str,
-) -> None:
-    clips_path, rendered = run_collection_phase(video_path, profile, layout, video_format, highlight_color)
+    cycle: int,
+    target_streamer: str,
+    kept_total: int,
+    purged_total: int,
+    live: bool,
+) -> Tuple[int, int]:
+    """Runs one full Collect -> Evaluate -> Purge cycle, updating agent_state.json at each
+    phase transition. Returns (kept, deleted) for THIS cycle, so the caller can track
+    running totals across cycles."""
+    common_state = dict(current_cycle=cycle, target_streamer=target_streamer)
 
-    if not rendered:
+    update_agent_state(
+        current_action="🔴 Aufnahme läuft" if live else "📥 Quelle wird geladen & Audio extrahiert",
+        **common_state,
+    )
+    wav_path = ingest.extract_audio(video_path)
+
+    update_agent_state(current_action="📝 Transkription läuft (Whisper)", **common_state)
+    transcription_path = transcribe.transcribe(wav_path)
+
+    update_agent_state(current_action="🤖 KI-Analyse & Clip-Auswahl läuft", **common_state)
+    clips_path = analyze.analyze(transcription_path, audio_path=wav_path, profile=profile)
+
+    with open(clips_path, "r", encoding="utf-8") as f:
+        clips_data = json.load(f)
+    if not clips_data.get("clips"):
         logger.info("Zyklus abgeschlossen: kein Content mit hohem viralem Potenzial gefunden, nichts gerendert.")
-        return
+        update_agent_state(
+            current_action="😴 Kein Content gefunden — warte auf nächsten Zyklus",
+            clips_kept_total=kept_total, clips_purged_total=purged_total, **common_state,
+        )
+        return 0, 0
+
+    batch_size = random.randint(BATCH_SIZE_MIN, BATCH_SIZE_MAX)
+    batch_clips = _trim_to_batch(clips_path, batch_size)
+    logger.info("Phase 1 (Collect): %d Clip(s) für diesen Zyklus ausgewählt", len(batch_clips))
+
+    update_agent_state(current_action=f"🎬 Rendering läuft ({len(batch_clips)} Clip(s))", **common_state)
+    transcript = analyze.load_transcript(transcription_path)
+    rendered: Dict[str, Path] = {}
+    for i, total, clip, output_path in process_module.process_clips_iter(
+        video_path, layout=layout, video_format=video_format,
+        highlight_color=highlight_color, transcript=transcript,
+    ):
+        rendered[clip["title"]] = output_path
 
     # Phase 2 (Evaluate & Update): score the batch and fold new AVOID/DO rules into
     # ai_guidelines.txt — reused as-is from train_loop.py, no duplicated critic logic here.
+    update_agent_state(current_action="🧠 KI bewertet die Clips (Critic)", **common_state)
     guidelines_path, batch = train_loop.run_training_loop(clips_path=clips_path, model=critic_model)
 
     # Phase 3 (Clean & Purge)
+    update_agent_state(current_action="🧹 Bereinigung — lösche schwache Clips", **common_state)
     kept, deleted = purge_low_scoring_clips(batch, rendered, clips_path, purge_threshold)
 
     logger.info(
         "✅ Batch abgeschlossen: %d Clip(s) behalten, %d gelöscht, Regeln aktualisiert (%s).",
         kept, deleted, guidelines_path,
     )
+    update_agent_state(
+        current_action="✅ Zyklus abgeschlossen — Cooldown",
+        clips_kept_total=kept_total + kept, clips_purged_total=purged_total + deleted,
+        **common_state,
+    )
+    return kept, deleted
 
 
 def resolve_static_video(args, url: Optional[str]) -> Path:
@@ -219,11 +259,21 @@ def main():
     if args.live and not url:
         parser.error("--live requires --url or a --profile with a stream_url set")
 
+    target_streamer = (
+        profile_dict["name"] if profile_dict
+        else (url or (str(args.video) if args.video else "lokales Video"))
+    )
+
     cached_video_path: Optional[Path] = None
+    kept_total, purged_total = 0, 0
 
     logger.info(
         "🤖 Auto-Pilot startet (live=%s, purge_threshold=%d, batch=%d-%d Clips/Zyklus)",
         args.live, args.purge_threshold, BATCH_SIZE_MIN, BATCH_SIZE_MAX,
+    )
+    update_agent_state(
+        current_action="🚀 Auto-Pilot gestartet", current_cycle=0, target_streamer=target_streamer,
+        clips_kept_total=0, clips_purged_total=0, purge_threshold=args.purge_threshold, live=args.live,
     )
 
     cycle = 0
@@ -234,20 +284,31 @@ def main():
 
             try:
                 if args.live:
+                    update_agent_state(
+                        current_action="🔴 Aufnahme läuft", current_cycle=cycle, target_streamer=target_streamer,
+                    )
                     video_path = stream_watcher.record_stream_chunk(url, args.chunk_duration)
                 else:
                     if cached_video_path is None:
                         cached_video_path = resolve_static_video(args, url)
                     video_path = cached_video_path
 
-                run_cycle(
+                kept, deleted = run_cycle(
                     video_path, profile_dict, args.layout, args.video_format,
                     args.highlight_color, args.purge_threshold, args.critic_model,
+                    cycle, target_streamer, kept_total, purged_total, args.live,
                 )
+                kept_total += kept
+                purged_total += deleted
             except Exception as e:
                 logger.error(
                     "Zyklus %d fehlgeschlagen (%s: %s) — warte %ds und versuche es erneut.",
                     cycle, type(e).__name__, e, args.error_cooldown,
+                )
+                update_agent_state(
+                    current_action=f"⚠️ Fehler: {e} — Cooldown ({args.error_cooldown}s)",
+                    current_cycle=cycle, target_streamer=target_streamer,
+                    clips_kept_total=kept_total, clips_purged_total=purged_total,
                 )
                 time.sleep(args.error_cooldown)
                 continue
@@ -256,6 +317,10 @@ def main():
                 time.sleep(args.cooldown)
     except KeyboardInterrupt:
         logger.info("Auto-Pilot durch Nutzer gestoppt nach %d Zyklus/Zyklen.", cycle)
+        update_agent_state(
+            current_action="⏹️ Gestoppt (Nutzer)", current_cycle=cycle, target_streamer=target_streamer,
+            clips_kept_total=kept_total, clips_purged_total=purged_total,
+        )
 
 
 if __name__ == "__main__":

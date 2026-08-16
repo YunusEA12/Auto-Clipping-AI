@@ -176,7 +176,9 @@ def run_critic(
     return parsed
 
 
-def _parse_guidelines_file(content: str) -> Tuple[List[str], List[str]]:
+def parse_guidelines_file(content: str) -> Tuple[List[str], List[str]]:
+    """Public so app.py's "KI Gehirn" tab can reuse the exact same parsing logic instead of
+    re-implementing it to render the guidelines file in the dashboard."""
     positive: List[str] = []
     negative: List[str] = []
     current: Optional[List[str]] = None
@@ -205,7 +207,7 @@ def load_existing_guidelines() -> Tuple[List[str], List[str]]:
     except OSError as e:
         logger.warning("Could not read existing %s, starting fresh: %s", analyze.AI_GUIDELINES_PATH, e)
         return [], []
-    return _parse_guidelines_file(content)
+    return parse_guidelines_file(content)
 
 
 def _dedupe(rules: List[str]) -> List[str]:
