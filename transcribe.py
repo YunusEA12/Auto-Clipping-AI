@@ -16,9 +16,20 @@ OUTPUT_PATH = TEMP_DIR / "transcription.json"
 MODEL_SIZE = "base"
 
 
+def transcription_path_for(audio_path: Path) -> Path:
+    """Per-video transcript path (e.g. temp/my_video_transcription.json) so re-processing
+    the same video can be recognized and skipped instead of re-running Whisper."""
+    return TEMP_DIR / f"{audio_path.stem}_transcription.json"
+
+
 def transcribe(audio_path: Path, model_size: str = MODEL_SIZE) -> Path:
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+    output_path = transcription_path_for(audio_path)
+    if output_path.exists():
+        logger.info("Transkription bereits vorhanden, überspringe Whisper: %s", output_path)
+        return output_path
 
     cpu_threads = os.cpu_count() or 4
     logger.info("Loading faster-whisper model '%s' on CPU (int8, %d threads)", model_size, cpu_threads)
@@ -51,11 +62,11 @@ def transcribe(audio_path: Path, model_size: str = MODEL_SIZE) -> Path:
         raise RuntimeError(f"Transcription produced no segments for: {audio_path}")
 
     TEMP_DIR.mkdir(exist_ok=True)
-    with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump({"language": info.language, "segments": result_segments}, f, ensure_ascii=False, indent=2)
 
-    logger.info("Transcription complete: %s (%d segments)", OUTPUT_PATH, len(result_segments))
-    return OUTPUT_PATH
+    logger.info("Transcription complete: %s (%d segments)", output_path, len(result_segments))
+    return output_path
 
 
 def main():

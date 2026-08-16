@@ -45,6 +45,10 @@ def extract_audio(video_path: Path) -> Path:
     TEMP_DIR.mkdir(exist_ok=True)
     output_path = TEMP_DIR / f"{video_path.stem}.wav"
 
+    if output_path.exists() and output_path.stat().st_size > 0:
+        logger.info("Audio bereits vorhanden, überspringe Extraktion: %s", output_path)
+        return output_path
+
     logger.info("Extracting audio from %s -> %s", video_path, output_path)
     try:
         (

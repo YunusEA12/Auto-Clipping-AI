@@ -156,8 +156,11 @@ def render_hot_clips(
     recorded video. If `auto_upload`, each rendered clip is also pushed to TikTok. Either
     way, a Discord notification is sent at the end of the chain for every rendered clip —
     whether the upload succeeded, failed, or wasn't attempted at all."""
-    analyze.OUTPUT_PATH.parent.mkdir(exist_ok=True)
-    with open(analyze.OUTPUT_PATH, "w", encoding="utf-8") as f:
+    # Must match the *_clips.json path process_module.process() derives internally from
+    # video_chunk_path's own stem, since that's the file it will read the clips back from.
+    clips_path = TEMP_DIR / f"{video_chunk_path.stem}_clips.json"
+    clips_path.parent.mkdir(exist_ok=True)
+    with open(clips_path, "w", encoding="utf-8") as f:
         json.dump({"clips": hot_clips}, f, ensure_ascii=False)
 
     try:

@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 
 TEMP_DIR = Path("temp")
 OUTPUT_DIR = Path("output")
-CLIPS_PATH = TEMP_DIR / "clips.json"
 CLIENT_SECRET_PATH = Path("client_secret.json")
 TOKEN_PATH = Path("token.json")
 
@@ -54,10 +53,18 @@ def get_authenticated_service():
     return build("youtube", "v3", credentials=creds)
 
 
+def find_latest_clips_path() -> Optional[Path]:
+    """Clips are now named per source video (temp/<video>_clips.json); use the most
+    recently written one since upload_all() has no per-video context of its own."""
+    candidates = sorted(TEMP_DIR.glob("*_clips.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0] if candidates else None
+
+
 def load_clips_metadata() -> dict:
-    if not CLIPS_PATH.exists():
-        raise FileNotFoundError(f"Required file not found: {CLIPS_PATH}")
-    with open(CLIPS_PATH, "r", encoding="utf-8") as f:
+    clips_path = find_latest_clips_path()
+    if clips_path is None:
+        raise FileNotFoundError(f"No *_clips.json file found in {TEMP_DIR}")
+    with open(clips_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return {i: clip for i, clip in enumerate(data.get("clips", []), start=1)}
 

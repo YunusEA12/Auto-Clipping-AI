@@ -17,8 +17,6 @@ logger = logging.getLogger(__name__)
 
 TEMP_DIR = Path("temp")
 OUTPUT_DIR = Path("output")
-CLIPS_PATH = TEMP_DIR / "clips.json"
-TRANSCRIPTION_PATH = TEMP_DIR / "transcription.json"
 
 # Supported output canvases, keyed by aspect ratio label.
 VIDEO_FORMATS = {
@@ -375,14 +373,18 @@ def process_clips_iter(
 
     output_w, output_h = VIDEO_FORMATS[video_format]
 
-    clips_data = load_json(CLIPS_PATH)
-    if transcript is None:
-        transcript = load_json(TRANSCRIPTION_PATH)
     video_path = find_source_video(source_video)
+    # Per-video file names (e.g. temp/my_video_clips.json) so re-running the pipeline on a
+    # different source video doesn't read stale clips/transcript left over from another run.
+    clips_path = TEMP_DIR / f"{video_path.stem}_clips.json"
+    clips_data = load_json(clips_path)
+    if transcript is None:
+        transcription_path = TEMP_DIR / f"{video_path.stem}_transcription.json"
+        transcript = load_json(transcription_path)
 
     clips = clips_data.get("clips", [])
     if not clips:
-        raise RuntimeError(f"No clips found in {CLIPS_PATH}")
+        raise RuntimeError(f"No clips found in {clips_path}")
 
     OUTPUT_DIR.mkdir(exist_ok=True)
     TEMP_DIR.mkdir(exist_ok=True)

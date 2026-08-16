@@ -228,6 +228,16 @@ def save_feedback(clip_title: str, feedback_text: str) -> None:
     logger.info("Saved feedback for clip '%s'", clip_title)
 
 
+def clips_path_for(transcription_path: Path) -> Path:
+    """Per-video clips path (e.g. temp/my_video_clips.json), derived from the matching
+    *_transcription.json path so each source video gets its own clips file instead of
+    every run clobbering a shared temp/clips.json."""
+    stem = transcription_path.stem
+    if stem.endswith("_transcription"):
+        stem = stem[: -len("_transcription")]
+    return TEMP_DIR / f"{stem}_clips.json"
+
+
 def load_transcript(path: Path) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"Transcript not found: {path}")
@@ -498,12 +508,13 @@ def analyze(
     if not selection.clips:
         selection = find_longest_segment_fallback(transcript)
 
+    output_path = clips_path_for(transcription_path)
     TEMP_DIR.mkdir(exist_ok=True)
-    with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(selection.model_dump(), f, ensure_ascii=False, indent=2)
 
-    logger.info("Analysis complete: %s (%d clips)", OUTPUT_PATH, len(selection.clips))
-    return OUTPUT_PATH
+    logger.info("Analysis complete: %s (%d clips)", output_path, len(selection.clips))
+    return output_path
 
 
 def main():

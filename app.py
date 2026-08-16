@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 ENV_PATH = Path(".env")
 CLIENT_SECRET_PATH = Path("client_secret.json")
 TIKTOK_CLIENT_CONFIG_PATH = Path("tiktok_client_secret.json")
-CLIPS_PATH = Path("temp/clips.json")
+TEMP_DIR = Path("temp")
 OUTPUT_DIR = Path("output")
 
 FORMAT_OPTIONS = {
@@ -179,12 +179,13 @@ if process_clicked:
 
             profile_note = f" mit Profil '{selected_profile['name']}'" if selected_profile else ""
             status.write(f"🤖 KI-Analyse der Szenen (inkl. Emotional-Energy-Scoring){profile_note}...")
-            analyze.analyze(transcription_path, audio_path=wav_path, profile=selected_profile)
+            clips_path = analyze.analyze(transcription_path, audio_path=wav_path, profile=selected_profile)
 
             transcript = analyze.load_transcript(transcription_path)
-            with open(CLIPS_PATH, "r", encoding="utf-8") as f:
+            with open(clips_path, "r", encoding="utf-8") as f:
                 clips_data = json.load(f)
             clips = clips_data.get("clips", [])
+            st.session_state["last_clips_path"] = str(clips_path)
 
             status.update(
                 label=f"Analyse abgeschlossen ✅ — {len(clips)} Clip(s) gefunden, Rendering startet",
@@ -243,8 +244,17 @@ if not video_files:
     st.info("Noch keine Clips vorhanden. Starte die Pipeline, um Ergebnisse zu sehen.")
 else:
     clips_by_index = {}
-    if CLIPS_PATH.exists():
-        with open(CLIPS_PATH, "r", encoding="utf-8") as f:
+    clips_json_path = None
+    if "last_clips_path" in st.session_state:
+        clips_json_path = Path(st.session_state["last_clips_path"])
+    else:
+        clips_candidates = sorted(
+            TEMP_DIR.glob("*_clips.json"), key=lambda p: p.stat().st_mtime, reverse=True
+        )
+        clips_json_path = clips_candidates[0] if clips_candidates else None
+
+    if clips_json_path and clips_json_path.exists():
+        with open(clips_json_path, "r", encoding="utf-8") as f:
             clips_data = json.load(f)
         clips_by_index = {i: c for i, c in enumerate(clips_data.get("clips", []), start=1)}
 
