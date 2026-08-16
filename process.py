@@ -252,6 +252,36 @@ def build_filter_complex(
     raise ValueError(f"Unknown layout: {layout}")
 
 
+# Intel Quick Sync hardware H.264 encoder — decode/filtering (crop/scale/vstack/subtitles)
+# still run on the CPU (subtitle burn-in has no QSV path), but the encode step, usually the
+# single most expensive part of rendering 15-20 clips per video, runs on the iGPU instead.
+# QSV has no CRF; -global_quality is its closest equivalent (ICQ mode, lower = better quality).
+QSV_ENCODE_ARGS = ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "25"]
+CPU_ENCODE_ARGS = ["-c:v", "libx264", "-preset", "veryfast"]
+
+
+def _build_render_cmd(source_video: Path, start: float, end: float, filter_complex: str, encode_args: list, output_path: Path) -> list:
+    return [
+        "ffmpeg", "-y",
+        "-ss", str(start),
+        "-to", str(end),
+        "-i", str(source_video),
+        "-filter_complex", filter_complex,
+        "-map", "[outv]",
+        "-map", "0:a?",
+        *encode_args,
+        "-c:a", "aac",
+        str(output_path),
+    ]
+
+
+def _run_ffmpeg(cmd: list) -> subprocess.CompletedProcess:
+    # encoding="utf-8" is required here: without it, subprocess.run's text mode falls back
+    # to the system locale (cp1252/"charmap" on German Windows), which crashes with
+    # UnicodeDecodeError the moment ffmpeg's UTF-8 log output contains a German umlaut.
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+
+
 def render_clip(
     source_video: Path,
     clip: dict,
@@ -270,29 +300,24 @@ def render_clip(
 
     filter_complex = build_filter_complex(layout, ass_path, output_w, output_h, facecam_box, gameplay_box)
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-ss", str(start),
-        "-to", str(end),
-        "-i", str(source_video),
-        "-filter_complex", filter_complex,
-        "-map", "[outv]",
-        "-map", "0:a?",
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-c:a", "aac",
-        str(output_path),
-    ]
-
-    logger.info("Rendering clip %d (layout=%s) -> %s", index, layout, output_path)
-    # encoding="utf-8" is required here: without it, subprocess.run's text mode falls back
-    # to the system locale (cp1252/"charmap" on German Windows), which crashes with
-    # UnicodeDecodeError the moment ffmpeg's UTF-8 log output contains a German umlaut.
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+    logger.info("Rendering clip %d (layout=%s) via h264_qsv -> %s", index, layout, output_path)
+    cmd = _build_render_cmd(source_video, start, end, filter_complex, QSV_ENCODE_ARGS, output_path)
+    result = _run_ffmpeg(cmd)
 
     if result.returncode != 0:
-        logger.error("FFmpeg failed for clip %d: %s", index, result.stderr[-4000:])
-        raise RuntimeError(f"FFmpeg failed for clip {index} (exit code {result.returncode})")
+        # QSV can fail for reasons unrelated to our command (no compatible iGPU/driver on
+        # this machine, session limits, etc.) — fall back to the CPU encoder rather than
+        # losing the clip entirely.
+        logger.warning(
+            "h264_qsv failed for clip %d (exit code %d), falling back to libx264: %s",
+            index, result.returncode, result.stderr[-2000:],
+        )
+        cmd = _build_render_cmd(source_video, start, end, filter_complex, CPU_ENCODE_ARGS, output_path)
+        result = _run_ffmpeg(cmd)
+
+        if result.returncode != 0:
+            logger.error("FFmpeg failed for clip %d: %s", index, result.stderr[-4000:])
+            raise RuntimeError(f"FFmpeg failed for clip {index} (exit code {result.returncode})")
 
     if not output_path.exists() or output_path.stat().st_size == 0:
         raise RuntimeError(f"Render produced empty output for clip {index}: {output_path}")

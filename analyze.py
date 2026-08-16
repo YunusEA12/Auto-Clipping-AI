@@ -27,6 +27,11 @@ MAX_CLIP_DURATION = 120
 MIN_CLIPS_TARGET = 15
 MAX_CLIPS_TARGET = 20
 
+# Generous headroom for ~20 detailed clips (title + hook_explanation + scores) as structured
+# JSON, well within gpt-4o-mini's 16384-token output cap — without this, an unbounded
+# response risks getting cut off mid-JSON exactly when MAX_CLIPS_TARGET is raised.
+MAX_COMPLETION_TOKENS = 8192
+
 ENERGY_WINDOW_SECONDS = 2.0
 ENERGY_SPIKE_THRESHOLD_STD = 1.5
 
@@ -359,14 +364,37 @@ def select_clips(
                 {"role": "user", "content": f"Transcript:\n{transcript_text}{energy_section}"},
             ],
             response_format=ClipSelection,
+            max_completion_tokens=MAX_COMPLETION_TOKENS,
         )
     except Exception as e:
         logger.error("LLM API call failed: %s", e)
         raise
 
-    parsed = completion.choices[0].message.parsed
+    choice = completion.choices[0]
+    parsed = choice.message.parsed
+
     if parsed is None or not parsed.clips:
-        raise RuntimeError("LLM returned no valid clips")
+        # finish_reason == "length" means the response was cut off mid-JSON (most likely
+        # cause with MAX_CLIPS_TARGET=20) rather than the model deliberately returning
+        # nothing; either way, degrade gracefully instead of raising — the caller
+        # (analyze()) falls back to find_longest_segment_fallback() when clips is empty.
+        if choice.finish_reason == "length":
+            logger.warning(
+                "LLM response for %s was truncated (finish_reason=length, "
+                "max_completion_tokens=%d) — the JSON likely broke mid-clip. Falling back "
+                "to the longest available transcript segment instead of crashing.",
+                model, MAX_COMPLETION_TOKENS,
+            )
+        elif parsed is None:
+            logger.warning(
+                "LLM response for %s could not be parsed into ClipSelection "
+                "(finish_reason=%s, refusal=%r). Falling back to the longest available "
+                "transcript segment instead of crashing.",
+                model, choice.finish_reason, getattr(choice.message, "refusal", None),
+            )
+        else:
+            logger.warning("LLM returned zero clips for %s.", model)
+        return ClipSelection(clips=[])
 
     valid_clips = [
         clip for clip in parsed.clips
