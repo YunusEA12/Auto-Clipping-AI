@@ -268,7 +268,7 @@ def _build_render_cmd(source_video: Path, start: float, end: float, filter_compl
         "-map", "[outv]",
         "-map", "0:a?",
         *encode_args,
-        "-c:a", "aac",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
         str(output_path),
     ]
 
