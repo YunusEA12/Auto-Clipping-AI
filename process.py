@@ -214,6 +214,9 @@ def build_filter_complex(
         # TikTok's standard "reaction on top, content below" split: the facecam gets the
         # top third, the gameplay gets the bottom two-thirds — not an even 50/50 stack,
         # since the facecam is a reaction reference, not the main attraction.
+        # Each zone is exactly ONE filter chain over ONE crop of [0:v] — no split/overlay
+        # of two copies of the same source, which previously made the gameplay render as
+        # a visually duplicated screen.
         face_x, face_y, face_w, face_h = facecam_box
         game_x, game_y, game_w, game_h = gameplay_box
         face_zone_h = int(output_h * SPLIT_SCREEN_FACE_RATIO)
@@ -222,45 +225,50 @@ def build_filter_complex(
         # Facecam: "cover" fit — scale up with force_original_aspect_ratio=increase (so no
         # axis is ever stretched) and crop the overhang — fills its zone edge-to-edge with
         # no gaps, since a tight face crop rarely needs to show its full source frame.
+        # format=yuv420p pins a consistent pixel format going into vstack — mixing formats
+        # at a merge point is what produces the green/corrupted-color artifacts.
         face_filter = (
             f"[0:v]crop={face_w}:{face_h}:{face_x}:{face_y},"
             f"scale={output_w}:{face_zone_h}:force_original_aspect_ratio=increase,"
-            f"crop={output_w}:{face_zone_h},setsar=1[face]"
+            f"crop={output_w}:{face_zone_h},setsar=1,format=yuv420p[face]"
         )
 
-        # Gameplay: "contain" fit instead — scaled to the full zone width with the ENTIRE
-        # frame preserved (force_original_aspect_ratio=decrease, i.e. shrink-to-fit rather
-        # than crop-to-fill), so nothing at the edges of the actual gameplay is lost. Any
-        # resulting letterbox gap is filled with a heavily blurred, cover-fit copy of the
-        # same footage rather than flat black, matching the polish of LAYOUT_BLUR_BACKGROUND.
+        # Gameplay: "contain" fit — scaled DOWN to fit inside the zone with the ENTIRE frame
+        # preserved (force_original_aspect_ratio=decrease, never cropped), then padded with
+        # black to exactly fill the zone. pad() bounds both width AND height in one step, so
+        # the result is always exactly output_w x game_zone_h — appears exactly once.
         game_filter = (
-            f"[0:v]crop={game_w}:{game_h}:{game_x}:{game_y},setsar=1,split=2[game_src][game_src2];"
-            f"[game_src]scale={output_w}:{game_zone_h}:force_original_aspect_ratio=increase,"
-            f"crop={output_w}:{game_zone_h},boxblur=20:20[game_bg];"
-            f"[game_src2]scale={output_w}:{game_zone_h}:force_original_aspect_ratio=decrease[game_fg];"
-            f"[game_bg][game_fg]overlay=(W-w)/2:(H-h)/2[game]"
+            f"[0:v]crop={game_w}:{game_h}:{game_x}:{game_y},"
+            f"scale={output_w}:{game_zone_h}:force_original_aspect_ratio=decrease,"
+            f"pad={output_w}:{game_zone_h}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"setsar=1,format=yuv420p[game]"
         )
 
         return (
             f"{face_filter};"
             f"{game_filter};"
-            f"[face][game]vstack=inputs=2[stacked];"
+            f"[face][game]vstack=inputs=2,format=yuv420p[stacked];"
             f"[stacked]subtitles='{subtitles}'[outv]"
         )
 
     if layout == LAYOUT_BLUR_BACKGROUND:
         # setsar=1 right at the source reference (not just on the outputs) so a source
-        # with non-square sample-aspect-ratio metadata can never throw off the "-2"
-        # auto-height math below — the likely cause of an unexpectedly tiny foreground.
-        # Blur a heavily downscaled copy, then upscale — far cheaper than blurring full-res.
+        # with non-square sample-aspect-ratio metadata can never throw off the aspect math
+        # below. Blur a heavily downscaled copy, then upscale — far cheaper than blurring
+        # full-res.
         small_w, small_h = output_w // 4, output_h // 4
         return (
             f"[0:v]setsar=1,scale={small_w}:{small_h}:force_original_aspect_ratio=increase,"
-            f"crop={small_w}:{small_h},boxblur=20:20,scale={output_w}:{output_h},setsar=1[bg];"
-            # Full width, height preserved proportionally and centered — the sharp
-            # foreground stays the dominant element instead of a small lost strip.
-            f"[0:v]setsar=1,scale={output_w}:-2,setsar=1[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[stacked];"
+            f"crop={small_w}:{small_h},boxblur=20:20,scale={output_w}:{output_h},"
+            f"setsar=1,format=yuv420p[bg];"
+            # Contain-fit within the FULL canvas — both width AND height are bounded here
+            # (force_original_aspect_ratio=decrease against output_w:output_h), not just
+            # width. The previous width-only scale (scale=W:-2) left height unconstrained,
+            # so a less-widescreen source could produce a foreground TALLER than the
+            # canvas, pushing the centering overlay negative and corrupting the composite.
+            f"[0:v]setsar=1,scale={output_w}:{output_h}:force_original_aspect_ratio=decrease,"
+            f"setsar=1,format=yuv420p[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[stacked];"
             f"[stacked]subtitles='{subtitles}'[outv]"
         )
 
