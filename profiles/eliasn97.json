@@ -1,0 +1,7 @@
+{
+  "name": "eliasn97",
+  "stream_url": "https://www.twitch.tv/eliasn97",
+  "energy_threshold": 7,
+  "trigger_words": ["Digga", "Bruder", "Was", "Einfach", "Krass", "Ey"],
+  "context_prompt": "Achte besonders auf emotionale Reaktionen, laute Ausraster, Diskussionen mit dem Chat und humorvolle Momente im Stream von Elias."
+}

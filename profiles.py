@@ -12,6 +12,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 PROFILES_DIR = Path("profiles")
+DEFAULT_FALLBACK_PROFILE = "default_streamer"
 
 
 class StreamerProfile(BaseModel):
@@ -42,6 +43,37 @@ def load_profile(profile_name: str) -> StreamerProfile:
         profile.name, profile.energy_threshold, len(profile.trigger_words),
     )
     return profile
+
+
+def load_profile_or_fallback(profile_name: str, fallback: str = DEFAULT_FALLBACK_PROFILE) -> StreamerProfile:
+    """Like load_profile(), but never crashes the caller (e.g. stream_watcher.py's --profile
+    startup) over a missing/misspelled profile name: logs a clear warning and falls back to
+    `fallback` (default_streamer), or the first available profile if even that is missing.
+    Only raises if no profile at all can be found."""
+    try:
+        return load_profile(profile_name)
+    except FileNotFoundError:
+        available = list_profiles()
+        logger.warning(
+            "Streamer-Profil '%s' nicht gefunden. Verfügbare Profile: %s",
+            profile_name, available or "keine",
+        )
+
+        if fallback != profile_name and fallback in available:
+            logger.warning("Verwende Fallback-Profil '%s'.", fallback)
+            return load_profile(fallback)
+
+        if available:
+            next_best = available[0]
+            logger.warning(
+                "Fallback-Profil '%s' ebenfalls nicht verfügbar, verwende stattdessen '%s'.",
+                fallback, next_best,
+            )
+            return load_profile(next_best)
+
+        raise FileNotFoundError(
+            f"Kein Streamer-Profil verfügbar (weder '{profile_name}' noch ein Fallback) in {PROFILES_DIR}."
+        )
 
 
 def list_profiles() -> List[str]:

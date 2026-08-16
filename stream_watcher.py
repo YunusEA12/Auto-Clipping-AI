@@ -354,7 +354,7 @@ def main():
 
     profile_dict = None
     if args.profile:
-        profile_dict = profiles.load_profile(args.profile).model_dump()
+        profile_dict = profiles.load_profile_or_fallback(args.profile).model_dump()
 
     url = args.url or (profile_dict["stream_url"] if profile_dict else None)
     if not url:
