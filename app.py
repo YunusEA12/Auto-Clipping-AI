@@ -190,54 +190,68 @@ if process_clicked:
             clips = clips_data.get("clips", [])
             st.session_state["last_clips_path"] = str(clips_path)
 
-            status.update(
-                label=f"Analyse abgeschlossen ✅ — {len(clips)} Clip(s) gefunden, Rendering startet",
-                state="complete",
+            if clips:
+                status.update(
+                    label=f"Analyse abgeschlossen ✅ — {len(clips)} Clip(s) gefunden, Rendering startet",
+                    state="complete",
+                )
+            else:
+                status.update(
+                    label="Analyse abgeschlossen — kein Content mit hohem viralem Potenzial gefunden",
+                    state="complete",
+                )
+
+        if not clips:
+            # The AI deliberately found nothing worth clipping in this video (see analyze.py's
+            # quality gate) — a valid, intentional result, not an error. Nothing to render.
+            st.info(
+                "ℹ️ Die KI hat in diesem Video keine Clips mit ausreichend hohem viralem "
+                "Potenzial gefunden. Es wurde nichts gerendert."
             )
+        else:
+            # Phase 2: render each clip individually so the UI can show real per-clip progress,
+            # then immediately upload/notify for that clip — a fully automatic loop, no manual
+            # confirmation step in between.
+            st.subheader("🎬 Rendering")
+            progress_bar = st.progress(0.0)
+            clip_status = st.empty()
 
-        # Phase 2: render each clip individually so the UI can show real per-clip progress,
-        # then immediately upload/notify for that clip — a fully automatic loop, no manual
-        # confirmation step in between.
-        st.subheader("🎬 Rendering")
-        progress_bar = st.progress(0.0)
-        clip_status = st.empty()
+            for i, total, clip, output_path in process_module.process_clips_iter(
+                video_path,
+                layout=selected_layout,
+                video_format=selected_format,
+                highlight_color=selected_highlight,
+                transcript=transcript,
+            ):
+                with clip_status, st.spinner(f"Clip {i}/{total}: {clip['title']}"):
+                    upload_status = "rendered"
+                    hashtags = clip.get("hashtags") or upload_tiktok_browser.DEFAULT_HASHTAGS
 
-        for i, total, clip, output_path in process_module.process_clips_iter(
-            video_path,
-            layout=selected_layout,
-            video_format=selected_format,
-            highlight_color=selected_highlight,
-            transcript=transcript,
-        ):
-            with clip_status, st.spinner(f"Clip {i}/{total}: {clip['title']}"):
-                upload_status = "rendered"
-                hashtags = clip.get("hashtags") or upload_tiktok_browser.DEFAULT_HASHTAGS
+                    if do_tiktok_upload:
+                        success = upload_tiktok_browser.try_upload_to_tiktok_browser(
+                            output_path, clip.get("description", clip["title"]), hashtags
+                        )
+                        upload_status = "uploaded" if success else "failed"
 
-                if do_tiktok_upload:
-                    success = upload_tiktok_browser.try_upload_to_tiktok_browser(
-                        output_path, clip.get("description", clip["title"]), hashtags
-                    )
-                    upload_status = "uploaded" if success else "failed"
+                    if do_notify:
+                        notify.send_notification(
+                            title=clip["title"],
+                            energy=clip.get("energy_rating", 0),
+                            filepath=output_path,
+                            upload_status=upload_status,
+                            description=clip.get("description", ""),
+                            hashtags=hashtags,
+                        )
 
-                if do_notify:
-                    notify.send_notification(
-                        title=clip["title"],
-                        energy=clip.get("energy_rating", 0),
-                        filepath=output_path,
-                        upload_status=upload_status,
-                        description=clip.get("description", ""),
-                        hashtags=hashtags,
-                    )
+                progress_bar.progress(i / total, text=f"{i}/{total} Clips gerendert")
 
-            progress_bar.progress(i / total, text=f"{i}/{total} Clips gerendert")
+            clip_status.empty()
 
-        clip_status.empty()
+            if do_upload:
+                with st.spinner("☁️ Lade Clips zu YouTube hoch (privat)..."):
+                    upload_module.upload_all()
 
-        if do_upload:
-            with st.spinner("☁️ Lade Clips zu YouTube hoch (privat)..."):
-                upload_module.upload_all()
-
-        st.success(f"✅ Fertig! {len(clips)} Clip(s) verarbeitet.")
+            st.success(f"✅ Fertig! {len(clips)} Clip(s) verarbeitet.")
     except Exception as e:
         logger.exception("Pipeline failed")
         st.error(f"Fehler in der Pipeline: {e}")

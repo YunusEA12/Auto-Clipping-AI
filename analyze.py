@@ -45,13 +45,16 @@ TRIGGER_WORDS = [
 ]
 
 BASE_SYSTEM_PROMPT = f"""You are a highly-paid TikTok & YouTube Shorts strategist AND a master storyteller /
-content director. Your MAIN JOB is to find as many usable clips as possible — quantity over
-perfection. From a long video, extracting 15-20 solid clips beats extracting only 3 "perfect"
-ones. Quality still matters, but for TikTok, quantity matters more: more clips means more shots
-at going viral, so err on the side of including a clip rather than discarding it.
+content director. Your job is to find every clip in this transcript that has genuinely high
+viral potential — a strong hook, a clear self-contained narrative, and real energy. Quality is
+the bar you select against, not a target clip count.
 
 Analyze the ENTIRE provided timestamped transcript from start to finish and hunt for EVERY
 usable moment — do not stop after the first few good ones, keep scanning the whole transcript.
+ONLY extract a clip if it clears the bar above. If the segment is boring, lacks the context
+needed to stand alone, or violates any of the "PENALTIES" rules you may be shown further below,
+leave it out entirely — do not force a clip out of mediocre content just to have something to
+show.
 
 Look for (any of these is enough — a clip does NOT need to hit several at once):
 - Humor (jokes, punchlines, funny reactions)
@@ -61,10 +64,16 @@ Look for (any of these is enough — a clip does NOT need to hit several at once
 - Informative or interesting moments that are simply worth watching, even without a big reaction
 
 Rules:
-- Volume: Return at least {MIN_CLIPS_TARGET} and up to {MAX_CLIPS_TARGET} clips (fewer only if the
-  transcript is genuinely too short to support that many). Scan the full transcript for distinct
-  usable moments instead of settling for a handful — a long transcript with few clips returned is
-  a failure.
+- Quality gate, not a quota: Only extract a clip if it clearly has high viral potential (strong
+  hook, clear narrative arc, real energy or genuine interest). If the whole transcript is boring,
+  none of it has the context needed for a standalone clip, or every candidate violates a
+  PENALTIES rule, you MUST return an empty clips list. An empty list is a valid, correct, and
+  preferred result over forcing a mediocre clip out of weak material — never pad the output to
+  hit a target count.
+- Volume: When the material genuinely supports it, aim for {MIN_CLIPS_TARGET}-{MAX_CLIPS_TARGET}
+  clips by scanning the full transcript for distinct usable moments — but this target never
+  overrides the quality gate above. Fewer clips, or zero, is correct when that's what the
+  material actually supports.
 - Length: Each clip MUST be at least {MIN_CLIP_DURATION} seconds and at most {MAX_CLIP_DURATION}
   seconds long. When in doubt, make a clip LONGER rather than shorter — a slightly-too-long clip
   is fine, but a clip that starts mid-sentence because it was cut too tight is not.
@@ -131,6 +140,12 @@ class Clip(BaseModel):
 
 class ClipSelection(BaseModel):
     clips: List[Clip]
+
+
+class LLMResponseIncomplete(Exception):
+    """Raised when the selector LLM's response was technically unusable (truncated mid-JSON
+    or unparseable) — distinct from the model validly returning ClipSelection(clips=[]),
+    which is a legitimate "nothing here clears the quality bar" decision, not a failure."""
 
 
 def format_timestamp(seconds: float) -> str:
@@ -436,27 +451,30 @@ def select_clips(
     choice = completion.choices[0]
     parsed = choice.message.parsed
 
-    if parsed is None or not parsed.clips:
-        # finish_reason == "length" means the response was cut off mid-JSON (most likely
-        # cause with MAX_CLIPS_TARGET=20) rather than the model deliberately returning
-        # nothing; either way, degrade gracefully instead of raising — the caller
-        # (analyze()) falls back to find_longest_segment_fallback() when clips is empty.
-        if choice.finish_reason == "length":
-            logger.warning(
-                "LLM response for %s was truncated (finish_reason=length, "
-                "max_completion_tokens=%d) — the JSON likely broke mid-clip. Falling back "
-                "to the longest available transcript segment instead of crashing.",
-                model, MAX_COMPLETION_TOKENS,
-            )
-        elif parsed is None:
-            logger.warning(
-                "LLM response for %s could not be parsed into ClipSelection "
-                "(finish_reason=%s, refusal=%r). Falling back to the longest available "
-                "transcript segment instead of crashing.",
-                model, choice.finish_reason, getattr(choice.message, "refusal", None),
-            )
-        else:
-            logger.warning("LLM returned zero clips for %s.", model)
+    # A technically-unusable response (truncated mid-JSON, or unparseable) is a genuine
+    # failure and raises LLMResponseIncomplete so analyze() knows to fall back to
+    # find_longest_segment_fallback(). This is distinct from the model validly parsing but
+    # deliberately choosing zero clips (handled below) — that's an intentional quality-gate
+    # decision, not a failure, and must NOT trigger the fallback.
+    if choice.finish_reason == "length":
+        # Checked before the generic parsed-is-None case below: a truncated response almost
+        # always fails to parse too, so this more specific/actionable message would otherwise
+        # never be reached.
+        raise LLMResponseIncomplete(
+            f"LLM response for {model} was truncated (finish_reason=length, "
+            f"max_completion_tokens={MAX_COMPLETION_TOKENS}) — the JSON likely broke mid-clip"
+        )
+    if parsed is None:
+        raise LLMResponseIncomplete(
+            f"LLM response for {model} could not be parsed into ClipSelection "
+            f"(finish_reason={choice.finish_reason}, refusal={getattr(choice.message, 'refusal', None)!r})"
+        )
+
+    if not parsed.clips:
+        # The model validly ran and deliberately decided nothing in this transcript clears
+        # the quality bar (see BASE_SYSTEM_PROMPT's "Quality gate, not a quota" rule) — a
+        # correct, intentional result, not a failure. No fallback clip should be generated.
+        logger.info("Kein spannender Content gefunden — die KI hat bewusst keine Clips ausgewählt.")
         return ClipSelection(clips=[])
 
     valid_clips = [
@@ -481,9 +499,10 @@ def select_clips(
 def find_longest_segment_fallback(transcript: dict) -> "ClipSelection":
     """Pick the longest contiguous run of transcript segments (10-60s) as a single clip.
 
-    Used when the LLM returns zero clips within the duration bounds — e.g. a short test
-    chunk with no single moment the model considered strong enough — so the pipeline can
-    still produce something instead of failing outright.
+    Used ONLY when select_clips() couldn't get a usable response at all (LLMResponseIncomplete
+    — a truncated or unparseable API response), so the pipeline still produces something
+    instead of failing outright. NOT used when the model validly decided there's nothing
+    worth clipping — that's a correct result, not a failure, and is left as an empty list.
     """
     segments = transcript.get("segments", [])
     if not segments:
@@ -512,7 +531,7 @@ def find_longest_segment_fallback(transcript: dict) -> "ClipSelection":
 
     i, j, duration = best
     logger.warning(
-        "LLM returned no clips within bounds; falling back to the longest available segment (%.1fs)", duration
+        "LLM response was unusable; falling back to the longest available segment (%.1fs)", duration
     )
     fallback_clip = Clip(
         start_time=segments[i]["start"],
@@ -559,9 +578,17 @@ def analyze(
     else:
         logger.info("No audio file available; skipping emotional-energy scoring")
 
-    selection = select_clips(transcript_text, energy_spikes, window_scores, model, profile)
-    if not selection.clips:
+    try:
+        selection = select_clips(transcript_text, energy_spikes, window_scores, model, profile)
+    except LLMResponseIncomplete as e:
+        logger.warning("%s; falling back to the longest available segment instead of failing.", e)
         selection = find_longest_segment_fallback(transcript)
+
+    if not selection.clips:
+        logger.info(
+            "Kein spannender Content gefunden — die KI hat für dieses Segment absichtlich "
+            "keine Clips ausgewählt. Kein Fallback-Clip wird erzeugt."
+        )
 
     output_path = clips_path_for(transcription_path)
     TEMP_DIR.mkdir(exist_ok=True)
