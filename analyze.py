@@ -22,10 +22,10 @@ FEEDBACK_PATH = Path("feedback.json")
 TOP_PERFORMERS_PATH = Path("top_performers.json")
 MODEL = "gpt-4o-mini"
 
-MIN_CLIP_DURATION = 10
-MAX_CLIP_DURATION = 60
-MIN_CLIPS_TARGET = 5
-MAX_CLIPS_TARGET = 10
+MIN_CLIP_DURATION = 8
+MAX_CLIP_DURATION = 120
+MIN_CLIPS_TARGET = 15
+MAX_CLIPS_TARGET = 20
 
 ENERGY_WINDOW_SECONDS = 2.0
 ENERGY_SPIKE_THRESHOLD_STD = 1.5
@@ -39,29 +39,36 @@ TRIGGER_WORDS = [
 ]
 
 BASE_SYSTEM_PROMPT = f"""You are a highly-paid TikTok & YouTube Shorts strategist AND a master storyteller /
-content director. Your goal is absolute virality, extremely high watch-time, and perfect hooks —
-but NEVER at the cost of a clip that doesn't actually make sense on its own.
+content director. Your MAIN JOB is to find as many usable clips as possible — quantity over
+perfection. From a long video, extracting 15-20 solid clips beats extracting only 3 "perfect"
+ones. Quality still matters, but for TikTok, quantity matters more: more clips means more shots
+at going viral, so err on the side of including a clip rather than discarding it.
 
 Analyze the ENTIRE provided timestamped transcript from start to finish and hunt for EVERY
-potentially viral moment — do not stop after the first few good ones, keep scanning the whole
-transcript.
+usable moment — do not stop after the first few good ones, keep scanning the whole transcript.
 
-Prioritize moments with:
+Look for (any of these is enough — a clip does NOT need to hit several at once):
 - Humor (jokes, punchlines, funny reactions)
-- Strong emotion (surprise, excitement, anger, vulnerability)
+- Emotion, even mild (surprise, excitement, mild annoyance, curiosity)
 - Action or a clear narrative beat (a story with a setup and payoff)
 - Controversial, surprising, or bold statements
+- Informative or interesting moments that are simply worth watching, even without a big reaction
 
 Rules:
-- Volume: Depending on the video length, return at least {MIN_CLIPS_TARGET} and up to
-  {MAX_CLIPS_TARGET} clips. Scan the full transcript for distinct viral moments instead of
-  settling for a handful — a long transcript with few clips returned is a failure.
+- Volume: Return at least {MIN_CLIPS_TARGET} and up to {MAX_CLIPS_TARGET} clips (fewer only if the
+  transcript is genuinely too short to support that many). Scan the full transcript for distinct
+  usable moments instead of settling for a handful — a long transcript with few clips returned is
+  a failure.
 - Length: Each clip MUST be at least {MIN_CLIP_DURATION} seconds and at most {MAX_CLIP_DURATION}
-  seconds long. Clips shorter than {MIN_CLIP_DURATION} seconds are useless and must never be
-  returned.
-- Hooks: Every clip MUST begin exactly on its hook — a controversial, exciting, or funny
-  statement that grabs attention in the first moment. Trim away dead air, silence, or filler
-  before the hook; do not start a clip mid-thought or with a slow lead-in.
+  seconds long. When in doubt, make a clip LONGER rather than shorter — a slightly-too-long clip
+  is fine, but a clip that starts mid-sentence because it was cut too tight is not.
+- Setup context: Before the actual punchline/payoff/energy spike, include roughly 10-15 seconds
+  of setup so a viewer who has no other context understands what's going on. Avoid bare 10-second
+  clips that start mid-sentence right on top of the punchline with no lead-in — the viewer needs
+  time to orient before the payoff lands.
+- Hooks: Every clip should begin on or shortly before its hook — something that gives the viewer
+  a reason to keep watching. Trim away long dead air or filler before it, but don't trim so tight
+  that the setup context above gets lost.
 - Narrative coherence: Every clip MUST make real sense as a self-contained story. Only pick
   sequences with a logical beginning (a problem, question, or setup) and a clear end (the
   answer, punchline, or conclusion). A clip that raises a question but is cut before the answer,
@@ -73,12 +80,15 @@ Rules:
 - Payoff integrity: When you select a moment for its aha-moment, joke, hard fact, or emotional
   reaction, always include its full setup and its full payoff in the same clip — never split a
   setup from its punchline/answer across the clip boundary.
-- Energy priority: The user message may include a list of AUDIO ENERGY SPIKES — timestamps
-  where the raw audio loudness suddenly surged (shouting, laughing, a sudden reaction). Give
-  strong preference to clips where a high energy spike coincides with a strong content hook
-  (a question, tension, or reveal) over clips that only have content OR only have loud audio.
+- Energy tolerance: The user message may include a list of AUDIO ENERGY SPIKES — timestamps
+  where the raw audio loudness suddenly surged (shouting, laughing, a sudden reaction). A high
+  energy spike lining up with a strong hook is a great bonus signal, but it is NOT required —
+  calmer, informative, or mildly funny moments are completely fine too (an energy_rating around
+  5/10 is a perfectly normal, acceptable clip, not a failure). Do not discard a narratively solid
+  clip just because it isn't a maximum-intensity outburst.
 - Trigger words: These words mark genuine high-engagement reactions rather than neutral
-  narration — prefer clips that contain one or more of them when otherwise similar:
+  narration — prefer clips that contain one or more of them when otherwise similar, but their
+  absence is not a reason to reject an otherwise good clip:
   {', '.join(TRIGGER_WORDS)}
 - start_time and end_time must be timestamps that actually occur in the transcript (in seconds).
 - Only select clips that work as a standalone moment without extra context.

@@ -285,7 +285,10 @@ def render_clip(
     ]
 
     logger.info("Rendering clip %d (layout=%s) -> %s", index, layout, output_path)
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    # encoding="utf-8" is required here: without it, subprocess.run's text mode falls back
+    # to the system locale (cp1252/"charmap" on German Windows), which crashes with
+    # UnicodeDecodeError the moment ffmpeg's UTF-8 log output contains a German umlaut.
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
 
     if result.returncode != 0:
         logger.error("FFmpeg failed for clip %d: %s", index, result.stderr[-4000:])

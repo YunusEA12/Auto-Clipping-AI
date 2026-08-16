@@ -90,15 +90,23 @@ def record_stream_chunk(url: str, duration: int = DEFAULT_CHUNK_DURATION) -> Pat
     ]
 
     logger.info("Recording %ds chunk from %s -> %s", duration, url, output_path)
+    # streamlink's own stdout must stay BINARY (it's the raw A/V stream piped straight into
+    # ffmpeg's stdin) — do not add text=True/encoding here, that would corrupt the media data.
     streamlink_proc = subprocess.Popen(
         streamlink_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
 
     try:
+        # ffmpeg's own stderr log IS text, and must be decoded explicitly as UTF-8: without
+        # it, text mode falls back to the system locale (cp1252/"charmap" on German Windows),
+        # which raises UnicodeDecodeError the moment the log contains a German umlaut.
         ffmpeg_result = subprocess.run(
             ffmpeg_cmd,
             stdin=streamlink_proc.stdout,
             capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=duration + 60,
         )
     finally:
@@ -110,7 +118,7 @@ def record_stream_chunk(url: str, duration: int = DEFAULT_CHUNK_DURATION) -> Pat
             streamlink_proc.kill()
 
     if ffmpeg_result.returncode != 0:
-        stderr_tail = ffmpeg_result.stderr[-2000:].decode(errors="ignore") if ffmpeg_result.stderr else ""
+        stderr_tail = ffmpeg_result.stderr[-2000:] if ffmpeg_result.stderr else ""
         raise RuntimeError(f"ffmpeg failed while recording chunk: {stderr_tail}")
 
     if not output_path.exists() or output_path.stat().st_size == 0:
