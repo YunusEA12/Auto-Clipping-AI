@@ -21,8 +21,10 @@ import analyze
 import auto_pilot
 import ingest
 import notify
+import orchestrator
 import process as process_module
 import profiles
+import streamers as streamers_module
 import train_loop
 import transcribe
 import upload as upload_module
@@ -43,9 +45,11 @@ TEMP_DIR = Path("temp")
 OUTPUT_DIR = Path("output")
 AGENT_STATE_PATH = auto_pilot.AGENT_STATE_PATH
 AI_GUIDELINES_PATH = analyze.AI_GUIDELINES_PATH
+ORCHESTRATOR_STATE_PATH = orchestrator.ORCHESTRATOR_STATE_PATH
 
-# If the agent's last telemetry update is older than this, treat it as offline/stalled
-# rather than "just between phases" — generous enough to cover a slow render+critic pass.
+# If the agent's/orchestrator's last telemetry update is older than this, treat it as
+# offline/stalled rather than "just between phases" — generous enough to cover a slow
+# render+critic pass (agent) or one poll interval plus a slow liveness check (orchestrator).
 STALE_THRESHOLD_SECONDS = 300
 
 FORMAT_OPTIONS = {
@@ -98,28 +102,29 @@ st.title("🛰️ Auto-Clipping AI — Agent Control Center")
 st.caption("Überwache den autonomen Clipping-Agenten, sein gelerntes Wissen und die fertigen Clips — alles an einem Ort.")
 
 
-def read_agent_state() -> dict:
-    if not AGENT_STATE_PATH.exists():
+def read_json_file(path: Path) -> dict:
+    if not path.exists():
         return {}
     try:
-        return json.loads(AGENT_STATE_PATH.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
-        logger.warning("Could not read %s: %s", AGENT_STATE_PATH, e)
+        logger.warning("Could not read %s: %s", path, e)
         return {}
 
 
-def state_age_seconds(state: dict) -> "float | None":
-    last_updated_raw = state.get("last_updated")
-    if not last_updated_raw:
+def state_age_seconds(state: dict, field: str = "last_updated") -> "float | None":
+    raw = state.get(field)
+    if not raw:
         return None
     try:
-        last_dt = datetime.fromisoformat(last_updated_raw)
+        dt = datetime.fromisoformat(raw)
     except ValueError:
         return None
-    return (datetime.now(timezone.utc) - last_dt).total_seconds()
+    return (datetime.now(timezone.utc) - dt).total_seconds()
 
 
-agent_state = read_agent_state()
+agent_state = read_json_file(AGENT_STATE_PATH)
+orchestrator_state = read_json_file(ORCHESTRATOR_STATE_PATH)
 
 with st.sidebar:
     st.header("🤖 Agent Status")
@@ -133,6 +138,18 @@ with st.sidebar:
             st.warning(f"⚠️ Offline (seit {int(age)}s)")
         else:
             st.success(agent_state.get("current_action", "Aktiv"))
+
+    st.header("🛰️ Fleet Status")
+    if not orchestrator_state:
+        st.caption("Orchestrator läuft nicht (orchestrator_state.json nicht gefunden).")
+    else:
+        orch_age = state_age_seconds(orchestrator_state, "last_check")
+        orch_offline = orch_age is not None and orch_age > STALE_THRESHOLD_SECONDS
+        live_count = sum(1 for s in orchestrator_state.get("streamers", {}).values() if s.get("recording"))
+        if orch_offline:
+            st.warning(f"⚠️ Offline (seit {int(orch_age)}s)")
+        else:
+            st.success(f"🟢 Aktiv — {live_count} Aufnahme(n) laufen")
 
     st.divider()
 
@@ -176,8 +193,9 @@ with st.sidebar:
             st.caption(f"Kontext: {selected_profile['context_prompt']}")
 
 
-tab_radar, tab_brain, tab_archive, tab_manual = st.tabs(
-    ["📡 Live Radar & Status", "🧠 KI Gehirn (Memory)", "🎞️ Clip Archiv", "🎛️ Manueller Modus"]
+tab_radar, tab_fleet, tab_brain, tab_archive, tab_manual = st.tabs(
+    ["📡 Live Radar & Status", "👥 Streamer Verwaltung & Fleet", "🧠 KI Gehirn (Memory)",
+     "🎞️ Clip Archiv", "🎛️ Manueller Modus"]
 )
 
 # --- Tab 1: Live Radar & Status ------------------------------------------------------------
@@ -231,7 +249,94 @@ with tab_radar:
         st.error("🔴 Keine Cookies gefunden. Führe `python get_cookies.py` aus.")
     st.caption(tiktok_detail)
 
-# --- Tab 2: KI Gehirn (Memory) --------------------------------------------------------------
+# --- Tab 2: Streamer Verwaltung & Fleet ------------------------------------------------------
+
+with tab_fleet:
+    st.subheader("👥 Streamer Verwaltung & Fleet")
+    st.caption(
+        "Streamer, die orchestrator.py rund um die Uhr überwacht — sobald einer live geht, "
+        "startet der Orchestrator automatisch einen auto_pilot.py-Prozess für ihn."
+    )
+
+    if not orchestrator_state:
+        st.info(
+            "Der Orchestrator läuft aktuell nicht. Starte ihn in einem separaten Terminal:\n\n"
+            "`python orchestrator.py`"
+        )
+    else:
+        orch_age = state_age_seconds(orchestrator_state, "last_check")
+        if orch_age is not None and orch_age > STALE_THRESHOLD_SECONDS:
+            st.warning(f"⚠️ Orchestrator scheint offline zu sein — letzter Check vor {int(orch_age)}s.")
+        else:
+            st.success(
+                f"🟢 Orchestrator aktiv — Poll-Intervall: {orchestrator_state.get('poll_interval', '–')}s"
+            )
+        with st.expander("Rohdaten (orchestrator_state.json)"):
+            st.json(orchestrator_state)
+
+    st.divider()
+    st.markdown("#### Konfigurierte Streamer")
+
+    streamer_entries = streamers_module.load_streamers()
+    orchestrator_streamers = (orchestrator_state or {}).get("streamers", {})
+
+    if not streamer_entries:
+        st.info("Noch keine Streamer konfiguriert. Füge unten einen hinzu.")
+    else:
+        for entry in streamer_entries:
+            live_info = orchestrator_streamers.get(entry["name"], {})
+            is_recording = live_info.get("recording", False)
+            is_live = live_info.get("live", False)
+
+            with st.container(border=True, key=f"streamer_card_{entry['name']}"):
+                col_info, col_status, col_delete = st.columns([3, 2, 1])
+                with col_info:
+                    st.markdown(f"**{entry['name']}**")
+                    st.caption(entry["url"])
+                    details = []
+                    if entry.get("profile"):
+                        details.append(f"Profil: {entry['profile']}")
+                    details.append("Auto-Upload: " + ("✅" if entry.get("auto_upload") else "❌"))
+                    st.caption(" · ".join(details))
+                with col_status:
+                    if is_recording:
+                        st.success(f"🔴 LIVE — wird aufgenommen (PID {live_info.get('pid', '–')})")
+                    elif is_live:
+                        st.warning("🟡 Live erkannt, Aufnahme startet...")
+                    else:
+                        st.caption("⚪ Offline")
+                with col_delete:
+                    if st.button("🗑️ Entfernen", key=f"del_streamer_{entry['name']}"):
+                        streamers_module.remove_streamer(entry["name"])
+                        st.rerun()
+
+    st.divider()
+    st.markdown("#### ➕ Neuen Streamer hinzufügen")
+    with st.form("add_streamer_form", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            new_streamer_name = st.text_input("Name")
+            new_streamer_url = st.text_input("Stream-URL", placeholder="https://twitch.tv/...")
+        with col2:
+            fleet_profile_options = [""] + profiles.list_profiles()
+            new_streamer_profile = st.selectbox("Profil (optional)", fleet_profile_options)
+            new_streamer_auto_upload = st.checkbox("🚀 Auto-Upload zu TikTok aktivieren")
+
+        add_streamer_submitted = st.form_submit_button("Hinzufügen", type="primary")
+        if add_streamer_submitted:
+            if not new_streamer_name or not new_streamer_url:
+                st.error("Name und Stream-URL sind erforderlich.")
+            else:
+                try:
+                    streamers_module.add_streamer(
+                        new_streamer_name, new_streamer_url, new_streamer_profile, new_streamer_auto_upload
+                    )
+                    st.success(f"'{new_streamer_name}' hinzugefügt.")
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+
+# --- Tab 3: KI Gehirn (Memory) --------------------------------------------------------------
 
 with tab_brain:
     st.subheader("🧠 KI Gehirn (Memory)")
@@ -264,7 +369,7 @@ with tab_brain:
         with st.expander("Rohtext (ai_guidelines.txt)"):
             st.code(content, language=None)
 
-# --- Tab 3: Clip Archiv ---------------------------------------------------------------------
+# --- Tab 4: Clip Archiv ---------------------------------------------------------------------
 
 with tab_archive:
     st.subheader("🎞️ Clip Archiv")
@@ -341,7 +446,7 @@ with tab_archive:
                             logger.info("Deleted clip %s", video_path)
                             st.rerun()
 
-# --- Tab 4: Manueller Modus (original one-click pipeline) -------------------------------------
+# --- Tab 5: Manueller Modus (original one-click pipeline) -------------------------------------
 
 with tab_manual:
     st.subheader("🎛️ Manueller Modus")

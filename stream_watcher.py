@@ -46,10 +46,11 @@ ENERGY_THRESHOLD = 7  # clip.energy_rating >= this counts as a "hot clip" worth 
 _processing_lock = threading.Lock()
 
 
-def _resolve_streamlink_path() -> str:
+def resolve_streamlink_path() -> str:
     """Find the streamlink executable even when the venv isn't "activated" (no venv/Scripts
     on PATH) — the common case when this project is run as `venv\\Scripts\\python.exe ...`.
-    pip installs console scripts next to the interpreter, so check there too."""
+    pip installs console scripts next to the interpreter, so check there too. Public
+    (no leading underscore) since orchestrator.py also needs it for its liveness checks."""
     on_path = shutil.which("streamlink")
     if on_path:
         return on_path
@@ -79,7 +80,7 @@ def record_stream_chunk(url: str, duration: int = DEFAULT_CHUNK_DURATION) -> Pat
     timestamp = int(time.time())
     output_path = TEMP_DIR / f"live_chunk_{timestamp}.ts"
 
-    streamlink_cmd = [_resolve_streamlink_path(), url, "best", "--stdout", "--quiet"]
+    streamlink_cmd = [resolve_streamlink_path(), url, "best", "--stdout", "--quiet"]
     ffmpeg_cmd = [
         "ffmpeg", "-y",
         "-i", "pipe:0",
