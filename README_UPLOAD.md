@@ -21,21 +21,33 @@ als du bei TikTok anmelden. Das ist gleichbedeutend mit einem Passwort.
   offiziell unterstützten Wegs und kann gegen die Nutzungsbedingungen von TikTok verstoßen.
   Das ist deine eigene Abwägung für deinen eigenen Account.
 
-## So exportierst du deine Cookies
+## So bekommst du deine Cookies (empfohlen: get_cookies.py)
 
-1. Logge dich in einem normalen Browser (Chrome, Firefox, Edge) unter **tiktok.com** mit dem
-   Account ein, von dem aus hochgeladen werden soll.
-2. Installiere eine Cookie-Export-Erweiterung, z. B. **"Cookie-Editor"** (verfügbar für Chrome
-   und Firefox) — oder ein vergleichbares Tool, das Cookies als JSON exportieren kann.
-3. Öffne auf **tiktok.com** die Erweiterung und exportiere alle Cookies dieser Seite als JSON
-   (meist ein Button "Export" → "JSON" oder "Export as JSON").
-4. Speichere den kopierten Inhalt als Datei `cookies.json` im Projekt-Hauptverzeichnis (auf
-   derselben Ebene wie `app.py`, `auto_pilot.py`, etc.).
+Das Projekt bringt ein eigenes Tool mit, das das manuelle Rumkopieren von Cookies aus
+Browser-Erweiterungen überflüssig macht:
+
+```
+python get_cookies.py
+```
+
+Das Skript öffnet einen echten, sichtbaren Chrome-Browser und navigiert zu tiktok.com/login.
+**Du loggst dich dort selbst ein** (inkl. Captcha/2FA, falls nötig) — Playwright automatisiert
+nur das Öffnen des Fensters, nicht den Login selbst. Danach drückst du im Terminal Enter, und
+das Skript speichert die aktuellen Session-Cookies direkt im korrekten Playwright-Format als
+`cookies.json`. Kein Format-Mismatch, kein manuelles Anpassen nötig.
+
+### Alternative: Browser-Erweiterung
+
+Falls du lieber eine Cookie-Export-Erweiterung nutzt (z. B. "Cookie-Editor" für Chrome/Firefox):
+logge dich normal auf tiktok.com ein, exportiere die Cookies dieser Seite als JSON, und
+speichere sie als `cookies.json` im Projekt-Hauptverzeichnis. Das Format dieser Erweiterungen
+weicht leicht von Playwrights nativem Format ab (siehe unten) — `tiktok_uploader.py` gleicht
+das automatisch aus.
 
 ## Erwartetes Format
 
-Eine JSON-Liste von Cookie-Objekten, wie sie die meisten Cookie-Export-Erweiterungen direkt
-liefern:
+`get_cookies.py` erzeugt dieses Format automatisch korrekt. Falls du stattdessen eine
+Browser-Erweiterung nutzt, ist eine JSON-Liste von Cookie-Objekten wie folgt erwartet:
 
 ```json
 [

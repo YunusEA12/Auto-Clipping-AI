@@ -39,7 +39,6 @@ logger = logging.getLogger(__name__)
 
 ENV_PATH = Path(".env")
 CLIENT_SECRET_PATH = Path("client_secret.json")
-TIKTOK_COOKIES_PATH = tiktok_uploader.COOKIES_PATH
 TEMP_DIR = Path("temp")
 OUTPUT_DIR = Path("output")
 AGENT_STATE_PATH = auto_pilot.AGENT_STATE_PATH
@@ -157,10 +156,12 @@ with st.sidebar:
     else:
         st.error("❌ Fehlt — client_secret.json (YouTube)")
 
-    if TIKTOK_COOKIES_PATH.exists():
-        st.success("✅ Bereit — cookies.json gefunden")
+    tiktok_ready, tiktok_detail = tiktok_uploader.cookies_status()
+    if tiktok_ready:
+        st.success("🟢 TikTok verknüpft (Bereit für Upload)")
     else:
-        st.warning("⚠️ cookies.json fehlt (siehe README_UPLOAD.md für den TikTok-Upload-Bot)")
+        st.error("🔴 Keine Cookies gefunden. Führe `python get_cookies.py` aus.")
+    st.caption(tiktok_detail)
 
     st.divider()
     st.header("🕴️ Streamer-Mitarbeiter")
@@ -220,6 +221,15 @@ with tab_radar:
 
         with st.expander("Rohdaten (agent_state.json)"):
             st.json(agent_state)
+
+    st.divider()
+    st.markdown("#### 🔗 TikTok Upload Status")
+    tiktok_ready, tiktok_detail = tiktok_uploader.cookies_status()
+    if tiktok_ready:
+        st.success("🟢 TikTok verknüpft (Bereit für Upload)")
+    else:
+        st.error("🔴 Keine Cookies gefunden. Führe `python get_cookies.py` aus.")
+    st.caption(tiktok_detail)
 
 # --- Tab 2: KI Gehirn (Memory) --------------------------------------------------------------
 
@@ -389,10 +399,10 @@ with tab_manual:
             st.error("❌ client_secret.json fehlt. Wird für den automatischen YouTube-Upload benötigt.")
             st.stop()
 
-        if do_tiktok_upload and not TIKTOK_COOKIES_PATH.exists():
+        if do_tiktok_upload and not tiktok_uploader.cookies_status()[0]:
             st.error(
-                "❌ cookies.json fehlt. Siehe README_UPLOAD.md, um deine TikTok-Session-Cookies "
-                "zu exportieren, bevor du den Auto-Upload aktivierst."
+                "❌ Keine gültigen TikTok-Cookies gefunden. Führe `python get_cookies.py` aus, "
+                "bevor du den Auto-Upload aktivierst."
             )
             st.stop()
 

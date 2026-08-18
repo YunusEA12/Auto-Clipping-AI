@@ -8,7 +8,9 @@ allows an unaudited developer app to send a video to the creator's private inbox
 (see upload_tiktok.py's INIT_UPLOAD_URL docstring) — it cannot publish directly. This script
 drives the real TikTok upload page instead, so a fully hands-off post is possible.
 
-See README_UPLOAD.md for exactly how to produce cookies.json. It holds real TikTok session
+Run get_cookies.py once to produce cookies.json (a real, visible login you do yourself,
+saved straight to Playwright's native cookie format — no browser-extension reformatting).
+See README_UPLOAD.md for details. cookies.json holds real TikTok session
 cookies and must never be committed — see .gitignore. This is NOT TikTok's official,
 supported integration path — it automates their web UI rather than calling a documented
 API, which most platforms' terms of service restrict. Understand and accept that trade-off
@@ -26,7 +28,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -81,6 +83,24 @@ def load_cookies() -> Optional[List[dict]]:
         return None
 
     return [_normalize_cookie(c) for c in raw_cookies]
+
+
+def cookies_status() -> Tuple[bool, str]:
+    """Health-check used by app.py's dashboard: (is_ready, detail_message). Reuses
+    load_cookies() so there's one source of truth for "is cookies.json usable" instead of
+    the dashboard re-parsing the file itself."""
+    if not COOKIES_PATH.exists():
+        return False, f"{COOKIES_PATH} nicht gefunden"
+
+    cookies = load_cookies()
+    if not cookies:
+        return False, f"{COOKIES_PATH} ist leer oder ungültig"
+
+    names = {c.get("name") for c in cookies}
+    if "sessionid" not in names:
+        return False, f"{len(cookies)} Cookie(s) gefunden, aber kein 'sessionid' — Login vermutlich unvollständig"
+
+    return True, f"{len(cookies)} Cookie(s) gefunden, inkl. sessionid"
 
 
 def _wait_for_upload_complete(page) -> None:
