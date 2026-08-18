@@ -4,14 +4,19 @@ forever.
 Each cycle:
   1. Collect    — run the existing ingest -> transcribe -> analyze -> process pipeline to
      render a fresh batch of 3-5 clips into output/.
-  2. Evaluate   — hand that batch to train_loop.py's critic, which scores each clip
-     (reward_score -10..+10) and derives new AVOID/DO rules into ai_guidelines.txt.
+  2. Evaluate   — hand that batch (with the rendered .mp4 paths) to train_loop.py's
+     multimodal critic, which scores each clip on narrative AND visual composition
+     (reward_score -10..+10, using extracted preview frames when available — degrading to
+     text-only if the vision call fails) and derives new content/visual/viral-pattern rules
+     into ai_guidelines.txt.
   3. Purge      — physically delete any clip (its .mp4 AND its entry in the batch's
      *_clips.json) whose reward_score falls below --purge-threshold. Only "winners" survive
      on disk.
   5. Deployment — with --auto-upload: every surviving clip is handed to tiktok_uploader.py
      (a cookie-authenticated Playwright bot) and, once uploaded, moved out of output/ into
-     uploaded_clips/ to keep the working directory limited to undecided clips.
+     uploaded_clips/ (with a metadata sidecar .json) to keep the working directory limited
+     to undecided clips. metrics_tracker.py later reads that sidecar to build
+     viral_memory.json, which the critic reads back in on future runs.
   6. Repeat     — go back to step 1. analyze.py re-reads ai_guidelines.txt fresh on every
      call (see analyze.load_ai_guidelines_section()), so each new cycle's clip selection is
      informed by everything the critic has learned so far.
@@ -114,20 +119,22 @@ def purge_low_scoring_clips(
     rendered: Dict[str, Path],
     clips_path: Path,
     threshold: int,
-) -> Tuple[int, int, List[Tuple[dict, Path]]]:
+) -> Tuple[int, int, List[Tuple[dict, Path, Optional[int]]]]:
     """Phase 3 (Purge): delete the .mp4 and remove the clips.json entry for every clip whose
     critic reward_score is below `threshold`. Clips the critic couldn't score (e.g. its
     response was unparseable) are kept rather than guessed at — never delete on ambiguity.
 
-    Returns (kept, deleted, survivors) — survivors is [(clip, output_path), ...] for every
-    clip that made it through, which Phase 5 (Deployment) uploads."""
+    Returns (kept, deleted, survivors) — survivors is [(clip, output_path, reward_score),
+    ...] for every clip that made it through. Phase 5 (Deployment) uploads them and records
+    reward_score alongside the AI's own metadata in each clip's uploaded_clips/ sidecar, for
+    later correlation against real view/like counts in viral_memory.json."""
     score_by_title = {v.clip_title: v.reward_score for v in batch.verdicts}
 
     with open(clips_path, "r", encoding="utf-8") as f:
         clips_data = json.load(f)
 
     surviving_clips = []
-    survivors: List[Tuple[dict, Path]] = []
+    survivors: List[Tuple[dict, Path, Optional[int]]] = []
     kept, deleted = 0, 0
 
     for clip in clips_data.get("clips", []):
@@ -144,7 +151,7 @@ def purge_low_scoring_clips(
             surviving_clips.append(clip)
             kept += 1
             if output_path and output_path.exists():
-                survivors.append((clip, output_path))
+                survivors.append((clip, output_path, score))
 
     with open(clips_path, "w", encoding="utf-8") as f:
         json.dump({"clips": surviving_clips}, f, ensure_ascii=False, indent=2)
@@ -152,18 +159,24 @@ def purge_low_scoring_clips(
     return kept, deleted, survivors
 
 
-def run_deployment_phase(survivors: List[Tuple[dict, Path]], publish: bool) -> Tuple[int, int]:
+def run_deployment_phase(survivors: List[Tuple[dict, Path, Optional[int]]], publish: bool) -> Tuple[int, int]:
     """Phase 5 (Deployment): upload every clip that survived Phase 3's purge to TikTok via
     tiktok_uploader.py (cookie-authenticated Playwright bot), then move successfully
     uploaded files out of output/ into uploaded_clips/ to keep it clean. A failed upload
-    just leaves that clip in output/ for a future opportunity — it never stops the loop."""
+    just leaves that clip in output/ for a future opportunity — it never stops the loop.
+
+    Alongside each moved .mp4, writes a metadata sidecar .json (title, description,
+    hashtags, the exact caption text posted, viral_score/energy_rating/reward_score, when
+    it was uploaded) — this is the "clip metadata" metrics_tracker.py later matches against
+    real TikTok view/like counts to build viral_memory.json."""
     UPLOADED_CLIPS_DIR.mkdir(exist_ok=True)
     uploaded, failed = 0, 0
 
-    for clip, output_path in survivors:
+    for clip, output_path, reward_score in survivors:
         title = clip.get("title", output_path.name)
         hashtags = clip.get("hashtags") or tiktok_uploader.DEFAULT_HASHTAGS
         description = clip.get("description") or title
+        caption = tiktok_uploader.build_caption_text(description, hashtags)
 
         success = tiktok_uploader.try_upload_clip(output_path, description, hashtags, publish=publish)
         if not success:
@@ -175,6 +188,22 @@ def run_deployment_phase(survivors: List[Tuple[dict, Path]], publish: bool) -> T
         try:
             destination = UPLOADED_CLIPS_DIR / output_path.name
             shutil.move(str(output_path), str(destination))
+
+            metadata = {
+                "title": title,
+                "description": description,
+                "hashtags": hashtags,
+                "caption": caption,
+                "viral_score": clip.get("viral_score"),
+                "energy_rating": clip.get("energy_rating"),
+                "reward_score": reward_score,
+                "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                "publish": publish,
+            }
+            destination.with_suffix(".json").write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+
             logger.info("📦 '%s' hochgeladen und nach %s verschoben", title, destination)
         except OSError as e:
             logger.warning("Upload für '%s' erfolgreich, aber Verschieben nach %s fehlgeschlagen: %s", title, UPLOADED_CLIPS_DIR, e)
@@ -240,10 +269,13 @@ def run_cycle(
     ):
         rendered[clip["title"]] = output_path
 
-    # Phase 2 (Evaluate & Update): score the batch and fold new AVOID/DO rules into
-    # ai_guidelines.txt — reused as-is from train_loop.py, no duplicated critic logic here.
+    # Phase 2 (Evaluate & Update): score the batch (narrative + visual composition, via
+    # preview frames extracted from the just-rendered clips) and fold new content/visual/
+    # viral-pattern rules into ai_guidelines.txt — reused as-is from train_loop.py.
     update_agent_state(current_action="🧠 KI bewertet die Clips (Critic)", **common_state)
-    guidelines_path, batch = train_loop.run_training_loop(clips_path=clips_path, model=critic_model)
+    guidelines_path, batch = train_loop.run_training_loop(
+        clips_path=clips_path, model=critic_model, rendered=rendered
+    )
 
     # Phase 3 (Clean & Purge)
     update_agent_state(current_action="🧹 Bereinigung — lösche schwache Clips", **common_state)

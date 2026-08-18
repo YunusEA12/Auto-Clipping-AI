@@ -1,11 +1,15 @@
 """Streamlit "Agent Control Center": monitors the autonomous auto_pilot.py agent in real
-time (Live Radar), shows what it has learned (KI Gehirn / ai_guidelines.txt), lets you
-browse the surviving clips (Clip Archiv), and still offers the original one-click manual
-pipeline (Manueller Modus) for processing a single video on demand.
+time (Live Radar), lets you manage the 24/7 streamer fleet orchestrator.py watches
+(Streamer Verwaltung & Fleet), shows what the multimodal critic has learned — text/content,
+visual/layout, and real viral-performance rules (KI Gehirn / ai_guidelines.txt) — shows real
+TikTok view/like data from metrics_tracker.py (Viral Analytics), lets you browse the
+surviving clips (Clip Archiv), and still offers the original one-click manual pipeline
+(Manueller Modus) for processing a single video on demand.
 
-app.py itself does not run the agent loop — that's auto_pilot.py, typically running as a
-separate long-lived process (`python auto_pilot.py --profile ... --live`). This dashboard
-only reads the files that process writes (agent_state.json, ai_guidelines.txt, output/)."""
+app.py itself does not run any of the background loops — those are auto_pilot.py,
+orchestrator.py, and metrics_tracker.py, each typically running as its own long-lived
+process. This dashboard only reads the files those processes write (agent_state.json,
+orchestrator_state.json, ai_guidelines.txt, viral_memory.json, output/)."""
 
 import json
 import logging
@@ -46,6 +50,7 @@ OUTPUT_DIR = Path("output")
 AGENT_STATE_PATH = auto_pilot.AGENT_STATE_PATH
 AI_GUIDELINES_PATH = analyze.AI_GUIDELINES_PATH
 ORCHESTRATOR_STATE_PATH = orchestrator.ORCHESTRATOR_STATE_PATH
+VIRAL_MEMORY_PATH = train_loop.VIRAL_MEMORY_PATH
 
 # If the agent's/orchestrator's last telemetry update is older than this, treat it as
 # offline/stalled rather than "just between phases" — generous enough to cover a slow
@@ -193,9 +198,9 @@ with st.sidebar:
             st.caption(f"Kontext: {selected_profile['context_prompt']}")
 
 
-tab_radar, tab_fleet, tab_brain, tab_archive, tab_manual = st.tabs(
+tab_radar, tab_fleet, tab_brain, tab_analytics, tab_archive, tab_manual = st.tabs(
     ["📡 Live Radar & Status", "👥 Streamer Verwaltung & Fleet", "🧠 KI Gehirn (Memory)",
-     "🎞️ Clip Archiv", "🎛️ Manueller Modus"]
+     "📈 Viral Analytics", "🎞️ Clip Archiv", "🎛️ Manueller Modus"]
 )
 
 # --- Tab 1: Live Radar & Status ------------------------------------------------------------
@@ -340,7 +345,10 @@ with tab_fleet:
 
 with tab_brain:
     st.subheader("🧠 KI Gehirn (Memory)")
-    st.caption("Das Lern-Protokoll des Critics (train_loop.py) — was hat funktioniert, was wird nie wieder gemacht.")
+    st.caption(
+        "Das Lern-Protokoll des multimodalen Critics (train_loop.py) — getrennt nach "
+        "Text/Content, visueller Komposition und echten Viral-Erfolgsmustern."
+    )
 
     if not AI_GUIDELINES_PATH.exists():
         st.info(
@@ -350,26 +358,99 @@ with tab_brain:
         )
     else:
         content = AI_GUIDELINES_PATH.read_text(encoding="utf-8")
-        positive_rules, negative_rules = train_loop.parse_guidelines_file(content)
+        categories = train_loop.parse_guidelines_file(content)
 
+        st.markdown("### 📝 Text/Content Rules")
         col_pos, col_neg = st.columns(2)
         with col_pos:
             st.markdown("#### ✅ Positive Rewards — DO THIS")
-            if positive_rules:
-                st.success("\n\n".join(f"✓ {rule}" for rule in positive_rules))
+            if categories["content_positive"]:
+                st.success("\n\n".join(f"✓ {rule}" for rule in categories["content_positive"]))
             else:
                 st.info("Noch keine positiven Regeln gelernt.")
         with col_neg:
             st.markdown("#### 🚫 Penalties — NEVER DO THIS")
-            if negative_rules:
-                st.error("\n\n".join(f"✗ {rule}" for rule in negative_rules))
+            if categories["content_negative"]:
+                st.error("\n\n".join(f"✗ {rule}" for rule in categories["content_negative"]))
             else:
                 st.info("Noch keine Penalty-Regeln gelernt.")
+
+        st.divider()
+        st.markdown("### 🎨 Visual/Layout Rules")
+        st.caption("Aus dem Vision-Critic — bewertet Screenshots der gerenderten Clips (Facecam-Position, Gameplay-Sichtbarkeit, Glitches).")
+        col_vpos, col_vneg = st.columns(2)
+        with col_vpos:
+            st.markdown("#### ✅ Visuell — DO THIS")
+            if categories["visual_positive"]:
+                st.success("\n\n".join(f"✓ {rule}" for rule in categories["visual_positive"]))
+            else:
+                st.info("Noch keine visuellen Regeln gelernt.")
+        with col_vneg:
+            st.markdown("#### 🚫 Visuell — NEVER DO THIS")
+            if categories["visual_negative"]:
+                st.error("\n\n".join(f"✗ {rule}" for rule in categories["visual_negative"]))
+            else:
+                st.info("Noch keine visuellen Penalty-Regeln gelernt.")
+
+        st.divider()
+        st.markdown("### 🔥 Viral Success Patterns")
+        st.caption("Aus echten TikTok-Performance-Daten (viral_memory.json via metrics_tracker.py).")
+        if categories["viral_patterns"]:
+            st.success("\n\n".join(f"🔥 {rule}" for rule in categories["viral_patterns"]))
+        else:
+            st.info("Noch keine Muster aus echten Performance-Daten gelernt.")
 
         with st.expander("Rohtext (ai_guidelines.txt)"):
             st.code(content, language=None)
 
-# --- Tab 4: Clip Archiv ---------------------------------------------------------------------
+# --- Tab 4: Viral Analytics ------------------------------------------------------------------
+
+with tab_analytics:
+    st.subheader("📈 Viral Analytics")
+    st.caption("Echte View-/Like-Zahlen für hochgeladene Clips, erfasst von metrics_tracker.py.")
+
+    viral_memory = read_json_file(VIRAL_MEMORY_PATH)
+    if not viral_memory:
+        st.info(
+            "Noch keine Performance-Daten vorhanden. Starte `python metrics_tracker.py` in "
+            "einem separaten Terminal, um View-/Like-Zahlen für Clips in uploaded_clips/ zu erfassen."
+        )
+    else:
+        rows = []
+        for clip_id, entry in viral_memory.items():
+            rows.append({
+                "Titel": entry.get("title", clip_id),
+                "Views": entry.get("views"),
+                "Likes": entry.get("likes"),
+                "Viral Score (KI)": entry.get("viral_score"),
+                "Energie": entry.get("energy_rating"),
+                "Critic Score": entry.get("reward_score"),
+                "Zuletzt geprüft": entry.get("checked_at", "–"),
+            })
+
+        measured = [r for r in rows if r["Views"] is not None]
+        unmeasured_count = len(rows) - len(measured)
+
+        if measured:
+            total_views = sum(r["Views"] or 0 for r in measured)
+            total_likes = sum(r["Likes"] or 0 for r in measured)
+            best = max(measured, key=lambda r: r["Views"] or 0)
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Gesamt-Views", f"{total_views:,}".replace(",", "."))
+            col2.metric("Gesamt-Likes", f"{total_likes:,}".replace(",", "."))
+            col3.metric("Top-Clip", best["Titel"], f"{best['Views']:,} Views".replace(",", "."))
+
+            st.divider()
+            sorted_rows = sorted(measured, key=lambda r: r["Views"] or 0, reverse=True)
+            st.dataframe(sorted_rows, width="stretch", hide_index=True)
+        else:
+            st.info("Clips sind erfasst, aber noch keine Metriken gemessen.")
+
+        if unmeasured_count:
+            st.caption(f"{unmeasured_count} Clip(s) noch ohne gemessene Metriken.")
+
+# --- Tab 5: Clip Archiv ---------------------------------------------------------------------
 
 with tab_archive:
     st.subheader("🎞️ Clip Archiv")
@@ -446,7 +527,7 @@ with tab_archive:
                             logger.info("Deleted clip %s", video_path)
                             st.rerun()
 
-# --- Tab 5: Manueller Modus (original one-click pipeline) -------------------------------------
+# --- Tab 6: Manueller Modus (original one-click pipeline) -------------------------------------
 
 with tab_manual:
     st.subheader("🎛️ Manueller Modus")

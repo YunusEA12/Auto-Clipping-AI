@@ -14,6 +14,7 @@ ai_guidelines.txt
 agent_state.json
 streamers.json
 orchestrator_state.json
+viral_memory.json
 tiktok_client_secret.json
 tiktok_token.json
 tiktok_cookies.json

@@ -194,6 +194,62 @@ def get_video_dimensions(video_path: Path) -> Tuple[int, int]:
     return width, height
 
 
+def get_video_duration(video_path: Path) -> float:
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0
+        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+    finally:
+        cap.release()
+
+    if fps <= 0 or frame_count <= 0:
+        raise RuntimeError(f"Could not determine duration for video: {video_path}")
+    return frame_count / fps
+
+
+# Near-start, middle, near-end rather than literal 0%/50%/100% — the very first/last frame
+# of a render is occasionally black (encoder ramp-up/fade), which would otherwise starve
+# the vision critic (train_loop.py) of a usable image for that slot.
+PREVIEW_FRAME_FRACTIONS = (0.05, 0.5, 0.95)
+
+
+def extract_preview_frames(video_path: Path, frames_dir: Path = TEMP_DIR) -> List[Path]:
+    """Extract 3 evenly spaced frames (near-start, middle, near-end) from a rendered clip
+    via FFmpeg, as JPEGs — used by train_loop.py's multimodal vision critic to inspect
+    visual composition (facecam position, gameplay visibility, black bars, glitches).
+
+    Best-effort: if a given timestamp's frame can't be extracted, it's skipped rather than
+    failing the whole batch — the caller (train_loop.py) degrades to text-only evaluation
+    if too few frames come back."""
+    try:
+        duration = get_video_duration(video_path)
+    except RuntimeError as e:
+        logger.warning("Could not determine duration for %s, skipping frame extraction: %s", video_path, e)
+        return []
+
+    frames_dir.mkdir(exist_ok=True)
+    frame_paths = []
+    for i, fraction in enumerate(PREVIEW_FRAME_FRACTIONS):
+        timestamp = max(0.0, duration * fraction)
+        frame_path = frames_dir / f"{video_path.stem}_frame{i}.jpg"
+        cmd = [
+            "ffmpeg", "-y", "-ss", str(timestamp), "-i", str(video_path),
+            "-frames:v", "1", "-q:v", "2", str(frame_path),
+        ]
+        result = _run_ffmpeg(cmd)
+        if result.returncode != 0 or not frame_path.exists():
+            logger.warning(
+                "Could not extract preview frame at %.2fs from %s: %s",
+                timestamp, video_path, result.stderr[-500:] if result.stderr else "",
+            )
+            continue
+        frame_paths.append(frame_path)
+
+    return frame_paths
+
+
 def escape_subtitles_path(path: Path) -> str:
     p = str(path.resolve()).replace("\\", "/")
     p = p.replace(":", "\\:")
