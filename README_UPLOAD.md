@@ -23,18 +23,28 @@ als du bei TikTok anmelden. Das ist gleichbedeutend mit einem Passwort.
 
 ## So bekommst du deine Cookies (empfohlen: get_cookies.py)
 
-Das Projekt bringt ein eigenes Tool mit, das das manuelle Rumkopieren von Cookies aus
-Browser-Erweiterungen überflüssig macht:
+Voraussetzung: Du bist in einem deiner normalen Browser (Chrome, Edge oder Firefox) bereits
+bei tiktok.com eingeloggt — ganz gewöhnlich, wie jeder andere Login auch.
 
 ```
 python get_cookies.py
 ```
 
-Das Skript öffnet einen echten, sichtbaren Chrome-Browser und navigiert zu tiktok.com/login.
-**Du loggst dich dort selbst ein** (inkl. Captcha/2FA, falls nötig) — Playwright automatisiert
-nur das Öffnen des Fensters, nicht den Login selbst. Danach drückst du im Terminal Enter, und
-das Skript speichert die aktuellen Session-Cookies direkt im korrekten Playwright-Format als
-`cookies.json`. Kein Format-Mismatch, kein manuelles Anpassen nötig.
+Das Skript liest deine TikTok-Session-Cookies direkt aus der lokalen Cookie-Datenbank deines
+Browsers (via `browser-cookie3`) — es öffnet keinen Browser, automatisiert keinen Login und
+rührt das TikTok-Login-Formular überhaupt nicht an. Es probiert der Reihe nach Chrome, Edge
+und Firefox durch, bis eines eine gültige `sessionid` liefert, und speichert das Ergebnis
+direkt im korrekten Format als `cookies.json`.
+
+**Wichtig:** Schließe den jeweiligen Browser (oder zumindest den TikTok-Tab) vorher, da
+Chrome/Edge ihre Cookie-Datenbank sperren, solange sie laufen — das kann die Extraktion
+verhindern oder veraltete Daten liefern. Einen bestimmten Browser erzwingst du mit
+`python get_cookies.py --browser edge` (oder `chrome`/`firefox`).
+
+Diese Methode wurde bewusst gegenüber einem interaktiven Playwright-Login gewählt: Ein
+frischer, unauthentifizierter Playwright-Browser, der direkt das TikTok-Login-Formular
+ansteuert, hat in der Praxis TikToks Bot-/Rate-Limit-Schutz ausgelöst. Das Auslesen der
+bereits bestehenden, ganz normal erzeugten Session umgeht dieses Problem vollständig.
 
 ### Alternative: Browser-Erweiterung
 

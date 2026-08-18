@@ -16,3 +16,4 @@ numpy
 streamlink
 playwright
 streamlit-autorefresh
+browser-cookie3
