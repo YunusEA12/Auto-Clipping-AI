@@ -2,19 +2,30 @@
 
 ## Always Do First
 - **Check Environment:** Always verify that the virtual environment (`venv`) is active and `.env` variables (API keys) are loaded before running scripts.
-- **Modularity Check:** Ensure any new code fits into the modular pipeline: Ingestion -> Transcription -> Analysis -> Vision -> Processing -> Upload -> UI. Do not mix these domains in a single file.
+- **Modularity Check:** Ensure any new code fits into the modular pipeline. Do not mix domains. UI features must go through `dashboard_api.py`, not directly into backend logic.
 
-## Core Architecture & Workflow
-- **Two-Phase Pipeline:** 
-  1. *Phase 1 (Analysis & Prep):* Ingestion -> Audio Extraction -> Whisper Transcription -> LLM Analysis & Energy Scoring -> Interactive Subtitle Editor (`app.py`).
-  2. *Phase 2 (Production):* Facecam Detection -> FFmpeg Rendering -> Auto-Upload (TikTok/YouTube).
-- **Analysis Rules:** Strict narrative coherence (complete sentences, setup + punchline in the same clip) and prioritization of high emotional energy spikes (RMS variance).
+## Core Architecture & 24/7 Workflow
+The system has evolved from a manual script to an autonomous 24/7 supervisor-driven pipeline.
+- **Phase 1 (Supervision & Monitoring):** `process_supervisor.py` manages `orchestrator.py` and `metrics_tracker.py`. Real-time stream ingestion is handled by `stream_watcher.py` (Twitch).
+- **Phase 2 (Analysis & Vision Critic):** `auto_pilot.py` manages Audio Extraction -> Whisper Transcription -> LLM Analysis -> `train_loop.py` (Vision Critic / AI Feedback loop).
+- **Phase 3 (Render & Output):** `process.py` uses FFmpeg for rendering -> `tiktok_uploader.py` handles Playwright automation.
+- **Dashboard:** `app.py` (Streamlit) provides read-only oversight and configuration, strictly decoupled via `dashboard_api.py`.
+
+## TikTok Upload Safety Model (CRITICAL)
+- **No Implicit Drafts:** TikTok Web no longer reliably saves drafts when closing the browser without clicking anything. 
+- **Upload Rule:** DO NOT trigger `tiktok_uploader.py` or the Playwright browser unless `--publish` (or `auto-upload`) is explicitly set to `True`.
+- **Local Fallback:** If a clip is generated but not set to auto-publish, it MUST remain locally on the disk (`/output`). Do not attempt to push it to TikTok Studio as a draft.
+- **Overlays:** Playwright automation must always aggressively check for and dismiss intercepting overlays (Cookie Banners, Onboarding Tooltips, Shadow DOM elements) before clicking elements.
+
+## Data & State Integrity (CRITICAL)
+- **Atomic Writes:** All state files (`agent_state.json`, `orchestrator_state.json`, `clips.json`, `viral_memory.json`, `ai_guidelines.txt`, `cookies.json`) MUST be written using the temporary-then-replace pattern (e.g., via `atomic_io.py`). Never use direct `open(path, "w")` to avoid torn reads or corruption on crashes.
+- **Unique IDs:** Clip titles must be enforced as unique keys to prevent silent batch overwrites.
 
 ## Local Hardware & Processing Limits
 - **CPU & GPU Constraints:** The system runs on 32GB RAM with an Intel integrated GPU. DO NOT use CUDA-exclusive libraries.
 - **Local AI (Text/Audio):** Use CPU-optimized libraries like `faster-whisper` (CTranslate2) or Intel OpenVINO for local speech-to-text.
 - **Local AI (Vision):** Use `mediapipe` (Tasks API) for lightweight, CPU-based face detection and dynamic cropping.
-- **Cloud AI:** Offload heavy natural language processing and clip selection to external LLM APIs (OpenAI/Claude) with strict Pydantic Structured Outputs.
+- **Concurrency:** Audio transcription and frame extraction should be parallelized where possible; final FFmpeg video rendering remains serial to avoid iGPU congestion.
 
 ## Video Output Defaults
 - **Format:** 9:16 vertical video (1080x1920 resolution).
@@ -22,20 +33,11 @@
 - **Subtitles:** `.ass` (Advanced SubStation Alpha) format for dynamic, word-by-word highlighting. Hardcoded into the final video via FFmpeg.
 - **Framerate:** Match the source video framerate (usually 30 or 60 fps).
 
-## Testing, Workflow & UI
-- **Test Chunks:** Never process a full VOD during testing. Always use FFmpeg to extract a 1- to 3-minute test sample before running the full pipeline.
-- **File Management:** Save intermediate files (`.wav`, `.json`, `.ass`) in `/temp` and final videos in `/output`.
-- **Log, don't print:** Use Python's `logging` module.
-- **Web UI:** Use `streamlit` for the frontend. Custom styling must rely on `.streamlit/config.toml` and targeted key-based CSS selectors.
-
-## Roadmap & Future Milestones
-- **Live-Stream-Watcher-Bot (`stream_watcher.py`):** Real-time stream ingestion (via Streamlink/FFmpeg chunking), continuous background transcription, and automatic trigger detection.
-- **Multi-Agent Architecture ("Streamer-Mitarbeiter"):** Dedicated profile prompts per creator (custom humor style, inside jokes, specific keywords, and individual clipping thresholds).
-
 ## Git & Security (CRITICAL)
 - **Auto-Commit Rule:** At the end of every successful task/feature, automatically stage changes (`git add .`), create a Conventional Commit, and run `git push`.
-- **Secret Protection:** NEVER commit `.env`, `client_secret.json`, `tiktok_client_secret.json`, or `tiktok_token.json`. Always ensure they are in `.gitignore`.
-- **Large Files:** NEVER commit `temp/` files, `output/` files, or any raw media (`*.mp4`, `*.wav`, `*.ts`).
+- **Secret Protection:** NEVER commit `.env`, `client_secret.json`, `tiktok_client_secret.json`, `tiktok_token.json`, or `cookies.json`. Always ensure they are in `.gitignore`.
+- **Large & Temp Files:** NEVER commit `temp/`, `output/`, `selector_audit/`, or any raw media (`*.mp4`, `*.wav`, `*.ts`).
+- **Log Sanitation:** Ensure all OpenAI/Anthropic API keys and Bearer tokens are redacted from logs before printing or saving.
 
 ## Hard Rules
 - Do not introduce heavy C++ compilation dependencies unless absolutely necessary.
