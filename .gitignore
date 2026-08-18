@@ -12,7 +12,9 @@ token.json
 feedback.json
 ai_guidelines.txt
 agent_state.json
+agent_state_*.json
 streamers.json
+streamers.json.lock
 orchestrator_state.json
 viral_memory.json
 tiktok_client_secret.json
