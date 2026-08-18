@@ -9,6 +9,9 @@ into future clip selection via analyze.py's injected guidelines, closing the loo
     caption, viral_score, energy_rating, reward_score) next to it in uploaded_clips/
       -> metrics_tracker.py matches that sidecar's caption against the live TikTok content
          list and records real views/likes into viral_memory.json
+      -> once a clip has been matched on two SEPARATE poll cycles (not just one — see
+         _delete_confirmed_upload()), its local .mp4/.json in uploaded_clips/ is permanently
+         deleted to save disk space; its view/like history stays in viral_memory.json
       -> train_loop.py's next critic pass reads viral_memory.json and generates
          POSITIVE/PENALTY "viral pattern" rules from what actually won or flopped
       -> analyze.py's next clip selection is shaped by those rules
@@ -412,10 +415,35 @@ def _record_scrape_result(success: bool, path: Path = None) -> dict:
     return health
 
 
+def _delete_confirmed_upload(clip_id: str) -> None:
+    """Permanently deletes the local .mp4 and .json sidecar for a clip that's been matched
+    against TikTok's real content list on two SEPARATE poll cycles, not just once — a single
+    match could be a transient/flaky read, and a click-based "confirmed" from
+    tiktok_uploader.py was already proven unreliable this session (see C-08 in the audit: a
+    click can report success while TikTok silently holds the post private, under review).
+    Being visible in the account's own real content list on two independent checks, spaced
+    by a full poll interval, is a materially stronger, platform-verified signal — this is
+    only ever called for a clip_id that was already in viral_memory.json from a previous
+    pass (see update_viral_memory()), never on a clip's first sighting. Its view/like history
+    already recorded in viral_memory.json is untouched by this — only the local files go."""
+    for suffix in (".mp4", ".json"):
+        path = UPLOADED_CLIPS_DIR / f"{clip_id}{suffix}"
+        try:
+            if path.exists():
+                path.unlink()
+                logger.info("🗑️ Lokal gelöscht (2x auf TikTok bestätigt): %s", path)
+        except OSError as e:
+            logger.warning("Could not delete %s: %s", path, e)
+
+
 def update_viral_memory(headless: bool = True) -> int:
     """One full pass: match every locally-uploaded clip against the live TikTok content
     list and update its view/like counts in viral_memory.json. Returns how many entries
-    were matched and updated this pass."""
+    were matched and updated this pass.
+
+    A clip matched for the second time across separate passes (i.e. already present in
+    viral_memory.json before this pass) also has its local .mp4/.json sidecar permanently
+    deleted — see _delete_confirmed_upload() for why two matches, not one."""
     uploaded = load_uploaded_metadata()
     if not uploaded:
         logger.info("No uploaded clips with metadata found in %s", UPLOADED_CLIPS_DIR)
@@ -444,7 +472,9 @@ def update_viral_memory(headless: bool = True) -> int:
     _record_scrape_result(success=True)
 
     memory = load_viral_memory()
+    previously_confirmed = set(memory.keys())  # captured BEFORE this pass's own updates
     matched = 0
+    newly_reconfirmed: List[str] = []
 
     row_by_clip_id = _match_uploaded_to_content_rows(uploaded, content_rows)
     for entry in uploaded:
@@ -461,10 +491,16 @@ def update_viral_memory(headless: bool = True) -> int:
             "checked_at": datetime.now(timezone.utc).isoformat(),
         }
         matched += 1
+        if clip_id in previously_confirmed:
+            newly_reconfirmed.append(clip_id)
 
     pruned_memory = prune_viral_memory(memory)
     if matched or len(pruned_memory) != len(memory):
         save_viral_memory(pruned_memory)
+
+    for clip_id in newly_reconfirmed:
+        _delete_confirmed_upload(clip_id)
+
     logger.info("Matched %d/%d uploaded clip(s) against TikTok's content list", matched, len(uploaded))
     return matched
 

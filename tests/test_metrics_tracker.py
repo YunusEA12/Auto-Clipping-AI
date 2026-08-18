@@ -122,6 +122,112 @@ def test_extract_context_json_returns_none_on_non_dict_json():
     assert metrics_tracker._extract_context_json(page) is None
 
 
+# --- local-file deletion, gated on TWO separate confirmed matches, not one (safety-model
+# correction, 2026-08-18: a click-based "confirmed" from tiktok_uploader.py was proven
+# unreliable the same day — a post can be silently held private/under review while reporting
+# success — so a single content-list match isn't trusted as sole grounds for permanent,
+# unrecoverable deletion either; two independent matches across separate poll cycles is) ---
+
+def test_delete_confirmed_upload_removes_both_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(metrics_tracker, "UPLOADED_CLIPS_DIR", tmp_path)
+    (tmp_path / "clip_1.mp4").write_bytes(b"fake video")
+    (tmp_path / "clip_1.json").write_text("{}", encoding="utf-8")
+
+    metrics_tracker._delete_confirmed_upload("clip_1")
+
+    assert not (tmp_path / "clip_1.mp4").exists()
+    assert not (tmp_path / "clip_1.json").exists()
+
+
+def test_delete_confirmed_upload_never_raises_on_missing_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(metrics_tracker, "UPLOADED_CLIPS_DIR", tmp_path)
+    metrics_tracker._delete_confirmed_upload("does_not_exist")  # must not raise
+
+
+def test_delete_confirmed_upload_does_not_touch_unrelated_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(metrics_tracker, "UPLOADED_CLIPS_DIR", tmp_path)
+    (tmp_path / "clip_1.mp4").write_bytes(b"fake video")
+    (tmp_path / "clip_2.mp4").write_bytes(b"a different clip")
+    (tmp_path / "clip_2.json").write_text("{}", encoding="utf-8")
+
+    metrics_tracker._delete_confirmed_upload("clip_1")
+
+    assert not (tmp_path / "clip_1.mp4").exists()
+    assert (tmp_path / "clip_2.mp4").exists()
+    assert (tmp_path / "clip_2.json").exists()
+
+
+def test_update_viral_memory_does_not_delete_on_first_match(tmp_path, monkeypatch):
+    uploaded_dir = tmp_path / "uploaded_clips"
+    uploaded_dir.mkdir()
+    monkeypatch.setattr(metrics_tracker, "UPLOADED_CLIPS_DIR", uploaded_dir)
+    monkeypatch.setattr(metrics_tracker, "VIRAL_MEMORY_PATH", tmp_path / "viral_memory.json")
+    monkeypatch.setattr(metrics_tracker, "SCRAPE_HEALTH_PATH", tmp_path / "health.json")
+
+    (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
+    (uploaded_dir / "clip_1.json").write_text(json.dumps({"caption": "hello world #fyp"}), encoding="utf-8")
+
+    monkeypatch.setattr(
+        metrics_tracker, "fetch_content_list",
+        lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
+    )
+
+    matched = metrics_tracker.update_viral_memory()
+
+    assert matched == 1
+    # First sighting only — not deleted yet, even though it matched.
+    assert (uploaded_dir / "clip_1.mp4").exists()
+    assert (uploaded_dir / "clip_1.json").exists()
+
+
+def test_update_viral_memory_deletes_on_second_consecutive_match(tmp_path, monkeypatch):
+    uploaded_dir = tmp_path / "uploaded_clips"
+    uploaded_dir.mkdir()
+    monkeypatch.setattr(metrics_tracker, "UPLOADED_CLIPS_DIR", uploaded_dir)
+    monkeypatch.setattr(metrics_tracker, "VIRAL_MEMORY_PATH", tmp_path / "viral_memory.json")
+    monkeypatch.setattr(metrics_tracker, "SCRAPE_HEALTH_PATH", tmp_path / "health.json")
+
+    (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
+    (uploaded_dir / "clip_1.json").write_text(json.dumps({"caption": "hello world #fyp"}), encoding="utf-8")
+
+    monkeypatch.setattr(
+        metrics_tracker, "fetch_content_list",
+        lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
+    )
+
+    metrics_tracker.update_viral_memory()  # first pass: matched, not deleted
+    matched = metrics_tracker.update_viral_memory()  # second pass: matched again -> deleted
+
+    assert matched == 1
+    assert not (uploaded_dir / "clip_1.mp4").exists()
+    assert not (uploaded_dir / "clip_1.json").exists()
+    # The view/like history must survive the local-file deletion.
+    memory = metrics_tracker.load_viral_memory(tmp_path / "viral_memory.json")
+    assert "clip_1" in memory
+
+
+def test_update_viral_memory_never_deletes_an_unmatched_clip(tmp_path, monkeypatch):
+    uploaded_dir = tmp_path / "uploaded_clips"
+    uploaded_dir.mkdir()
+    monkeypatch.setattr(metrics_tracker, "UPLOADED_CLIPS_DIR", uploaded_dir)
+    monkeypatch.setattr(metrics_tracker, "VIRAL_MEMORY_PATH", tmp_path / "viral_memory.json")
+    monkeypatch.setattr(metrics_tracker, "SCRAPE_HEALTH_PATH", tmp_path / "health.json")
+
+    (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
+    (uploaded_dir / "clip_1.json").write_text(json.dumps({"caption": "never matches anything"}), encoding="utf-8")
+
+    monkeypatch.setattr(
+        metrics_tracker, "fetch_content_list",
+        lambda headless=True: [{"caption": "totally unrelated content", "views": 5, "likes": 1}],
+    )
+
+    metrics_tracker.update_viral_memory()
+    metrics_tracker.update_viral_memory()
+
+    assert (uploaded_dir / "clip_1.mp4").exists()
+    assert (uploaded_dir / "clip_1.json").exists()
+
+
 # --- default-path monkeypatch actually takes effect (late-binding regression guard) -------
 # A plain `path: Path = VIRAL_MEMORY_PATH` default captures the value once at function
 # definition time — monkeypatching metrics_tracker.VIRAL_MEMORY_PATH afterward would
