@@ -1,0 +1,28 @@
+[Unit]
+Description=Auto-Clipping AI - process supervisor (orchestrator.py + metrics_tracker.py)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=autoclip
+Group=autoclip
+WorkingDirectory=/opt/auto-clipping-ai
+ExecStart=/opt/auto-clipping-ai/venv/bin/python process_supervisor.py
+# process_supervisor.py already restarts orchestrator.py/metrics_tracker.py internally with
+# its own crash-loop backoff (see process_supervisor.py's own docstring) - this Restart= is
+# only the outer safety net for the supervisor process itself dying (an uncaught exception
+# outside its own try/except, an OOM-kill of this process specifically).
+Restart=on-failure
+RestartSec=15
+StartLimitIntervalSec=0
+
+# Hardening: this process only needs to read/write inside its own working directory and
+# spawn its own child processes - no reason to give it broader filesystem access.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/auto-clipping-ai
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

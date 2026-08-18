@@ -1,0 +1,28 @@
+[Unit]
+Description=Auto-Clipping AI - Streamlit dashboard (Tailscale-only access, see SETUP_SERVER.md)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=autoclip
+Group=autoclip
+WorkingDirectory=/opt/auto-clipping-ai
+# 0.0.0.0 is required here so the dashboard is reachable on the tailscale0 interface, not
+# just localhost - it does NOT mean "publicly exposed": SETUP_SERVER.md's ufw rules block
+# every interface except tailscale0 and SSH by default. Never remove those firewall rules
+# without adding real authentication in front of this port first - the dashboard has none
+# of its own (see H-07/H-11 in the audit for the equivalent tradeoff already accepted
+# elsewhere in this project).
+ExecStart=/opt/auto-clipping-ai/venv/bin/streamlit run app.py --server.address 0.0.0.0 --server.port 8501 --server.headless true --browser.gatherUsageStats false
+Restart=on-failure
+RestartSec=15
+StartLimitIntervalSec=0
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/auto-clipping-ai
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
