@@ -18,25 +18,37 @@ class FakeCaptionBox:
         return value
 
 
-class FakeFileInput:
-    def __init__(self, present_for_calls):
-        self._present_for_calls = present_for_calls
+class FakeCountLocator:
+    """Mimics a Playwright Locator's .count() — either a fixed value, or one that flips
+    from 0 to 1 once polled at least `appears_after_calls` times (simulating an element
+    that renders into the DOM partway through a poll loop)."""
+
+    def __init__(self, fixed=None, appears_after_calls=None):
+        self._fixed = fixed
+        self._appears_after_calls = appears_after_calls
         self.calls = 0
 
     def count(self):
         self.calls += 1
-        return 1 if self.calls <= self._present_for_calls else 0
+        if self._fixed is not None:
+            return self._fixed
+        if self._appears_after_calls is not None and self.calls >= self._appears_after_calls:
+            return 1
+        return 0
 
 
 class FakePage:
     """Mimics the subset of Playwright's Page API these waits use: a `.url` that can change
-    between reads (simulating navigation) and `.wait_for_timeout()` as a no-op instead of a
-    real sleep, so these tests run instantly."""
+    between reads (simulating navigation), `.locator()`/`.get_by_text()` returning count()-
+    able fakes, and `.wait_for_timeout()` as a no-op instead of a real sleep, so these tests
+    run instantly."""
 
-    def __init__(self, url_changes_after_reads=None):
+    def __init__(self, url_changes_after_reads=None, toast_appears_after_calls=None, quota_exhausted=False):
         self._reads = 0
         self._url_changes_after_reads = url_changes_after_reads
         self.wait_calls = 0
+        self._toast = FakeCountLocator(appears_after_calls=toast_appears_after_calls)
+        self._quota_exhausted = quota_exhausted
 
     @property
     def url(self):
@@ -47,6 +59,14 @@ class FakePage:
 
     def wait_for_timeout(self, ms):
         self.wait_calls += 1
+
+    def locator(self, selector):
+        assert selector == "#TUXToastProvider-topOutlet .TUXTopToast"
+        return self._toast
+
+    def get_by_text(self, text):
+        assert text == "check limit for today"
+        return FakeCountLocator(fixed=1 if self._quota_exhausted else 0)
 
 
 # --- _wait_for_caption_filled (M-10) ------------------------------------------------------
@@ -68,24 +88,33 @@ def test_caption_wait_falls_back_gracefully_when_never_confirmed():
     assert page.wait_calls == expected_polls
 
 
-# --- _wait_for_post_confirmation (M-03) ---------------------------------------------------
+# --- _wait_for_post_confirmation (M-03; toast-based signal replaced the file-input check
+# on 2026-08-18 — see the function's own docstring for why the old check was a false
+# positive that fired almost instantly on every single call) --------------------------------
 
 def test_post_confirmation_true_on_redirect():
     page = FakePage(url_changes_after_reads=2)
-    file_input = FakeFileInput(present_for_calls=1000)
-    assert tiktok_uploader._wait_for_post_confirmation(page, file_input) is True
+    assert tiktok_uploader._wait_for_post_confirmation(page) is True
 
 
-def test_post_confirmation_true_when_upload_form_disappears():
-    page = FakePage(url_changes_after_reads=None)  # url never changes
-    file_input = FakeFileInput(present_for_calls=1)  # disappears after the first check
-    assert tiktok_uploader._wait_for_post_confirmation(page, file_input) is True
+def test_post_confirmation_true_when_success_toast_appears():
+    page = FakePage(url_changes_after_reads=None, toast_appears_after_calls=1)
+    assert tiktok_uploader._wait_for_post_confirmation(page) is True
 
 
 def test_post_confirmation_false_when_nothing_ever_signals_success():
     page = FakePage(url_changes_after_reads=None)
-    file_input = FakeFileInput(present_for_calls=1000)
-    assert tiktok_uploader._wait_for_post_confirmation(page, file_input) is False
+    assert tiktok_uploader._wait_for_post_confirmation(page) is False
+
+
+def test_post_confirmation_false_when_daily_check_quota_exhausted():
+    # Discovered live 2026-08-18: TikTok's own "Content check lite" daily quota being
+    # exhausted looks identical to any other silent non-publish (no toast, no redirect) —
+    # this only verifies the distinct code path doesn't crash and still correctly reports
+    # unconfirmed; the point of distinguishing it is a clearer log message, not a different
+    # return value, since the caller can't act on it differently either way.
+    page = FakePage(url_changes_after_reads=None, quota_exhausted=True)
+    assert tiktok_uploader._wait_for_post_confirmation(page) is False
 
 
 # --- UploadOutcome shape (M-03) ------------------------------------------------------------

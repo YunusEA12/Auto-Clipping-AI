@@ -198,10 +198,18 @@ def run_deployment_phase(survivors: List[Tuple[dict, Path, Optional[int]]], publ
             logger.warning("Upload fehlgeschlagen für '%s' — bleibt in output/", title)
             continue
         if not outcome.confirmed:
+            # Treated the same as a failed upload (2026-08-18): a click that isn't confirmed
+            # is exactly as unverified as one that raised — archiving it into uploaded_clips/
+            # anyway used to leave phantom "confirmed": false entries that TikTok never
+            # actually received, with no automatic retry (metrics_tracker only ever revisits
+            # uploaded_clips/, never output/). Leaving it in output/ lets the next cycle try
+            # again instead of silently treating an unverified click as done.
+            failed += 1
             logger.warning(
-                "Upload für '%s' wurde geklickt, aber nicht bestätigt (kein Redirect/Formular-"
-                "Abbau beobachtet) — wird trotzdem als hochgeladen verbucht.", title,
+                "Upload für '%s' wurde geklickt, aber nicht bestätigt (kein Redirect/Erfolgs-"
+                "Toast beobachtet) — bleibt in output/ für einen erneuten Versuch.", title,
             )
+            continue
 
         uploaded += 1
         try:

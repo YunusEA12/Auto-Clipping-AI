@@ -332,13 +332,22 @@ def _wait_for_caption_filled(page, caption_box, expected_text: str) -> None:
     logger.warning("Could not confirm caption text landed within %dms; continuing anyway", deadline_ms)
 
 
-def _wait_for_post_confirmation(page, file_input) -> bool:
-    """Polls for a real signal that clicking Post actually did something — the page
-    navigating away from the upload URL, or the upload form (the file input) no longer
-    being present, either of which TikTok does once a post is actually accepted. Returns
-    whether such a signal was observed within POST_CONFIRM_TIMEOUT_MS. Only used for the
-    publish=True path — the publish=False path never clicks anything, so there's no click
-    to confirm (see upload_video())."""
+def _wait_for_post_confirmation(page) -> bool:
+    """Polls for a real signal that clicking Post actually published the video — the page
+    navigating away from the upload URL, or TikTok's own success toast
+    (`#TUXToastProvider-topOutlet .TUXTopToast`, confirmed live 2026-08-18 against a genuine
+    publish: it read "Veröffentlichtes Video") appearing. Returns whether such a signal was
+    observed within POST_CONFIRM_TIMEOUT_MS. Only used for the publish=True path — the
+    publish=False path never clicks anything, so there's no click to confirm (see
+    upload_video()).
+
+    Previously also checked `file_input.count() == 0` as a second signal — removed
+    (2026-08-18) after live evidence showed the `<input type='file'>` element disappears the
+    moment a video finishes UPLOADING, well before Post is ever clicked. That made this
+    function report `confirmed=True` almost instantly on every single call regardless of
+    whether the click did anything at all — a false positive that let every real upload
+    failure that day look locally successful (uploaded_clips/ metadata said confirmed=True
+    for videos TikTok's own content list never actually received)."""
     deadline_ms = POST_CONFIRM_TIMEOUT_MS
     elapsed_ms = 0
 
@@ -347,8 +356,8 @@ def _wait_for_post_confirmation(page, file_input) -> bool:
             logger.info("Post-click confirmed: page navigated away from the upload URL")
             return True
         try:
-            if file_input.count() == 0:
-                logger.info("Post-click confirmed: upload form is no longer present")
+            if page.locator("#TUXToastProvider-topOutlet .TUXTopToast").count() > 0:
+                logger.info("Post-click confirmed: success toast observed")
                 return True
         except Exception:
             pass  # a stale/detached locator during navigation isn't an error here
@@ -356,11 +365,30 @@ def _wait_for_post_confirmation(page, file_input) -> bool:
         page.wait_for_timeout(POST_CONFIRM_POLL_MS)
         elapsed_ms += POST_CONFIRM_POLL_MS
 
-    logger.warning(
-        "Could not confirm the post/draft actually succeeded within %ds (no redirect or form "
-        "teardown observed) — the click happened, but treat this upload as unconfirmed.",
-        deadline_ms // 1000,
-    )
+    # Discovered live 2026-08-18: TikTok's own "Content check lite" feature has a daily quota
+    # — once exhausted, a Post click is accepted client-side (no error, no exception) but
+    # TikTok never actually publishes, and neither signal above ever fires. Distinguishing
+    # this from a generic failure matters: it's not a selector/logic bug to go fix, it's an
+    # external rate limit that resets the next day.
+    try:
+        quota_exhausted = page.get_by_text("check limit for today").count() > 0
+    except Exception:
+        quota_exhausted = False
+
+    if quota_exhausted:
+        logger.warning(
+            "Could not confirm the post succeeded — TikTok's own \"Content check lite\" "
+            "daily quota is exhausted for this account (visible on the upload page itself: "
+            "\"You've reached your check limit for today\"). This is not a bug on our side; "
+            "TikTok is silently declining to publish until the quota resets. Uploads will "
+            "keep failing this way until then."
+        )
+    else:
+        logger.warning(
+            "Could not confirm the post/draft actually succeeded within %ds (no redirect or "
+            "success toast observed) — the click happened, but treat this upload as unconfirmed.",
+            deadline_ms // 1000,
+        )
     return False
 
 
@@ -457,6 +485,15 @@ def upload_video(
 
             # publish=False already returned before ever opening the browser (see above) —
             # everything past this point only ever runs with publish=True.
+            #
+            # Dismiss overlays once more right before this click: caption typing plus one
+            # suggestion-click per hashtag takes several seconds, long enough (confirmed
+            # live 2026-08-18) for the "New editing features added" onboarding tooltip to
+            # appear *after* the two earlier dismissal calls already found nothing — left
+            # unhandled, its react-joyride overlay silently intercepts the Post click for
+            # the full click timeout.
+            _dismiss_blocking_overlays(page)
+
             logger.info("Clicking Veröffentlichen (Post, publishing live)...")
             button = page.locator("[data-e2e='post_video_button']")
             button.wait_for(state="visible", timeout=PROCESSING_TIMEOUT_MS)
@@ -475,7 +512,7 @@ def upload_video(
                 page.wait_for_timeout(POST_CLICK_INSPECTION_DELAY_MS)
                 _save_post_click_snapshot(page, "post_click_after_wait")
 
-            confirmed = _wait_for_post_confirmation(page, file_input)
+            confirmed = _wait_for_post_confirmation(page)
 
             logger.info(
                 "TikTok upload finished for %s (publish=%s, confirmed=%s)", video_path.name, publish, confirmed,
