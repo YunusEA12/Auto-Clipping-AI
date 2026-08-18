@@ -46,6 +46,22 @@ frischer, unauthentifizierter Playwright-Browser, der direkt das TikTok-Login-Fo
 ansteuert, hat in der Praxis TikToks Bot-/Rate-Limit-Schutz ausgelöst. Das Auslesen der
 bereits bestehenden, ganz normal erzeugten Session umgeht dieses Problem vollständig.
 
+### Alternative: manueller Login (wenn get_cookies.py scheitert)
+
+`get_cookies.py`s Shadow-Copy-Fallback (für einen bereits geöffneten Browser) braucht unter
+Windows Admin-Rechte — schlägt das fehl (oder ist kein unterstützter Browser installiert),
+kannst du stattdessen `verify_tiktok_selectors.py --manual-login` nutzen: Es öffnet ein
+sichtbares Browser-Fenster, in dem **du selbst** ganz normal auf tiktok.com einloggst
+(inklusive Captcha, falls eins erscheint) — das Skript liest oder tippt dabei keine
+Zugangsdaten, es wartet nur, bis du im Terminal Enter drückst. Danach fragt es, ob es die
+Session-Cookies dieses Logins in `cookies.json` speichern soll — damit hast du in einem
+Rutsch sowohl eine gültige `cookies.json` für `tiktok_uploader.py` als auch die
+Selektor-Prüfung gegen die echte TikTok-Oberfläche erledigt.
+
+```
+python verify_tiktok_selectors.py --manual-login
+```
+
 ### Alternative: Browser-Erweiterung
 
 Falls du lieber eine Cookie-Export-Erweiterung nutzt (z. B. "Cookie-Editor" für Chrome/Firefox):
