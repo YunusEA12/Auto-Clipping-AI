@@ -40,7 +40,9 @@ try:
 except ImportError:
     HAS_AUTOREFRESH = False
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+import logging_setup
+
+logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
 
 ENV_PATH = Path(".env")
@@ -653,10 +655,10 @@ with tab_manual:
                         hashtags = clip.get("hashtags") or tiktok_uploader.DEFAULT_HASHTAGS
 
                         if do_tiktok_upload:
-                            success = tiktok_uploader.try_upload_clip(
+                            outcome = tiktok_uploader.try_upload_clip(
                                 output_path, clip.get("description", clip["title"]), hashtags
                             )
-                            upload_status = "uploaded" if success else "failed"
+                            upload_status = "uploaded" if outcome.success else "failed"
 
                         if do_notify:
                             notify.send_notification(

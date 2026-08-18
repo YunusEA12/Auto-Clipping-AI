@@ -6,6 +6,27 @@ import pytest
 import openai_utils
 
 
+# --- secret redaction (L-06) -------------------------------------------------------------
+
+def test_redacts_sk_style_api_key():
+    text = "auth failed with key sk-abcdefghij1234567890ABCDEFGHIJ"
+    redacted = openai_utils.redact_secrets(text)
+    assert "sk-abcdefghij1234567890ABCDEFGHIJ" not in redacted
+    assert "REDACTED" in redacted
+
+
+def test_redacts_bearer_token():
+    text = "request headers: Authorization: Bearer abcdef1234567890ABCDEF"
+    redacted = openai_utils.redact_secrets(text)
+    assert "abcdef1234567890ABCDEF" not in redacted
+    assert "REDACTED" in redacted
+
+
+def test_leaves_ordinary_text_untouched():
+    text = "Rate limit exceeded, please try again in 20s"
+    assert openai_utils.redact_secrets(text) == text
+
+
 def test_budget_increments_and_allows_calls_under_the_limit(tmp_path):
     path = tmp_path / "budget.json"
     for expected in (1, 2, 3):

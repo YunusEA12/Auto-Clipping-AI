@@ -13,10 +13,39 @@ either the fully-old or fully-new content, never a partial write.
 """
 
 import json
+import logging
 import os
+import platform
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+def secure_file_permissions(path: Path) -> None:
+    """Best-effort: restrict a sensitive file (session cookies, tokens — anything
+    equivalent to a password) to the current user only. POSIX: chmod 600. Windows: icacls,
+    stripping inherited ACEs and granting full control to the current user alone — plain
+    os.chmod() on Windows only toggles the read-only attribute, it doesn't touch the ACL, so
+    it wouldn't actually restrict who can read the file.
+
+    Never raises — a permission-hardening failure shouldn't stop the caller from having
+    written the file at all; it just leaves the OS-default (broader) permissions in place,
+    same as before this existed."""
+    path = Path(path)
+    try:
+        if platform.system() == "Windows":
+            username = os.environ.get("USERNAME") or os.getlogin()
+            subprocess.run(
+                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{username}:F"],
+                capture_output=True, text=True, timeout=10,
+            )
+        else:
+            os.chmod(path, 0o600)
+    except Exception as e:
+        logger.warning("Could not restrict permissions on %s: %s", path, e)
 
 
 def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:

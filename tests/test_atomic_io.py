@@ -1,9 +1,34 @@
 import json
+import platform
 from pathlib import Path
 
 import pytest
 
 import atomic_io
+
+
+# --- secure_file_permissions (M-07) -------------------------------------------------------
+
+def test_secure_file_permissions_never_raises_on_a_real_file(tmp_path):
+    target = tmp_path / "cookies.json"
+    target.write_text("[]", encoding="utf-8")
+    atomic_io.secure_file_permissions(target)  # must not raise
+    assert target.read_text(encoding="utf-8") == "[]"  # content untouched
+
+
+def test_secure_file_permissions_never_raises_on_a_missing_file(tmp_path):
+    # Best-effort: a permission-hardening failure must never propagate and block the caller
+    # from having written the file at all.
+    atomic_io.secure_file_permissions(tmp_path / "does_not_exist.json")
+
+
+@pytest.mark.skipif(platform.system() == "Windows", reason="chmod semantics are POSIX-specific")
+def test_secure_file_permissions_restricts_mode_on_posix(tmp_path):
+    import os
+    target = tmp_path / "cookies.json"
+    target.write_text("[]", encoding="utf-8")
+    atomic_io.secure_file_permissions(target)
+    assert (target.stat().st_mode & 0o777) == 0o600
 
 
 def test_atomic_write_text_creates_file(tmp_path):

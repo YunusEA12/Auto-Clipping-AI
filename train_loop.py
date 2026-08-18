@@ -43,7 +43,9 @@ import atomic_io
 import openai_utils
 import process as process_module
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+import logging_setup
+
+logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
 
 TEMP_DIR = Path("temp")
@@ -373,15 +375,51 @@ def run_critic(
             return _call_critic(content, vision_model)
         logger.warning("No preview frames available — falling back to text-only critic evaluation")
     except Exception as e:
-        logger.warning("Vision critic failed (%s) — falling back to text-only evaluation", e)
+        logger.warning(
+            "Vision critic failed (%s) — falling back to text-only evaluation",
+            openai_utils.redact_secrets(str(e)),
+        )
 
     content = build_critic_user_content(clips, transcript, feedback_by_title, {})
     logger.info("Sending %d clip(s) to the text-only critic (%s)", len(clips), text_model)
     try:
         return _call_critic(content, text_model)
     except Exception as e:
-        logger.error("Critic LLM call failed (text-only fallback): %s", e)
+        logger.error("Critic LLM call failed (text-only fallback): %s", openai_utils.redact_secrets(str(e)))
         raise
+
+
+def filter_verdicts_to_known_clips(batch: CriticBatch, clips: List[dict]) -> CriticBatch:
+    """Structured-output validation only confirms reward_score's type/range — nothing
+    upstream ever confirmed a verdict's clip_title actually corresponds to a real clip in the
+    batch the critic was asked to judge. A hallucinated or mistyped clip_title would silently
+    vanish from every title-keyed lookup downstream (purge_low_scoring_clips's score lookup,
+    the guideline-generation loop below) with no error — it just quietly never gets applied.
+    This drops any verdict whose clip_title isn't an exact match for a clip actually in this
+    batch, and any second verdict for a title already seen (keeping the first), logging each
+    one so a systematic mismatch is visible instead of silent."""
+    known_titles = {clip.get("title", "") for clip in clips}
+    seen_titles: set = set()
+    kept = []
+
+    for verdict in batch.verdicts:
+        if verdict.clip_title not in known_titles:
+            logger.warning(
+                "Critic verdict for '%s' doesn't match any clip in this batch — dropping it "
+                "instead of letting it silently vanish from every title-keyed lookup.",
+                verdict.clip_title,
+            )
+            continue
+        if verdict.clip_title in seen_titles:
+            logger.warning(
+                "Critic returned a second verdict for '%s' — keeping the first, dropping the duplicate.",
+                verdict.clip_title,
+            )
+            continue
+        seen_titles.add(verdict.clip_title)
+        kept.append(verdict)
+
+    return CriticBatch(verdicts=kept)
 
 
 # --- ai_guidelines.txt: three categorized sections ------------------------------------------
@@ -394,6 +432,13 @@ CATEGORY_HEADERS = {
     "viral_patterns": "[VIRAL] SUCCESS PATTERNS (FROM PERFORMANCE DATA):",
 }
 CATEGORY_ORDER = ["content_positive", "content_negative", "visual_positive", "visual_negative", "viral_patterns"]
+
+# ai_guidelines.txt is a pure accumulator with nothing pruning it — months of continuous
+# operation means an ever-larger block of text injected into every future analyze.py/critic
+# prompt, including entries that may no longer be relevant. Capping each category keeps the
+# prompt bounded; trimming from the front (oldest) keeps the most recently learned rules,
+# which is what should win when an old rule and a new one implicitly conflict.
+MAX_RULES_PER_CATEGORY = 40
 
 
 def parse_guidelines_file(content: str) -> Dict[str, List[str]]:
@@ -436,6 +481,17 @@ def _dedupe(rules: List[str]) -> List[str]:
             seen.add(rule)
             result.append(rule)
     return result
+
+
+def _cap_rules(rules: List[str], max_count: int = MAX_RULES_PER_CATEGORY) -> List[str]:
+    """Keeps only the most recent `max_count` rules — rules are appended in order (existing
+    first, newly learned ones last), so trimming from the front drops the oldest entries and
+    keeps what was learned most recently."""
+    if len(rules) <= max_count:
+        return rules
+    dropped = len(rules) - max_count
+    logger.info("Trimming %d oldest rule(s) to stay within the %d-per-category cap", dropped, max_count)
+    return rules[-max_count:]
 
 
 def save_guidelines(categories: Dict[str, List[str]]) -> None:
@@ -490,6 +546,7 @@ def run_training_loop(
     feedback_by_title = load_feedback_by_title()
 
     batch = run_critic(clips, transcript, feedback_by_title, rendered, VISION_MODEL, model)
+    batch = filter_verdicts_to_known_clips(batch, clips)
 
     new_content_positive, new_content_negative = [], []
     new_visual_positive, new_visual_negative = [], []
@@ -520,11 +577,11 @@ def run_training_loop(
 
     existing = load_existing_guidelines()
     merged = {
-        "content_positive": _dedupe(existing["content_positive"] + new_content_positive),
-        "content_negative": _dedupe(existing["content_negative"] + new_content_negative),
-        "visual_positive": _dedupe(existing["visual_positive"] + new_visual_positive),
-        "visual_negative": _dedupe(existing["visual_negative"] + new_visual_negative),
-        "viral_patterns": _dedupe(existing["viral_patterns"] + new_viral_patterns),
+        "content_positive": _cap_rules(_dedupe(existing["content_positive"] + new_content_positive)),
+        "content_negative": _cap_rules(_dedupe(existing["content_negative"] + new_content_negative)),
+        "visual_positive": _cap_rules(_dedupe(existing["visual_positive"] + new_visual_positive)),
+        "visual_negative": _cap_rules(_dedupe(existing["visual_negative"] + new_visual_negative)),
+        "viral_patterns": _cap_rules(_dedupe(existing["viral_patterns"] + new_viral_patterns)),
     }
     save_guidelines(merged)
 

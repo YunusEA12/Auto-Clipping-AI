@@ -28,7 +28,7 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -37,16 +37,37 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 import atomic_io
 import tiktok_uploader
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+import logging_setup
+
+logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
 
 UPLOADED_CLIPS_DIR = Path("uploaded_clips")
 VIRAL_MEMORY_PATH = Path("viral_memory.json")
 
+# Tracks scrape health across cycles — distinguishes "nothing to check yet" (0 uploaded
+# clips, a perfectly normal state) from "the scrape itself is broken" (uploaded clips exist,
+# but fetch_content_list() has come back empty several cycles running, meaning every
+# selector is failing to match — almost certainly TikTok Studio's markup drifted). Read by
+# scrape_health() below; app.py's dashboard can surface it as a distinct alert state instead
+# of silently looking identical to "no clips uploaded yet".
+SCRAPE_HEALTH_PATH = Path("metrics_scrape_health.json")
+# After this many consecutive empty scrapes (with uploaded clips actually present to match
+# against), escalate from a routine warning to an error-level log line — loud enough that
+# console/log-based monitoring actually notices instead of scrolling past "0 matched" forever.
+CONSECUTIVE_FAILURE_ALERT_THRESHOLD = 3
+
 # TikTok Studio's own content/analytics list — session-relative ("my content"), so no
 # username needs to be configured. Same domain as tiktok_uploader.py's upload page.
 CONTENT_URL = "https://www.tiktok.com/tiktokstudio/content"
 NAV_TIMEOUT_MS = 60_000
+
+# viral_memory.json is a pure accumulator with nothing pruning it — every clip ever checked
+# stays in it forever, growing the block of text injected into every future critic prompt
+# (see train_loop.load_viral_memory_section()) even for entries whose real-world relevance
+# faded months ago. Entries older than this many days since their last check are dropped on
+# each update pass.
+VIRAL_MEMORY_MAX_AGE_DAYS = 180
 
 # View/like counts move slowly; polling every few minutes would be pointless and closer to
 # the kind of aggressive automation that gets accounts flagged. Default to every 30 minutes.
@@ -131,7 +152,18 @@ def fetch_content_list(headless: bool = True) -> List[dict]:
 
             try:
                 page.goto(CONTENT_URL, wait_until="domcontentloaded")
-                page.wait_for_timeout(4000)
+                try:
+                    # Real signal first: wait for a content row (or its selector-drift
+                    # fallback) to actually appear, instead of always paying a flat 4s sleep
+                    # regardless of how fast the page actually loaded.
+                    page.wait_for_selector(
+                        "[data-e2e='content-item'], [class*='ContentItem'], [class*='content-item']",
+                        timeout=8000,
+                    )
+                except PlaywrightTimeoutError:
+                    # Not necessarily a failure — could be a genuinely empty content list —
+                    # so fall through to the row scrape below rather than bailing out here.
+                    page.wait_for_timeout(4000)
 
                 items = page.locator("[data-e2e='content-item']").all()
                 if not items:
@@ -177,6 +209,47 @@ def _captions_match(sidecar_caption: str, scraped_caption: str) -> bool:
     return a[:prefix_len].lower() == b[:prefix_len].lower()
 
 
+def _match_uploaded_to_content_rows(uploaded: List[dict], content_rows: List[dict]) -> Dict[str, dict]:
+    """Matches each uploaded clip's sidecar caption to a scraped content row via
+    _captions_match(). A brute-force nested scan is O(len(uploaded) x len(content_rows)) —
+    fine at today's single-digit clip volume, but won't hold up if upload volume grows the
+    way the system is nominally designed to.
+
+    _captions_match() compares a *variable-length* prefix — min(40, len(a), len(b)) — of
+    both captions. A LONG sidecar (>= CAPTION_MATCH_PREFIX_LEN) can only ever match a row
+    whose own first CAPTION_MATCH_PREFIX_LEN characters are identical, so long sidecars get
+    an O(1) bucket lookup (plus the short rows, in case one is shorter than the window). A
+    SHORT sidecar's true prefix_len depends on whatever row it's compared against — it can
+    match a long row too (if that row happens to start with the short sidecar text) — so
+    short sidecars fall back to scanning every row, not just the short ones. This never
+    returns a different result than the brute-force version would; it only reaches it
+    faster in the common case, which in practice is the long-sidecar one (real captions
+    carry 5-7 hashtags and routinely run well past 40 characters)."""
+    long_index: Dict[str, List[dict]] = {}
+    short_rows: List[dict] = []
+    for row in content_rows:
+        caption = row.get("caption", "").strip()
+        if len(caption) >= CAPTION_MATCH_PREFIX_LEN:
+            long_index.setdefault(caption[:CAPTION_MATCH_PREFIX_LEN].lower(), []).append(row)
+        else:
+            short_rows.append(row)
+
+    matches: Dict[str, dict] = {}
+    for entry in uploaded:
+        sidecar_caption = entry.get("caption", "").strip()
+
+        if len(sidecar_caption) >= CAPTION_MATCH_PREFIX_LEN:
+            candidates = short_rows + long_index.get(sidecar_caption[:CAPTION_MATCH_PREFIX_LEN].lower(), [])
+        else:
+            candidates = content_rows
+
+        match = next((row for row in candidates if _captions_match(sidecar_caption, row["caption"])), None)
+        if match is not None:
+            matches[entry["_clip_id"]] = match
+
+    return matches
+
+
 def load_viral_memory(path: Path = VIRAL_MEMORY_PATH) -> Dict[str, dict]:
     if not path.exists():
         return {}
@@ -194,6 +267,57 @@ def save_viral_memory(memory: Dict[str, dict], path: Path = VIRAL_MEMORY_PATH) -
     logger.info("Saved %d entrie(s) to %s", len(memory), path)
 
 
+def prune_viral_memory(memory: Dict[str, dict], max_age_days: int = VIRAL_MEMORY_MAX_AGE_DAYS) -> Dict[str, dict]:
+    """Drops entries whose checked_at is older than max_age_days. An entry with no
+    checked_at (or an unparseable one) is kept rather than guessed at — never prune on
+    ambiguity, same principle as auto_pilot.purge_low_scoring_clips's unscored-clip handling."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+    kept = {}
+    dropped = 0
+    for clip_id, entry in memory.items():
+        checked_at = entry.get("checked_at")
+        if checked_at:
+            try:
+                if datetime.fromisoformat(checked_at) < cutoff:
+                    dropped += 1
+                    continue
+            except ValueError:
+                pass
+        kept[clip_id] = entry
+    if dropped:
+        logger.info("Pruned %d viral_memory.json entrie(s) older than %d days", dropped, max_age_days)
+    return kept
+
+
+def load_scrape_health(path: Path = SCRAPE_HEALTH_PATH) -> dict:
+    if not path.exists():
+        return {"consecutive_failures": 0, "last_success": None, "last_failure": None}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"consecutive_failures": 0, "last_success": None, "last_failure": None}
+
+
+def _record_scrape_result(success: bool, path: Path = SCRAPE_HEALTH_PATH) -> dict:
+    """Persists whether fetch_content_list() actually returned anything this cycle, and
+    returns the updated health record. A run of consecutive failures — as opposed to one
+    isolated hiccup — is what actually indicates the scraper is broken (selector drift, a
+    TikTok layout change, an expired session), not routine flakiness."""
+    health = load_scrape_health(path)
+    now = datetime.now(timezone.utc).isoformat()
+    if success:
+        health["consecutive_failures"] = 0
+        health["last_success"] = now
+    else:
+        health["consecutive_failures"] = health.get("consecutive_failures", 0) + 1
+        health["last_failure"] = now
+    try:
+        atomic_io.atomic_write_json(path, health)
+    except OSError as e:
+        logger.warning("Could not write %s: %s", path, e)
+    return health
+
+
 def update_viral_memory(headless: bool = True) -> int:
     """One full pass: match every locally-uploaded clip against the live TikTok content
     list and update its view/like counts in viral_memory.json. Returns how many entries
@@ -205,17 +329,34 @@ def update_viral_memory(headless: bool = True) -> int:
 
     content_rows = fetch_content_list(headless=headless)
     if not content_rows:
-        logger.warning("Could not fetch any TikTok content rows this cycle — skipping update")
+        health = _record_scrape_result(success=False)
+        streak = health["consecutive_failures"]
+        # Distinguishes "nothing to check yet" (handled above, before ever touching the
+        # scraper) from an actual scrape failure with real clips waiting to be matched —
+        # and escalates to error-level once that failure repeats, so it's loud enough to
+        # notice in normal log-based monitoring instead of scrolling past a routine warning.
+        if streak >= CONSECUTIVE_FAILURE_ALERT_THRESHOLD:
+            logger.error(
+                "TikTok content scrape has failed %d cycles in a row with %d uploaded clip(s) "
+                "waiting to be matched — the scraper is very likely broken (selector drift or "
+                "an expired session), not just having a quiet cycle. Run "
+                "verify_tiktok_selectors.py to check.", streak, len(uploaded),
+            )
+        else:
+            logger.warning(
+                "Could not fetch any TikTok content rows this cycle (failure #%d) — skipping update", streak,
+            )
         return 0
+    _record_scrape_result(success=True)
 
     memory = load_viral_memory()
     matched = 0
 
+    row_by_clip_id = _match_uploaded_to_content_rows(uploaded, content_rows)
     for entry in uploaded:
         clip_id = entry["_clip_id"]
-        sidecar_caption = entry.get("caption", "")
 
-        match = next((row for row in content_rows if _captions_match(sidecar_caption, row["caption"])), None)
+        match = row_by_clip_id.get(clip_id)
         if match is None:
             continue
 
@@ -227,8 +368,9 @@ def update_viral_memory(headless: bool = True) -> int:
         }
         matched += 1
 
-    if matched:
-        save_viral_memory(memory)
+    pruned_memory = prune_viral_memory(memory)
+    if matched or len(pruned_memory) != len(memory):
+        save_viral_memory(pruned_memory)
     logger.info("Matched %d/%d uploaded clip(s) against TikTok's content list", matched, len(uploaded))
     return matched
 

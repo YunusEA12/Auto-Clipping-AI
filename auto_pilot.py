@@ -53,7 +53,9 @@ import tiktok_uploader
 import train_loop
 import transcribe
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+import logging_setup
+
+logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE_MIN = 3
@@ -177,11 +179,16 @@ def run_deployment_phase(survivors: List[Tuple[dict, Path, Optional[int]]], publ
         description = clip.get("description") or title
         caption = tiktok_uploader.build_caption_text(description, hashtags)
 
-        success = tiktok_uploader.try_upload_clip(output_path, description, hashtags, publish=publish)
-        if not success:
+        outcome = tiktok_uploader.try_upload_clip(output_path, description, hashtags, publish=publish)
+        if not outcome.success:
             failed += 1
             logger.warning("Upload fehlgeschlagen für '%s' — bleibt in output/", title)
             continue
+        if not outcome.confirmed:
+            logger.warning(
+                "Upload für '%s' wurde geklickt, aber nicht bestätigt (kein Redirect/Formular-"
+                "Abbau beobachtet) — wird trotzdem als hochgeladen verbucht.", title,
+            )
 
         uploaded += 1
         try:
@@ -198,6 +205,7 @@ def run_deployment_phase(survivors: List[Tuple[dict, Path, Optional[int]]], publ
                 "reward_score": reward_score,
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
                 "publish": publish,
+                "confirmed": outcome.confirmed,
             }
             atomic_io.atomic_write_json(destination.with_suffix(".json"), metadata)
 

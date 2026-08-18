@@ -8,7 +8,9 @@ from pathlib import Path
 
 from faster_whisper import WhisperModel
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+import logging_setup
+
+logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
 
 TEMP_DIR = Path("temp")

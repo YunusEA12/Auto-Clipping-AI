@@ -10,7 +10,9 @@ import mediapipe as mp
 from mediapipe.tasks.python import vision as mp_vision
 from mediapipe.tasks.python.core.base_options import BaseOptions
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+import logging_setup
+
+logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
 
 MODEL_DIR = Path("models")
@@ -20,12 +22,21 @@ MODEL_URL = (
     "blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
 )
 
-# How much to expand the raw face bounding box so head, shoulders and some
-# background are visible instead of just the face.
+# How much to expand the raw face bounding box so head, shoulders and some background are
+# visible instead of just the face. Empirical, not derived from anything — chosen by
+# rendering test clips and eyeballing the crop at a handful of values (2.0 felt like a tight
+# passport-photo crop; 3.0 pulled in distracting background). No documented basis beyond
+# that, so treat re-tuning the same way: render a few real clips at the new value and look
+# at them before trusting it. Raise it if facecams look too zoomed-in/cropped-at-the-chin;
+# lower it if too much background/empty space surrounds the face.
 PADDING_FACTOR = 2.5
 
-# Below this width/height (px), a padded box is considered degenerate (e.g. a face
-# detected right at the frame edge, clamped down to almost nothing) and we fall back.
+# Below this width/height (px), a padded box is considered degenerate (e.g. a face detected
+# right at the frame edge, clamped down to almost nothing) and we fall back. Empirical, same
+# basis (or lack of one) as PADDING_FACTOR above — 100px was small enough to only catch
+# genuinely-clamped edge cases at typical source resolutions (1080p+), not real small-but-
+# valid faces. If source videos are ever rendered at much lower resolution, this threshold
+# would need to scale down with them or it'll start rejecting legitimate detections.
 MIN_BOX_DIMENSION = 100
 
 

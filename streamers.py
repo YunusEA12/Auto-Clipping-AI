@@ -14,7 +14,9 @@ from pydantic import BaseModel
 
 import atomic_io
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+import logging_setup
+
+logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
 
 STREAMERS_PATH = Path("streamers.json")

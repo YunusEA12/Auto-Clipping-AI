@@ -17,6 +17,7 @@ lack entirely:
 import json
 import logging
 import random
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,17 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 RETRYABLE_EXCEPTIONS = (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
+
+# OpenAI API keys (sk-..., sk-proj-...) and Bearer auth headers, in case the SDK's exception
+# string ever happens to echo one back (e.g. a malformed-auth error including the request's
+# own headers) — every `except Exception as e` near an API client in this codebase logs `e`
+# directly, so redact at the one place all of them ultimately route through instead of
+# auditing every call site by hand.
+_SECRET_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]{10,}|Bearer\s+[A-Za-z0-9._-]{10,}")
+
+
+def redact_secrets(text: str) -> str:
+    return _SECRET_PATTERN.sub("***REDACTED***", text)
 
 DEFAULT_MAX_RETRIES = 4
 DEFAULT_BASE_DELAY_SECONDS = 2.0
@@ -119,12 +131,13 @@ def call_with_retry(
             if attempt > max_retries:
                 logger.error(
                     "%s: giving up after %d retr%s (%s: %s)",
-                    description, max_retries, "y" if max_retries == 1 else "ies", type(e).__name__, e,
+                    description, max_retries, "y" if max_retries == 1 else "ies",
+                    type(e).__name__, redact_secrets(str(e)),
                 )
                 raise
             delay = min(max_delay, base_delay * (2 ** (attempt - 1))) * (1 + random.random() * 0.25)
             logger.warning(
                 "%s: retryable error (%s: %s) — attempt %d/%d, waiting %.1fs",
-                description, type(e).__name__, e, attempt, max_retries, delay,
+                description, type(e).__name__, redact_secrets(str(e)), attempt, max_retries, delay,
             )
             time.sleep(delay)

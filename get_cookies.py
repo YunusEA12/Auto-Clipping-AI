@@ -30,8 +30,20 @@ import browser_cookie3
 import atomic_io
 from tiktok_uploader import COOKIES_PATH
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+import logging_setup
+
+logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
+
+try:
+    # browser_cookie3's Windows path falls back to a Volume Shadow Copy read when the
+    # browser's cookie DB is locked (i.e. the browser is open) — that specifically needs
+    # admin rights, and this is the exception it raises when it doesn't have them. Optional
+    # import: shadowcopy is a Windows-only dependency of browser_cookie3, so this is simply
+    # unavailable (and unnecessary) on other platforms.
+    from shadowcopy.exceptions import RequiresAdminError
+except ImportError:
+    RequiresAdminError = None
 
 TIKTOK_DOMAIN_FRAGMENT = "tiktok.com"
 REQUIRED_COOKIE_NAME = "sessionid"
@@ -54,11 +66,24 @@ def _load_tiktok_cookiejar(browser: Optional[str] = None):
             raise ValueError(f"Unknown browser '{browser}', expected one of: {[b for b, _ in BROWSER_LOADERS]}")
 
     last_error = None
+    needed_admin_for: List[str] = []
     for label, loader in loaders:
         try:
             jar = loader(domain_name=TIKTOK_DOMAIN_FRAGMENT)
         except Exception as e:
-            logger.warning("Could not read cookies from %s: %s", label, e)
+            if RequiresAdminError is not None and isinstance(e, RequiresAdminError):
+                # The single most likely real-world trigger for this: the browser is open
+                # (its cookie DB is locked, so browser_cookie3 fell back to a Shadow Copy
+                # read, which needs admin) — not some rare misconfiguration. Worth a distinct,
+                # actionable message instead of a generic "could not read cookies" warning.
+                logger.warning(
+                    "%s: cookie database is locked (browser is open) and reading a Shadow "
+                    "Copy of it needs admin rights. Close %s and re-run, or run this "
+                    "terminal as Administrator.", label, label,
+                )
+                needed_admin_for.append(label)
+            else:
+                logger.warning("Could not read cookies from %s: %s", label, e)
             last_error = e
             continue
 
@@ -66,6 +91,14 @@ def _load_tiktok_cookiejar(browser: Optional[str] = None):
             logger.info("Found %d tiktok.com cookie(s) in %s", len(jar), label)
             return label, jar
         logger.info("No tiktok.com cookies found in %s, trying next browser...", label)
+
+    if needed_admin_for:
+        raise RuntimeError(
+            f"Could not read cookies from {needed_admin_for} because their browser was open "
+            "and reading a locked cookie database needs admin rights. Close the browser "
+            "(fully, not just the tab) and re-run, run this terminal as Administrator, or "
+            "try a different browser with --browser edge/firefox."
+        ) from last_error
 
     raise RuntimeError(
         f"Could not find any tiktok.com cookies in: {[b for b, _ in loaders]}. Make sure "
@@ -126,6 +159,7 @@ def main():
         raise SystemExit(1)
 
     atomic_io.atomic_write_json(COOKIES_PATH, cookies)
+    atomic_io.secure_file_permissions(COOKIES_PATH)
     logger.info("✅ ERFOLG: %d Cookie(s) gespeichert in %s", len(cookies), COOKIES_PATH)
 
 

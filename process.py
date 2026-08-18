@@ -13,7 +13,9 @@ import cv2
 
 import vision
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+import logging_setup
+
+logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
 
 TEMP_DIR = Path("temp")
@@ -61,8 +63,15 @@ Style: Default,Arial Black,80,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
-# Where the subtitle block sits vertically, as a fraction of the canvas height —
-# the TikTok "lower third", clear of both the top facecam split and bottom platform UI icons.
+# Where the subtitle block sits vertically, as a fraction of the canvas height — the TikTok
+# "lower third", clear of both the top facecam split and bottom platform UI icons. Empirical
+# (eyeballed against TikTok's own like/comment/share icon column and caption placement in
+# the app, not derived from a published spec), and only checked at the SPLIT_SCREEN_FACE_RATIO
+# = 1/3 default — if that ratio is ever retuned significantly, re-check this against the app
+# again rather than assuming it still clears the facecam split. 0.70 leaves roughly the
+# bottom 30% of the canvas for captions before running into TikTok's own UI chrome at
+# typical zoom; push it lower (toward 1.0) if captions overlap the platform's icon column,
+# higher (toward the facecam split) if they sit uncomfortably close to the bottom edge.
 SUBTITLE_Y_RATIO = 0.70
 
 
@@ -192,31 +201,46 @@ def build_ass_for_clip(
     return ass_path
 
 
-def get_video_dimensions(video_path: Path) -> Tuple[int, int]:
+def _read_video_properties(video_path: Path) -> Tuple[int, int, float, float]:
+    """Raw (width, height, fps, frame_count) from a single cv2.VideoCapture open — no
+    validation here, since the three public functions below each need a different subset
+    and must only raise over the property they actually care about (e.g.
+    get_video_dimensions() must not fail a video whose width/height are fine but whose fps
+    metadata happens to be unreliable, which does happen with some live-recorded streams)."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
     try:
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0
+        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
     finally:
         cap.release()
+    return width, height, fps, frame_count
 
+
+def get_video_properties(video_path: Path) -> Tuple[int, int, float]:
+    """(width, height, duration_seconds), validating all three — the function to reach for
+    whenever a caller needs more than one of these for the same file, instead of the
+    individual functions below each opening their own separate capture."""
+    width, height, fps, frame_count = _read_video_properties(video_path)
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"Could not determine dimensions for video: {video_path}")
+    if fps <= 0 or frame_count <= 0:
+        raise RuntimeError(f"Could not determine duration for video: {video_path}")
+    return width, height, frame_count / fps
+
+
+def get_video_dimensions(video_path: Path) -> Tuple[int, int]:
+    width, height, _, _ = _read_video_properties(video_path)
     if width <= 0 or height <= 0:
         raise RuntimeError(f"Could not determine dimensions for video: {video_path}")
     return width, height
 
 
 def get_video_duration(video_path: Path) -> float:
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open video: {video_path}")
-    try:
-        fps = cap.get(cv2.CAP_PROP_FPS) or 0
-        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
-    finally:
-        cap.release()
-
+    _, _, fps, frame_count = _read_video_properties(video_path)
     if fps <= 0 or frame_count <= 0:
         raise RuntimeError(f"Could not determine duration for video: {video_path}")
     return frame_count / fps
@@ -243,10 +267,22 @@ def extract_preview_frames(video_path: Path, frames_dir: Path = TEMP_DIR) -> Lis
         return []
 
     frames_dir.mkdir(exist_ok=True)
+    video_mtime = video_path.stat().st_mtime
 
     def _extract_one(i: int, fraction: float) -> Optional[Path]:
         timestamp = max(0.0, duration * fraction)
         frame_path = frames_dir / f"{video_path.stem}_frame{i}.jpg"
+
+        # Cache hit: a frame already exists AND is at least as new as the source video, so
+        # it was extracted from this exact render, not a stale one — output filenames are
+        # reused across cycles (ffmpeg -y overwrites the same clip_<index>_<slug>.mp4), so a
+        # frame older than its video is from a *different* render under the same name and
+        # must not be trusted. This is what lets a clip re-evaluated across cycles (e.g.
+        # after a purge-threshold change, with no actual re-render) skip re-extraction
+        # entirely instead of re-encoding frames from scratch every time.
+        if frame_path.exists() and frame_path.stat().st_mtime >= video_mtime:
+            return frame_path
+
         cmd = [
             "ffmpeg", "-y", "-ss", str(timestamp), "-i", str(video_path),
             "-frames:v", "1", "-q:v", "2", str(frame_path),

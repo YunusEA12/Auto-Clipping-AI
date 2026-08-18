@@ -22,4 +22,5 @@ cookies.json
 uploaded_clips/
 openai_call_budget.json
 selector_audit/
+metrics_scrape_health.json
 .tiktok_browser_profile/

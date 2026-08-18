@@ -15,7 +15,9 @@ from pydantic import BaseModel, Field
 import atomic_io
 import openai_utils
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+import logging_setup
+
+logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
 
 TEMP_DIR = Path("temp")
@@ -455,7 +457,7 @@ def select_clips(
             description="analyze.select_clips",
         )
     except Exception as e:
-        logger.error("LLM API call failed: %s", e)
+        logger.error("LLM API call failed: %s", openai_utils.redact_secrets(str(e)))
         raise
 
     choice = completion.choices[0]
