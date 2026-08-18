@@ -187,6 +187,35 @@ def _wait_for_upload_complete(page) -> bool:
     return False
 
 
+OVERLAY_DISMISS_TIMEOUT_MS = 3000
+
+
+def _dismiss_blocking_overlays(page) -> None:
+    """Dismisses the two page-covering overlays confirmed to appear on a real upload
+    (2026-08-18, caught by an actual end-to-end test run, not the read-only selector check —
+    neither ever showed up in a passive .count() scan): TikTok's cookie-consent banner (a
+    <tiktok-cookie-banner> web component behind Shadow DOM — Playwright's locators pierce
+    that natively, so no special handling needed beyond the button's own text) and a
+    react-joyride "New editing features added" onboarding tooltip. Both are one-time/
+    contextual and may not appear on every account or every run, so each dismissal is
+    best-effort: try briefly, log if not found, never fail the upload over it — but if
+    either is left up, every click after it silently fails (an intercepted-pointer-events
+    timeout), which is worse than a missed dismissal attempt."""
+    try:
+        decline_button = page.get_by_role("button", name="Decline optional cookies")
+        decline_button.click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
+        logger.info("Dismissed cookie-consent banner (declined optional cookies)")
+    except PlaywrightTimeoutError:
+        logger.info("No cookie-consent banner to dismiss")
+
+    try:
+        got_it_button = page.get_by_role("button", name="Got it")
+        got_it_button.click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
+        logger.info("Dismissed 'New editing features added' onboarding tooltip")
+    except PlaywrightTimeoutError:
+        logger.info("No onboarding tooltip to dismiss")
+
+
 def _wait_for_caption_filled(page, caption_box, expected_text: str) -> None:
     """Polls the caption box's own text content until it actually contains what was typed
     (or a bounded timeout elapses), instead of a flat sleep with no verification that the
@@ -295,12 +324,21 @@ def upload_video(
                 )
                 return UploadOutcome(success=False, confirmed=False)
 
+            # The cookie-consent banner shows up on page load, before the upload even starts —
+            # dismiss it now so it can't be sitting there intercepting clicks later.
+            _dismiss_blocking_overlays(page)
+
             logger.info("Uploading file: %s", video_path)
             file_input = page.locator("input[type='file']").first
             file_input.set_input_files(str(video_path.resolve()))
 
             logger.info("Waiting for upload to reach 100%%...")
             upload_confirmed = _wait_for_upload_complete(page)
+
+            # The "New editing features added" onboarding tooltip was observed appearing
+            # only after the upload finished (2026-08-18) — dismiss again here, right before
+            # the caption box needs a real click, not just after page load.
+            _dismiss_blocking_overlays(page)
 
             logger.info("Filling in caption...")
             caption_box = page.locator("[data-e2e='caption_container'] div[contenteditable='true']").first

@@ -148,3 +148,60 @@ def test_upload_complete_returns_true_and_stops_as_soon_as_icon_appears():
 def test_upload_complete_falls_back_to_settle_delay_when_icon_never_appears():
     page = FakeUploadPage(icon_appears_after_calls=None)
     assert tiktok_uploader._wait_for_upload_complete(page) is False
+
+
+# --- _dismiss_blocking_overlays (real bug caught by an authorized live test run,
+# 2026-08-18: a cookie-consent banner and a "New editing features added" onboarding
+# tooltip both intercept clicks on elements underneath them) ------------------------------
+
+class FakeOverlayButton:
+    def __init__(self, present):
+        self._present = present
+        self.clicked = False
+
+    def click(self, timeout=None):
+        if not self._present:
+            raise PlaywrightTimeoutError("button not found")
+        self.clicked = True
+
+
+class FakeOverlayPage:
+    def __init__(self, cookie_banner_present, tooltip_present):
+        self.decline_button = FakeOverlayButton(cookie_banner_present)
+        self.got_it_button = FakeOverlayButton(tooltip_present)
+
+    def get_by_role(self, role, name=None):
+        assert role == "button"
+        if name == "Decline optional cookies":
+            return self.decline_button
+        if name == "Got it":
+            return self.got_it_button
+        raise AssertionError(f"unexpected role lookup: {role!r} name={name!r}")
+
+
+def test_dismiss_overlays_clicks_both_when_both_present():
+    page = FakeOverlayPage(cookie_banner_present=True, tooltip_present=True)
+    tiktok_uploader._dismiss_blocking_overlays(page)
+    assert page.decline_button.clicked is True
+    assert page.got_it_button.clicked is True
+
+
+def test_dismiss_overlays_never_raises_when_neither_present():
+    page = FakeOverlayPage(cookie_banner_present=False, tooltip_present=False)
+    tiktok_uploader._dismiss_blocking_overlays(page)  # must not raise
+    assert page.decline_button.clicked is False
+    assert page.got_it_button.clicked is False
+
+
+def test_dismiss_overlays_handles_only_cookie_banner_present():
+    page = FakeOverlayPage(cookie_banner_present=True, tooltip_present=False)
+    tiktok_uploader._dismiss_blocking_overlays(page)
+    assert page.decline_button.clicked is True
+    assert page.got_it_button.clicked is False
+
+
+def test_dismiss_overlays_handles_only_tooltip_present():
+    page = FakeOverlayPage(cookie_banner_present=False, tooltip_present=True)
+    tiktok_uploader._dismiss_blocking_overlays(page)
+    assert page.decline_button.clicked is False
+    assert page.got_it_button.clicked is True

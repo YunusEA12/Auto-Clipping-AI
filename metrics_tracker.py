@@ -31,6 +31,7 @@ broken scrape just skips that cycle instead of crashing.
 """
 
 import argparse
+import html
 import json
 import logging
 import re
@@ -157,7 +158,14 @@ def _extract_context_json(page) -> Optional[dict]:
     id="__Creator_Center_Context__"> tag its frontend hydrates the content list from. Returns
     None (never raises) if that tag isn't present or isn't valid JSON — real drift, not a
     routine empty-list case, which this distinguishes from downstream by still returning a
-    (possibly empty) list from a *successfully parsed* payload."""
+    (possibly empty) list from a *successfully parsed* payload.
+
+    html.unescape() is required, not optional: confirmed live (2026-08-18) that this
+    particular script tag's actual page source contains literal HTML-entity sequences
+    (&quot; instead of ") inside its JSON — and <script> is an HTML "raw text" element, so
+    the browser's parser never decodes entities inside it the way it would for a normal text
+    node. .text_content() faithfully returns exactly what's in the source, entities and all,
+    so without this the JSON is unparseable every single time, not just sometimes."""
     try:
         raw = page.locator(f"script#{CONTEXT_SCRIPT_ID}").text_content(timeout=5000)
     except PlaywrightTimeoutError:
@@ -165,7 +173,7 @@ def _extract_context_json(page) -> Optional[dict]:
     if not raw:
         return None
     try:
-        data = json.loads(raw)
+        data = json.loads(html.unescape(raw))
     except json.JSONDecodeError:
         return None
     return data if isinstance(data, dict) else None

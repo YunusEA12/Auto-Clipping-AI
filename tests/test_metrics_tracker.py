@@ -86,7 +86,22 @@ class _FakePage:
         return _FakeScriptLocator(self._script_text)
 
 
-def test_extract_context_json_parses_valid_json():
+def test_extract_context_json_parses_html_entity_escaped_json():
+    # This is the real shape: <script> is an HTML "raw text" element, so the browser never
+    # decodes entities inside it — .text_content() returns literal &quot; instead of ",
+    # confirmed live (2026-08-18). A test feeding clean json.dumps() output would never catch
+    # a regression here, since it skips exactly the step that needs testing (html.unescape());
+    # that's exactly how this bug shipped once already, caught only by an actual live run.
+    import html as html_module
+    escaped_text = html_module.escape(json.dumps(REAL_SHAPE_CONTEXT_PAYLOAD), quote=True)
+    assert "&quot;" in escaped_text  # sanity: prove this test actually exercises escaped input
+    page = _FakePage(escaped_text)
+    result = metrics_tracker._extract_context_json(page)
+    assert result == REAL_SHAPE_CONTEXT_PAYLOAD
+
+
+def test_extract_context_json_also_handles_already_clean_json():
+    # Not the real-world shape, but should still work if TikTok ever stops double-escaping.
     page = _FakePage(json.dumps(REAL_SHAPE_CONTEXT_PAYLOAD))
     result = metrics_tracker._extract_context_json(page)
     assert result == REAL_SHAPE_CONTEXT_PAYLOAD
