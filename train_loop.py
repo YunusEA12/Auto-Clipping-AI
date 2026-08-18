@@ -29,6 +29,7 @@ import base64
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -60,6 +61,14 @@ MAX_COMPLETION_TOKENS = 4096
 # reward_score >= this threshold is eligible to contribute a "DO" rule (not every positive
 # clip is exceptional enough to generalize into a standing rule).
 POSITIVE_RULE_THRESHOLD = 7
+
+# A clip checked before this many hours have passed since upload has 0 (or near-0) views
+# because TikTok hasn't finished distributing it yet, not because it flopped — feeding that
+# to the critic as "viral performance data" would teach it "everything flops" from noise
+# instead of a real signal. Found live 2026-08-18: viral_memory.json was full of 0-view
+# entries checked minutes after upload, which load_viral_memory_section() would otherwise
+# have handed to the critic unfiltered.
+VIRAL_SIGNAL_MIN_AGE_HOURS = 24
 
 _FRACTION_NAMES = {
     Fraction(1, 2): "half", Fraction(1, 3): "third", Fraction(2, 3): "two-thirds",
@@ -190,10 +199,27 @@ def load_feedback_by_title() -> Dict[str, List[str]]:
     return by_title
 
 
+def _old_enough_for_viral_signal(entry: dict, now: datetime, min_age_hours: int = VIRAL_SIGNAL_MIN_AGE_HOURS) -> bool:
+    """Whether enough real time has passed since upload for this entry's view/like count to
+    mean anything. `uploaded_at` missing or unparseable is treated as NOT old enough —
+    never treat ambiguous timing as a green light to feed possibly-fresh data to the critic,
+    same never-guess-on-ambiguity principle as metrics_tracker.prune_viral_memory."""
+    uploaded_at = entry.get("uploaded_at")
+    if not uploaded_at:
+        return False
+    try:
+        uploaded = datetime.fromisoformat(uploaded_at)
+    except ValueError:
+        return False
+    return now - uploaded >= timedelta(hours=min_age_hours)
+
+
 def load_viral_memory_section() -> str:
     """Real TikTok view/like data for previously uploaded clips (written by
-    metrics_tracker.py). Only clips that have actually been checked (views is not None)
-    are included — freshly uploaded, not-yet-measured clips would just be noise here."""
+    metrics_tracker.py). Only clips that have actually been checked (views is not None) AND
+    have had at least VIRAL_SIGNAL_MIN_AGE_HOURS since upload are included — a clip checked
+    minutes after going live shows 0 views because TikTok hasn't distributed it yet, not
+    because it flopped, and would just be noise (or actively misleading) here."""
     if not VIRAL_MEMORY_PATH.exists():
         return ""
 
@@ -207,7 +233,11 @@ def load_viral_memory_section() -> str:
     if not isinstance(memory, dict):
         return ""
 
-    scored = [e for e in memory.values() if isinstance(e, dict) and e.get("views") is not None]
+    now = datetime.now(timezone.utc)
+    scored = [
+        e for e in memory.values()
+        if isinstance(e, dict) and e.get("views") is not None and _old_enough_for_viral_signal(e, now)
+    ]
     if not scored:
         return ""
 

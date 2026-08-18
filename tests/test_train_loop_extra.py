@@ -1,3 +1,6 @@
+import json
+from datetime import datetime, timedelta, timezone
+
 import train_loop
 
 
@@ -46,6 +49,59 @@ def test_cap_rules_keeps_most_recent_when_over_limit():
     rules = [f"rule-{i}" for i in range(10)]
     capped = train_loop._cap_rules(rules, max_count=3)
     assert capped == ["rule-7", "rule-8", "rule-9"]
+
+
+# --- load_viral_memory_section age-gating (found live 2026-08-18: viral_memory.json was
+# full of 0-view entries checked minutes after upload — TikTok hadn't distributed them yet,
+# not a real flop signal, but load_viral_memory_section() used to hand it to the critic
+# unfiltered as if it meant something) -----------------------------------------------------
+
+def _iso(hours_ago):
+    return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
+
+
+def test_old_enough_true_past_threshold():
+    entry = {"uploaded_at": _iso(48)}
+    assert train_loop._old_enough_for_viral_signal(entry, datetime.now(timezone.utc)) is True
+
+
+def test_old_enough_false_when_too_fresh():
+    entry = {"uploaded_at": _iso(1)}
+    assert train_loop._old_enough_for_viral_signal(entry, datetime.now(timezone.utc)) is False
+
+
+def test_old_enough_false_when_uploaded_at_missing():
+    # Ambiguous timing must never be treated as a green light — same principle as
+    # metrics_tracker.prune_viral_memory's handling of a missing checked_at.
+    assert train_loop._old_enough_for_viral_signal({}, datetime.now(timezone.utc)) is False
+
+
+def test_viral_memory_section_excludes_fresh_zero_view_clips(tmp_path, monkeypatch):
+    memory_path = tmp_path / "viral_memory.json"
+    memory_path.write_text(json.dumps({
+        "fresh_clip": {
+            "title": "Fresh Clip", "viral_score": 8, "energy_rating": 8,
+            "views": 0, "likes": 0, "uploaded_at": _iso(1),
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(train_loop, "VIRAL_MEMORY_PATH", memory_path)
+
+    assert train_loop.load_viral_memory_section() == ""
+
+
+def test_viral_memory_section_includes_old_enough_clips(tmp_path, monkeypatch):
+    memory_path = tmp_path / "viral_memory.json"
+    memory_path.write_text(json.dumps({
+        "old_clip": {
+            "title": "Old Clip", "viral_score": 9, "energy_rating": 9,
+            "views": 15000, "likes": 900, "uploaded_at": _iso(48),
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(train_loop, "VIRAL_MEMORY_PATH", memory_path)
+
+    section = train_loop.load_viral_memory_section()
+    assert "Old Clip" in section
+    assert "15000 views" in section
 
 
 def test_cap_rules_exact_boundary():
