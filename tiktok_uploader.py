@@ -224,14 +224,17 @@ def _dismiss_blocking_overlays(page) -> None:
     either is left up, every click after it silently fails (an intercepted-pointer-events
     timeout), which is worse than a missed dismissal attempt."""
     try:
-        decline_button = page.get_by_role("button", name="Decline optional cookies")
+        # .first (found in review, 2026-08-18): without it, a rare duplicate/stale element
+        # matching the same accessible name raises a strict-mode Error (not a
+        # PlaywrightTimeoutError), which was uncaught here and would fail the whole upload.
+        decline_button = page.get_by_role("button", name="Decline optional cookies").first
         decline_button.click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
         logger.info("Dismissed cookie-consent banner (declined optional cookies)")
     except PlaywrightTimeoutError:
         logger.info("No cookie-consent banner to dismiss")
 
     try:
-        got_it_button = page.get_by_role("button", name="Got it")
+        got_it_button = page.get_by_role("button", name="Got it").first
         got_it_button.click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
         logger.info("Dismissed 'New editing features added' onboarding tooltip")
     except PlaywrightTimeoutError:
@@ -291,7 +294,15 @@ def _tokenize_hashtag(page, caption_box, tag: str) -> bool:
     entity in place (no duplication) and appends a trailing space, so the next call needs
     no leading space of its own — handled here by checking the box's current text first.
     Best-effort: if no suggestion appears (slow response, or an obscure tag with literally
-    no matches), the tag is left as typed plain text rather than blocking the upload."""
+    no matches), the tag is left as typed plain text rather than blocking the upload.
+
+    Clicks the suggestion marked `.focused` (TikTok's own best-match indicator, confirmed
+    live 2026-08-18: for an exact-match tag it carries `aria-selected="true"`) rather than
+    just the first item in the list — a plain `.first` would risk clicking a more popular
+    but different tag (e.g. "#fypp" instead of "#fyp") if TikTok ever ranks a related
+    suggestion above the exact match (found in review, 2026-08-18). Falls back to `.first`
+    if nothing is marked focused, since the DOM structure for that case hasn't been
+    independently verified."""
     if not tag.startswith("#"):
         tag = f"#{tag}"
     current_text = caption_box.text_content() or ""
@@ -299,9 +310,13 @@ def _tokenize_hashtag(page, caption_box, tag: str) -> bool:
         caption_box.type(" ", delay=15)
     caption_box.type(tag, delay=60)
     try:
-        page.locator("[role='option'].hashtag-suggestion-item").first.click(
-            timeout=HASHTAG_SUGGESTION_TIMEOUT_MS
-        )
+        focused = page.locator("[role='option'].hashtag-suggestion-item.focused")
+        if focused.count() > 0:
+            focused.first.click(timeout=HASHTAG_SUGGESTION_TIMEOUT_MS)
+        else:
+            page.locator("[role='option'].hashtag-suggestion-item").first.click(
+                timeout=HASHTAG_SUGGESTION_TIMEOUT_MS
+            )
         return True
     except PlaywrightTimeoutError:
         logger.warning("No hashtag suggestion appeared for '%s' — left as plain text", tag)
@@ -438,13 +453,20 @@ def upload_video(
     caption = build_caption_text(description, tag_list)
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=headless)
-        context = browser.new_context(viewport={"width": 1280, "height": 900})
-        context.set_default_timeout(NAV_TIMEOUT_MS)
-        context.add_cookies(cookies)
-        page = context.new_page()
-
+        browser = None
+        context = None
         try:
+            # Launching/context-setup used to sit outside this try, so a rejected cookie
+            # (e.g. add_cookies() rejecting a sameSite value a browser-extension export used
+            # that isn't exactly "Strict"/"Lax"/"None") would raise straight out of
+            # upload_video(), breaking its own documented "never raises" contract and
+            # leaking the browser process (found in review, 2026-08-18).
+            browser = pw.chromium.launch(headless=headless)
+            context = browser.new_context(viewport={"width": 1280, "height": 900})
+            context.set_default_timeout(NAV_TIMEOUT_MS)
+            context.add_cookies(cookies)
+            page = context.new_page()
+
             logger.info("Opening TikTok upload page...")
             page.goto(UPLOAD_URL, wait_until="domcontentloaded")
 
@@ -526,8 +548,10 @@ def upload_video(
             logger.error("TikTok upload failed for %s: %s", video_path, e)
             return UploadOutcome(success=False, confirmed=False)
         finally:
-            context.close()
-            browser.close()
+            if context is not None:
+                context.close()
+            if browser is not None:
+                browser.close()
 
 
 def try_upload_clip(

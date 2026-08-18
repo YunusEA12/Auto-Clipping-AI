@@ -188,6 +188,10 @@ class FakeOverlayButton:
         self._present = present
         self.clicked = False
 
+    @property
+    def first(self):
+        return self
+
     def click(self, timeout=None):
         if not self._present:
             raise PlaywrightTimeoutError("button not found")
@@ -398,6 +402,9 @@ class FakeSuggestionLocator:
     def first(self):
         return self
 
+    def count(self):
+        return 1 if self._present else 0
+
     def click(self, timeout=None):
         if not self._present:
             raise PlaywrightTimeoutError("no suggestion appeared")
@@ -405,41 +412,61 @@ class FakeSuggestionLocator:
 
 
 class FakeHashtagPage:
-    def __init__(self, suggestion_present):
-        self.suggestion = FakeSuggestionLocator(suggestion_present)
+    """focused_present: a suggestion carrying TikTok's own `.focused` best-match marker.
+    fallback_present: any suggestion at all, used only when nothing is focused."""
+
+    def __init__(self, focused_present=False, fallback_present=False):
+        self.focused = FakeSuggestionLocator(focused_present)
+        self.fallback = FakeSuggestionLocator(fallback_present)
 
     def locator(self, selector):
+        if selector == "[role='option'].hashtag-suggestion-item.focused":
+            return self.focused
         assert selector == "[role='option'].hashtag-suggestion-item"
-        return self.suggestion
+        return self.fallback
 
 
-def test_tokenize_hashtag_clicks_suggestion_and_adds_leading_space_when_missing():
-    page = FakeHashtagPage(suggestion_present=True)
+def test_tokenize_hashtag_clicks_focused_suggestion_and_adds_leading_space_when_missing():
+    page = FakeHashtagPage(focused_present=True)
     caption_box = FakeHashtagCaptionBox("Cool clip")
     assert tiktok_uploader._tokenize_hashtag(page, caption_box, "fyp") is True
-    assert page.suggestion.clicked is True
+    assert page.focused.clicked is True
     assert caption_box.text == "Cool clip #fyp"
 
 
 def test_tokenize_hashtag_skips_leading_space_when_already_present():
     # Simulates the box right after a previous _tokenize_hashtag call, whose suggestion
     # click already appended a trailing space — verified live, not assumed.
-    page = FakeHashtagPage(suggestion_present=True)
+    page = FakeHashtagPage(focused_present=True)
     caption_box = FakeHashtagCaptionBox("Cool clip #fyp ")
     tiktok_uploader._tokenize_hashtag(page, caption_box, "viral")
     assert caption_box.text == "Cool clip #fyp #viral"
 
 
 def test_tokenize_hashtag_normalizes_missing_hash_prefix():
-    page = FakeHashtagPage(suggestion_present=True)
+    page = FakeHashtagPage(focused_present=True)
     caption_box = FakeHashtagCaptionBox("")
     tiktok_uploader._tokenize_hashtag(page, caption_box, "shorts")
     assert caption_box.text == "#shorts"
 
 
+def test_tokenize_hashtag_falls_back_to_first_when_nothing_focused():
+    # Found in review, 2026-08-18: clicking a plain .first suggestion risks tokenizing a
+    # different, more-popular-but-wrong tag if TikTok ever ranks a related suggestion above
+    # the exact match — the .focused marker is TikTok's own best-match signal and must be
+    # preferred whenever it's present. This only falls back to .first when nothing is
+    # focused at all.
+    page = FakeHashtagPage(focused_present=False, fallback_present=True)
+    caption_box = FakeHashtagCaptionBox("Cool clip")
+    assert tiktok_uploader._tokenize_hashtag(page, caption_box, "fyp") is True
+    assert page.focused.clicked is False
+    assert page.fallback.clicked is True
+
+
 def test_tokenize_hashtag_falls_back_to_plain_text_when_no_suggestion_appears():
-    page = FakeHashtagPage(suggestion_present=False)
+    page = FakeHashtagPage(focused_present=False, fallback_present=False)
     caption_box = FakeHashtagCaptionBox("Cool clip")
     assert tiktok_uploader._tokenize_hashtag(page, caption_box, "#obscuretag") is False
-    assert page.suggestion.clicked is False
+    assert page.focused.clicked is False
+    assert page.fallback.clicked is False
     assert caption_box.text == "Cool clip #obscuretag"

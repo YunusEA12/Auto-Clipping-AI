@@ -19,6 +19,7 @@ import logging
 from pathlib import Path
 from typing import List
 
+from filelock import FileLock, Timeout
 from pydantic import BaseModel
 
 import atomic_io
@@ -29,6 +30,19 @@ logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
 
 STREAMERS_PATH = Path("streamers.json")
+
+# add_streamer/remove_streamer are each a read-modify-write (load_streamers() then
+# save_streamers()) with no atomicity across the two calls — app.py's dashboard can, in
+# principle, handle two concurrent edits (two browser tabs, or a Streamlit rerun racing a
+# background action), and without a lock the second save silently clobbers the first's
+# change: both reads see the same list, both write back their own version, whichever finishes
+# last wins (found in review, 2026-08-18). atomic_write_json still guarantees the file itself
+# is never left corrupted/torn — this closes the separate "lost update" gap on top of that.
+STREAMERS_LOCK_TIMEOUT_SECONDS = 10
+
+
+def _streamers_lock(path: Path) -> FileLock:
+    return FileLock(str(path) + ".lock", timeout=STREAMERS_LOCK_TIMEOUT_SECONDS)
 
 
 class StreamerEntry(BaseModel):
@@ -84,24 +98,32 @@ def add_streamer(
 ) -> None:
     if path is None:
         path = STREAMERS_PATH
-    entries = load_streamers(path)
-    if any(e["name"] == name for e in entries):
-        raise ValueError(f"Streamer '{name}' existiert bereits.")
+    try:
+        with _streamers_lock(path):
+            entries = load_streamers(path)
+            if any(e["name"] == name for e in entries):
+                raise ValueError(f"Streamer '{name}' existiert bereits.")
 
-    entries.append(
-        StreamerEntry(name=name, url=url, profile=profile, auto_upload=auto_upload, publish=publish).model_dump()
-    )
-    save_streamers(entries, path)
+            entries.append(
+                StreamerEntry(name=name, url=url, profile=profile, auto_upload=auto_upload, publish=publish).model_dump()
+            )
+            save_streamers(entries, path)
+    except Timeout:
+        raise RuntimeError(f"Could not acquire lock on {path} within {STREAMERS_LOCK_TIMEOUT_SECONDS}s")
 
 
 def remove_streamer(name: str, path: Path = None) -> bool:
     """Returns True if a streamer was actually removed, False if `name` wasn't found."""
     if path is None:
         path = STREAMERS_PATH
-    entries = load_streamers(path)
-    remaining = [e for e in entries if e["name"] != name]
-    if len(remaining) == len(entries):
-        return False
+    try:
+        with _streamers_lock(path):
+            entries = load_streamers(path)
+            remaining = [e for e in entries if e["name"] != name]
+            if len(remaining) == len(entries):
+                return False
 
-    save_streamers(remaining, path)
-    return True
+            save_streamers(remaining, path)
+            return True
+    except Timeout:
+        raise RuntimeError(f"Could not acquire lock on {path} within {STREAMERS_LOCK_TIMEOUT_SECONDS}s")

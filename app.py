@@ -308,8 +308,11 @@ with tab_fleet:
                         st.caption("⚪ Offline")
                 with col_delete:
                     if st.button("🗑️ Entfernen", key=f"del_streamer_{entry['name']}"):
-                        dashboard_api.remove_streamer(entry["name"])
-                        st.rerun()
+                        try:
+                            dashboard_api.remove_streamer(entry["name"])
+                            st.rerun()
+                        except RuntimeError as e:
+                            st.error(str(e))
 
     st.divider()
     st.markdown("#### ➕ Neuen Streamer hinzufügen")
@@ -348,7 +351,7 @@ with tab_fleet:
                     )
                     st.success(f"'{new_streamer_name}' hinzugefügt.")
                     st.rerun()
-                except ValueError as e:
+                except (ValueError, RuntimeError) as e:
                     st.error(str(e))
 
 # --- Tab 3: KI Gehirn (Memory) --------------------------------------------------------------

@@ -257,13 +257,19 @@ def fetch_content_list(headless: bool = True) -> List[dict]:
     rows: List[dict] = []
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=headless)
-            context = browser.new_context(viewport={"width": 1280, "height": 900})
-            context.set_default_timeout(NAV_TIMEOUT_MS)
-            context.add_cookies(cookies)
-            page = context.new_page()
-
+            browser = None
+            context = None
             try:
+                # Launching/context-setup used to sit outside this inner try, so a rejected
+                # cookie would skip straight to the finally below without it ever running —
+                # leaking the browser process instead of closing it (found in review,
+                # 2026-08-18; same fix applied to tiktok_uploader.upload_video()).
+                browser = pw.chromium.launch(headless=headless)
+                context = browser.new_context(viewport={"width": 1280, "height": 900})
+                context.set_default_timeout(NAV_TIMEOUT_MS)
+                context.add_cookies(cookies)
+                page = context.new_page()
+
                 page.goto(CONTENT_URL, wait_until="domcontentloaded")
 
                 context_data = _extract_context_json(page)
@@ -277,8 +283,10 @@ def fetch_content_list(headless: bool = True) -> List[dict]:
                     )
                     rows = _fetch_content_list_via_dom(page)
             finally:
-                context.close()
-                browser.close()
+                if context is not None:
+                    context.close()
+                if browser is not None:
+                    browser.close()
     except Exception as e:
         logger.error("Could not fetch TikTok content list: %s", e)
         return []

@@ -76,6 +76,18 @@ def test_old_enough_false_when_uploaded_at_missing():
     assert train_loop._old_enough_for_viral_signal({}, datetime.now(timezone.utc)) is False
 
 
+def test_old_enough_false_on_naive_uploaded_at_does_not_raise():
+    # Regression: naive (no-timezone) uploaded_at parses fine via fromisoformat, but
+    # subtracting it from an aware `now` raises TypeError, not ValueError — this must not
+    # crash the whole critic run over one hand-edited or malformed viral_memory.json entry.
+    naive = (datetime.now() - timedelta(hours=48)).isoformat()  # no tzinfo
+    assert train_loop._old_enough_for_viral_signal({"uploaded_at": naive}, datetime.now(timezone.utc)) is False
+
+
+def test_old_enough_false_on_non_string_uploaded_at_does_not_raise():
+    assert train_loop._old_enough_for_viral_signal({"uploaded_at": 12345}, datetime.now(timezone.utc)) is False
+
+
 def test_viral_memory_section_excludes_fresh_zero_view_clips(tmp_path, monkeypatch):
     memory_path = tmp_path / "viral_memory.json"
     memory_path.write_text(json.dumps({

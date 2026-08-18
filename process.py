@@ -108,6 +108,15 @@ def load_json(path: Path) -> dict:
         return json.load(f)
 
 
+def _escape_ass_text(text: str) -> str:
+    """A literal '{' or '}' in transcribed speech would be parsed by libass as an
+    override-tag delimiter, corrupting or swallowing that (or a subsequent) subtitle line
+    when burned into the final render (found in review, 2026-08-18). ASS has no native
+    escape sequence for a literal brace, and spoken text has no legitimate use for
+    override-tag-only characters, so they're stripped rather than escaped."""
+    return text.replace("{", "").replace("}", "")
+
+
 def _fallback_segment_event(seg: dict, clip_start: float, clip_end: float, position_tag: str) -> Optional[str]:
     """Whole-segment subtitle line used when word-level timestamps are unavailable."""
     rel_start = max(seg["start"], clip_start) - clip_start
@@ -115,7 +124,7 @@ def _fallback_segment_event(seg: dict, clip_start: float, clip_end: float, posit
     if rel_end <= rel_start:
         return None
 
-    text = seg["text"].strip().replace("\n", " ").upper()
+    text = _escape_ass_text(seg["text"].strip().replace("\n", " ").upper())
     if not text:
         return None
 
@@ -127,7 +136,7 @@ def _word_block_events(words: list, clip_start: float, clip_end: float, position
     events = []
     for block_start in range(0, len(words), WORDS_PER_BLOCK):
         block = words[block_start: block_start + WORDS_PER_BLOCK]
-        block_texts = [w["text"].strip().upper() for w in block]
+        block_texts = [_escape_ass_text(w["text"].strip().upper()) for w in block]
 
         for i, word in enumerate(block):
             w_start = word["start"]

@@ -209,9 +209,13 @@ def _old_enough_for_viral_signal(entry: dict, now: datetime, min_age_hours: int 
         return False
     try:
         uploaded = datetime.fromisoformat(uploaded_at)
-    except ValueError:
+        return now - uploaded >= timedelta(hours=min_age_hours)
+    except (TypeError, ValueError):
+        # TypeError covers two cases ValueError doesn't: a non-string uploaded_at, and a
+        # naive (no-timezone) uploaded_at subtracted against an aware `now` — viral_memory.json
+        # is a hand-editable accumulator with no schema enforcement, so either is possible
+        # even though the only current writer always writes tz-aware ISO strings.
         return False
-    return now - uploaded >= timedelta(hours=min_age_hours)
 
 
 def load_viral_memory_section() -> str:

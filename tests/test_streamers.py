@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 import streamers
@@ -52,8 +54,40 @@ def test_load_skips_invalid_entries_but_keeps_valid_ones(tmp_path):
 def test_save_leaves_no_temp_files_behind(tmp_path):
     path = tmp_path / "streamers.json"
     streamers.add_streamer("elias", "https://twitch.tv/elias", path=path)
-    leftovers = [p for p in tmp_path.iterdir() if p != path]
+    # The lock file itself (path + ".lock") is an expected, permanent sidecar of the
+    # filelock-based race fix below — it's not a leftover atomic-write temp file, which is
+    # what this test actually guards against.
+    leftovers = [p for p in tmp_path.iterdir() if p != path and p.name != f"{path.name}.lock"]
     assert leftovers == []
+
+
+# --- concurrent add_streamer race (found in review, 2026-08-18: add_streamer/remove_streamer
+# were an unlocked read-modify-write — two concurrent callers, e.g. two dashboard browser
+# tabs, could each read the same list and the later save would silently discard the
+# earlier caller's addition) -----------------------------------------------------------
+
+def test_concurrent_add_streamer_does_not_lose_an_update(tmp_path):
+    path = tmp_path / "streamers.json"
+    streamers.save_streamers([], path)  # pre-create the file so both threads race on the same content
+
+    names = [f"streamer_{i}" for i in range(8)]
+    errors = []
+
+    def add(name):
+        try:
+            streamers.add_streamer(name, f"https://twitch.tv/{name}", path=path)
+        except Exception as e:  # pragma: no cover - only populated on real failure
+            errors.append(e)
+
+    threads = [threading.Thread(target=add, args=(name,)) for name in names]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert errors == []
+    saved_names = {e["name"] for e in streamers.load_streamers(path)}
+    assert saved_names == set(names)
 
 
 # --- publish field (safety-model correction, 2026-08-18: TikTok has no draft-save action,
