@@ -1,9 +1,18 @@
 """Fleet configuration: a persistent list of streamers to watch 24/7 (name, stream URL,
-which "Streamer-Mitarbeiter" profile to use, whether to auto-upload survivors to TikTok).
+which "Streamer-Mitarbeiter" profile to use, whether to auto-upload survivors to TikTok, and
+whether to actually publish them live).
 
 Shared by orchestrator.py (the watch daemon, which reads it every poll cycle) and app.py's
 "👥 Streamer Verwaltung & Fleet" tab (which reads AND writes it) — one place for the JSON
-shape and validation so neither has to re-implement the other's parsing."""
+shape and validation so neither has to re-implement the other's parsing.
+
+auto_upload and publish are separate fields, not one: TikTok's web upload flow has no
+draft-save action anymore (confirmed 2026-08-18 — an abandoned upload is discarded, not
+saved), so auto_upload=true with publish=false means Phase 5 (Deployment) is skipped
+entirely for that streamer — there's no safe partial action to take. publish=true is the
+only thing that makes auto_upload actually do anything; keeping them separate (rather than
+collapsing into one flag) keeps that an explicit, visible choice per streamer rather than a
+default nobody consciously picked."""
 
 import json
 import logging
@@ -27,6 +36,7 @@ class StreamerEntry(BaseModel):
     url: str
     profile: str = ""
     auto_upload: bool = False
+    publish: bool = False
 
 
 def load_streamers(path: Path = None) -> List[dict]:
@@ -69,7 +79,8 @@ def save_streamers(entries: List[dict], path: Path = None) -> None:
 
 
 def add_streamer(
-    name: str, url: str, profile: str = "", auto_upload: bool = False, path: Path = None
+    name: str, url: str, profile: str = "", auto_upload: bool = False, publish: bool = False,
+    path: Path = None,
 ) -> None:
     if path is None:
         path = STREAMERS_PATH
@@ -77,7 +88,9 @@ def add_streamer(
     if any(e["name"] == name for e in entries):
         raise ValueError(f"Streamer '{name}' existiert bereits.")
 
-    entries.append(StreamerEntry(name=name, url=url, profile=profile, auto_upload=auto_upload).model_dump())
+    entries.append(
+        StreamerEntry(name=name, url=url, profile=profile, auto_upload=auto_upload, publish=publish).model_dump()
+    )
     save_streamers(entries, path)
 
 

@@ -54,3 +54,27 @@ def test_save_leaves_no_temp_files_behind(tmp_path):
     streamers.add_streamer("elias", "https://twitch.tv/elias", path=path)
     leftovers = [p for p in tmp_path.iterdir() if p != path]
     assert leftovers == []
+
+
+# --- publish field (safety-model correction, 2026-08-18: TikTok has no draft-save action,
+# so auto_upload and publish must be tracked as separate, independent choices) ------------
+
+def test_publish_defaults_to_false():
+    entry = streamers.StreamerEntry(name="x", url="https://twitch.tv/x")
+    assert entry.publish is False
+
+
+def test_add_streamer_persists_publish_flag(tmp_path):
+    path = tmp_path / "streamers.json"
+    streamers.add_streamer("elias", "https://twitch.tv/elias", auto_upload=True, publish=True, path=path)
+    entries = streamers.load_streamers(path)
+    assert entries[0]["auto_upload"] is True
+    assert entries[0]["publish"] is True
+
+
+def test_add_streamer_publish_defaults_false_even_with_auto_upload(tmp_path):
+    path = tmp_path / "streamers.json"
+    streamers.add_streamer("elias", "https://twitch.tv/elias", auto_upload=True, path=path)
+    entries = streamers.load_streamers(path)
+    assert entries[0]["auto_upload"] is True
+    assert entries[0]["publish"] is False

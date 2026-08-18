@@ -3,6 +3,35 @@ import streamers as streamers_module
 import orchestrator
 
 
+# --- build_auto_pilot_cmd's publish threading (safety-model correction, 2026-08-18: TikTok
+# has no draft-save action, so --publish must only ever be passed through when the
+# streamer's own config explicitly opts into it, not whenever auto_upload is on) ----------
+
+def test_cmd_never_includes_publish_when_auto_upload_is_off():
+    cmd = orchestrator.build_auto_pilot_cmd({"url": "https://twitch.tv/x", "auto_upload": False, "publish": True})
+    assert "--auto-upload" not in cmd
+    assert "--publish" not in cmd
+
+
+def test_cmd_omits_publish_when_auto_upload_on_but_publish_off():
+    cmd = orchestrator.build_auto_pilot_cmd({"url": "https://twitch.tv/x", "auto_upload": True, "publish": False})
+    assert "--auto-upload" in cmd
+    assert "--publish" not in cmd
+
+
+def test_cmd_includes_publish_only_when_both_flags_set():
+    cmd = orchestrator.build_auto_pilot_cmd({"url": "https://twitch.tv/x", "auto_upload": True, "publish": True})
+    assert "--auto-upload" in cmd
+    assert "--publish" in cmd
+
+
+def test_cmd_omits_publish_when_missing_from_entry_entirely():
+    # Backward compatibility: an older streamers.json written before the `publish` field
+    # existed must not silently start publishing live.
+    cmd = orchestrator.build_auto_pilot_cmd({"url": "https://twitch.tv/x", "auto_upload": True})
+    assert "--publish" not in cmd
+
+
 def test_run_orchestrator_default_streamers_path_respects_monkeypatch(tmp_path, monkeypatch):
     # run_orchestrator(streamers_path=None, ...) must resolve to the monkeypatched
     # streamers.STREAMERS_PATH, not a value bound at function-definition time — proven here

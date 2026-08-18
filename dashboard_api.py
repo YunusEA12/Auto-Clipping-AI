@@ -74,8 +74,10 @@ def load_streamers() -> List[dict]:
     return streamers_module.load_streamers()
 
 
-def add_streamer(name: str, url: str, profile: str = "", auto_upload: bool = False) -> None:
-    streamers_module.add_streamer(name, url, profile=profile, auto_upload=auto_upload)
+def add_streamer(
+    name: str, url: str, profile: str = "", auto_upload: bool = False, publish: bool = False
+) -> None:
+    streamers_module.add_streamer(name, url, profile=profile, auto_upload=auto_upload, publish=publish)
 
 
 def remove_streamer(name: str) -> bool:

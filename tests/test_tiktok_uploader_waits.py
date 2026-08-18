@@ -205,3 +205,61 @@ def test_dismiss_overlays_handles_only_tooltip_present():
     tiktok_uploader._dismiss_blocking_overlays(page)
     assert page.decline_button.clicked is False
     assert page.got_it_button.clicked is True
+
+
+# --- publish=False is now a hard no-op (safety-model correction, 2026-08-18: an abandoned
+# upload is NOT saved as a draft by TikTok — confirmed by the account owner directly checking
+# TikTok Studio and the mobile app, disproving the earlier assumption this code shipped
+# with) — upload_video()/try_upload_clip() must never open a browser without publish=True.
+
+def test_upload_video_without_publish_never_touches_playwright(tmp_path, monkeypatch):
+    launch_calls = []
+
+    class ExplodingPlaywright:
+        def __enter__(self):
+            launch_calls.append(1)
+            raise AssertionError("sync_playwright() must never be entered when publish=False")
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(tiktok_uploader, "sync_playwright", lambda: ExplodingPlaywright())
+
+    outcome = tiktok_uploader.upload_video(tmp_path / "does_not_exist.mp4", "desc", publish=False)
+
+    assert outcome == tiktok_uploader.UploadOutcome(success=False, confirmed=False)
+    assert launch_calls == []
+
+
+def test_upload_video_without_publish_does_not_require_the_file_to_exist(tmp_path, monkeypatch):
+    # The no-op check must come before the file-existence check — publish=False means "do
+    # nothing" regardless of what else might also be wrong.
+    monkeypatch.setattr(
+        tiktok_uploader, "sync_playwright", lambda: (_ for _ in ()).throw(AssertionError("must not be called"))
+    )
+    outcome = tiktok_uploader.upload_video(tmp_path / "nope.mp4", "desc", publish=False)
+    assert outcome.success is False
+
+
+def test_try_upload_clip_without_publish_is_also_a_no_op(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        tiktok_uploader, "sync_playwright", lambda: (_ for _ in ()).throw(AssertionError("must not be called"))
+    )
+    outcome = tiktok_uploader.try_upload_clip(tmp_path / "nope.mp4", "desc")
+    assert outcome == tiktok_uploader.UploadOutcome(success=False, confirmed=False)
+
+
+def test_cli_without_publish_exits_zero_and_does_not_upload(monkeypatch, tmp_path, capsys):
+    import sys
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake video content")
+    monkeypatch.setattr(sys, "argv", ["tiktok_uploader.py", str(video), "--description", "test"])
+    monkeypatch.setattr(
+        tiktok_uploader, "upload_video", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not upload"))
+    )
+
+    with __import__("pytest").raises(SystemExit) as exc_info:
+        tiktok_uploader.main()
+
+    assert exc_info.value.code == 0
+    assert "Nothing to do without --publish" in capsys.readouterr().out

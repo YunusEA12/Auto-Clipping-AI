@@ -153,12 +153,18 @@ def render_hot_clips(
     hot_clips: List[dict],
     transcript: dict,
     auto_upload: bool = False,
+    publish: bool = False,
 ) -> List[Path]:
     """Bridge into the existing rendering pipeline (vision.py facecam detection + process.py
     FFmpeg rendering) for exactly the flagged hot clips, cut straight from this chunk's own
-    recorded video. If `auto_upload`, each rendered clip is also pushed to TikTok. Either
-    way, a Discord notification is sent at the end of the chain for every rendered clip —
-    whether the upload succeeded, failed, or wasn't attempted at all."""
+    recorded video. If `auto_upload` AND `publish`, each rendered clip is also pushed live to
+    TikTok — TikTok's web upload flow has no draft-save action anymore (confirmed
+    2026-08-18: an abandoned upload is discarded, not saved), so `auto_upload` without
+    `publish` renders clips but never touches the browser; tiktok_uploader.try_upload_clip()
+    would just no-op regardless, so this checks both explicitly rather than relying on that
+    to be silently correct. Either way, a Discord notification is sent at the end of the
+    chain for every rendered clip — whether the upload succeeded, failed, or wasn't
+    attempted at all."""
     # Must match the *_clips.json path process_module.process() derives internally from
     # video_chunk_path's own stem, since that's the file it will read the clips back from.
     clips_path = TEMP_DIR / f"{video_chunk_path.stem}_clips.json"
@@ -187,11 +193,16 @@ def render_hot_clips(
         upload_status = "rendered"
         hashtags = clip.get("hashtags") or tiktok_uploader.DEFAULT_HASHTAGS
 
-        if auto_upload:
+        if auto_upload and publish:
             outcome = tiktok_uploader.try_upload_clip(
-                output_path, clip.get("description", clip["title"]), hashtags
+                output_path, clip.get("description", clip["title"]), hashtags, publish=True
             )
             upload_status = "uploaded" if outcome.success else "failed"
+        elif auto_upload and not publish:
+            logger.info(
+                "auto_upload ist an, aber publish nicht — '%s' bleibt lokal (kein "
+                "Entwurfs-Modus mehr auf TikTok verfügbar)", output_path.name,
+            )
 
         notify.send_notification(
             title=clip["title"],
@@ -211,6 +222,7 @@ def process_chunk(
     profile: Optional[dict] = None,
     auto_render: bool = False,
     auto_upload: bool = False,
+    publish: bool = False,
 ) -> List[dict]:
     """Extract audio, transcribe, and analyze one chunk; return the clips that clear the
     energy threshold. Optionally auto-renders them straight from the chunk's own video.
@@ -259,7 +271,7 @@ def process_chunk(
 
         if auto_render:
             transcript = analyze.load_transcript(transcription_path)
-            render_hot_clips(chunk_path, hot_clips, transcript, auto_upload)
+            render_hot_clips(chunk_path, hot_clips, transcript, auto_upload, publish)
             _cleanup(chunk_path)
         else:
             logger.info("Keeping raw chunk %s for manual rendering (auto-render disabled)", chunk_path)
@@ -291,16 +303,23 @@ def watch_stream(
     auto_render: bool = False,
     max_workers: int = DEFAULT_MAX_WORKERS,
     auto_upload: bool = False,
+    publish: bool = False,
 ) -> None:
     """Record chunks continuously; each finished chunk is handed to a background worker
     for transcription/analysis (and optional rendering/upload) while the NEXT chunk starts
     recording immediately — recording is never blocked waiting on processing."""
     logger.info(
         "Starting stream watcher for %s (chunk_duration=%ds, energy_threshold=%d, "
-        "profile=%s, auto_render=%s, auto_upload=%s, max_workers=%d)",
+        "profile=%s, auto_render=%s, auto_upload=%s, publish=%s, max_workers=%d)",
         url, chunk_duration, energy_threshold,
-        profile.get("name") if profile else None, auto_render, auto_upload, max_workers,
+        profile.get("name") if profile else None, auto_render, auto_upload, publish, max_workers,
     )
+    if auto_upload and not publish:
+        logger.warning(
+            "auto_upload ist an, publish nicht — TikTok hat keinen Entwurfs-Modus mehr, "
+            "hochgeladene Uploads werden also nirgendwo gespeichert. Gerenderte Clips "
+            "bleiben lokal statt hochgeladen zu werden."
+        )
 
     chunk_count = 0
     futures: List[concurrent.futures.Future] = []
@@ -316,7 +335,7 @@ def watch_stream(
 
                 futures.append(
                     executor.submit(
-                        process_chunk, chunk_path, energy_threshold, profile, auto_render, auto_upload
+                        process_chunk, chunk_path, energy_threshold, profile, auto_render, auto_upload, publish
                     )
                 )
                 futures = _drain_completed(futures)
@@ -350,7 +369,13 @@ def main():
     parser.add_argument(
         "--auto-upload", action="store_true",
         help="After auto-rendering, also upload each clip to TikTok via browser automation "
-        "(requires --auto-render, and exported session cookies in cookies.json)",
+        "(requires --auto-render and --publish — TikTok has no draft-save action anymore, "
+        "so --auto-upload alone does nothing; requires exported session cookies in cookies.json)",
+    )
+    parser.add_argument(
+        "--publish", action="store_true",
+        help="With --auto-upload: actually post each clip live. Required for --auto-upload "
+        "to do anything at all — there is no safer partial-upload mode anymore",
     )
     parser.add_argument(
         "--max-workers", type=int, default=DEFAULT_MAX_WORKERS,
@@ -360,6 +385,13 @@ def main():
 
     if args.auto_upload and not args.auto_render:
         parser.error("--auto-upload requires --auto-render (there's nothing rendered to upload otherwise)")
+    if args.publish and not args.auto_upload:
+        parser.error("--publish requires --auto-upload")
+    if args.auto_upload and not args.publish:
+        logger.warning(
+            "--auto-upload was given without --publish — rendered clips will stay local, "
+            "nothing will be uploaded (TikTok has no draft-save action anymore)."
+        )
 
     profile_dict = None
     if args.profile:
@@ -375,7 +407,7 @@ def main():
 
     watch_stream(
         url, args.chunk_duration, args.max_chunks, energy_threshold,
-        profile_dict, args.auto_render, args.max_workers, args.auto_upload,
+        profile_dict, args.auto_render, args.max_workers, args.auto_upload, args.publish,
     )
 
 

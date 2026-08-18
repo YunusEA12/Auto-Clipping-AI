@@ -114,12 +114,25 @@ python tiktok_uploader.py output/clip_1_beispiel.mp4 --description "Test" --hash
 
 `--headed` zeigt den Browser sichtbar an, damit du den Ablauf einmal live beobachten kannst,
 bevor du dich auf den unbeaufsichtigten (`--headed`-losen) Modus in `auto_pilot.py` o.ä.
-verlässt. Ohne `--publish` (sicherer Standard) klickt der Bot **nichts** — TikToks aktueller
-Upload-Flow hat keinen eigenen "Als Entwurf speichern"-Button mehr, nur "Veröffentlichen"
-(live) und "Verwerfen" (löscht den Upload). Stattdessen wird die Caption ausgefüllt, dann
-schließt der Browser, ohne zu klicken — TikTok behält einen so unangetasteten Upload
-automatisch als privaten Entwurf (verifiziert am 2026-08-18). Erst mit `--publish` klickt der
-Bot aktiv auf "Veröffentlichen" und der Clip geht sofort live.
+verlässt.
+
+**Wichtig — Sicherheitsmodell (korrigiert am 2026-08-18):** TikToks aktueller Upload-Flow hat
+keinen eigenen "Als Entwurf speichern"-Button mehr, nur "Veröffentlichen" (live) und
+"Verwerfen" (löscht den Upload). Eine frühere Version dieses Projekts nahm fälschlicherweise
+an, dass ein unangetasteter, nicht veröffentlichter Upload automatisch als privater Entwurf
+erhalten bleibt. Das stimmt **nicht** — direkt widerlegt, indem der Account-Besitzer nach
+einem echten Test in TikTok Studio und der Handy-App nachgeschaut hat: Der Upload war
+nirgendwo zu finden. TikTok verwirft einen nicht veröffentlichten, nicht angeklickten Upload
+einfach, statt ihn zu speichern.
+
+Es gibt also keinen sicheren "hochladen, aber nicht veröffentlichen"-Zustand mehr. Ohne
+`--publish` rührt der Bot den Browser **überhaupt nicht an** — kein Upload-Versuch, keine
+Caption, nichts. Die Datei bleibt exakt dort, wo sie ist. Nur mit `--publish` passiert
+tatsächlich etwas: Der Bot öffnet den Browser, lädt hoch, füllt die Caption aus und klickt
+aktiv auf "Veröffentlichen" — der Clip geht dann sofort live. Das gilt genauso für
+`auto_pilot.py --auto-upload` (braucht zusätzlich `--publish`, sonst wird Phase 5 komplett
+übersprungen), `stream_watcher.py --auto-upload` und den "🔴 Sofort live veröffentlichen"-
+Schalter in `app.py`.
 
 ## Wenn der Login fehlschlägt
 

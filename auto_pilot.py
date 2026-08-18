@@ -160,11 +160,24 @@ def purge_low_scoring_clips(
     return kept, deleted, survivors
 
 
+def should_deploy(auto_upload: bool, publish: bool, survivors: list) -> bool:
+    """Whether Phase 5 (Deployment) should actually run this cycle. Both auto_upload AND
+    publish are required, not just auto_upload — TikTok has no draft-save action anymore
+    (confirmed 2026-08-18: an abandoned upload is discarded, not saved), so auto_upload
+    without publish has nothing safe to do and must be a no-op, not a partial upload."""
+    return bool(auto_upload and publish and survivors)
+
+
 def run_deployment_phase(survivors: List[Tuple[dict, Path, Optional[int]]], publish: bool) -> Tuple[int, int]:
     """Phase 5 (Deployment): upload every clip that survived Phase 3's purge to TikTok via
     tiktok_uploader.py (cookie-authenticated Playwright bot), then move successfully
     uploaded files out of output/ into uploaded_clips/ to keep it clean. A failed upload
     just leaves that clip in output/ for a future opportunity — it never stops the loop.
+
+    Only ever called with publish=True (see run_cycle()) — TikTok has no draft-save action
+    anymore (confirmed 2026-08-18: an abandoned upload is discarded, not saved), so there is
+    no safe reason to call this with publish=False; tiktok_uploader.try_upload_clip() would
+    just no-op every clip and report every single one as "failed" for no real reason.
 
     Alongside each moved .mp4, writes a metadata sidecar .json (title, description,
     hashtags, the exact caption text posted, viral_score/energy_rating/reward_score, when
@@ -292,8 +305,17 @@ def run_cycle(
     )
 
     # Phase 5 (Deployment) — every clip that survived the purge gets uploaded to TikTok.
+    # Requires publish too, not just auto_upload: TikTok has no draft-save action anymore
+    # (confirmed 2026-08-18 — an abandoned upload is discarded, not saved), so there is no
+    # safe partial deployment to perform without an explicit intent to actually go live.
     uploaded = 0
-    if auto_upload and survivors:
+    if auto_upload and not publish and survivors:
+        logger.info(
+            "⏭️ Deployment übersprungen: --auto-upload ist an, aber --publish nicht — TikTok "
+            "hat keinen Entwurfs-Modus mehr, es gibt also nichts Sicheres zu tun. %d Clip(s) "
+            "bleiben in output/ zur manuellen Durchsicht.", len(survivors),
+        )
+    elif should_deploy(auto_upload, publish, survivors):
         update_agent_state(current_action=f"📤 Upload läuft ({len(survivors)} Clip(s))", **common_state)
         uploaded, upload_failed = run_deployment_phase(survivors, publish)
         logger.info("📤 Deployment: %d hochgeladen, %d fehlgeschlagen", uploaded, upload_failed)
@@ -348,17 +370,25 @@ def main():
     parser.add_argument("--max-cycles", type=int, default=None, help="Stop after N cycles (omit to run forever)")
     parser.add_argument(
         "--auto-upload", action="store_true",
-        help="Enable Phase 5 (Deployment): upload every clip that survives the purge to "
-        "TikTok via tiktok_uploader.py (requires cookies.json — see README_UPLOAD.md)",
+        help="Enable Phase 5 (Deployment). Requires --publish too — TikTok has no draft-save "
+        "action anymore, so --auto-upload alone does nothing (see README_UPLOAD.md)",
     )
     parser.add_argument(
         "--publish", action="store_true",
-        help="With --auto-upload: post live instead of saving as a draft (default: draft)",
+        help="With --auto-upload: actually post survivors live. Required for Phase 5 to do "
+        "anything at all — there is no safer partial-upload mode anymore",
     )
     args = parser.parse_args()
 
     if args.publish and not args.auto_upload:
         parser.error("--publish requires --auto-upload")
+    if args.auto_upload and not args.publish:
+        logger.warning(
+            "--auto-upload was given without --publish — Phase 5 (Deployment) will be "
+            "skipped every cycle. TikTok has no draft-save action anymore (an abandoned "
+            "upload is discarded, not saved), so there is nothing safe for --auto-upload to "
+            "do without --publish. Survivors will stay in output/ for manual review."
+        )
 
     profile_dict = None
     if args.profile:

@@ -21,16 +21,26 @@ the selectors below are best-effort — verified once against the live TikTok St
 2026-08-18 via verify_tiktok_selectors.py (see C-01 in the audit), not guessed. Spot-check
 with --headed (or re-run verify_tiktok_selectors.py) after any TikTok UI change.
 
-Note on "draft" mode (publish=False, the default): the current TikTok Studio upload flow has
-no distinct "Save as draft" button — only "Veröffentlichen" (post_video_button, publishes
-live) and "Verwerfen" (discard_post_button, deletes the upload entirely). Verified directly:
-leaving an upload without clicking either and letting the browser session close preserves it
-as a private draft in TikTok Studio's content list. So publish=False now means "fill the
-caption, then stop and close the browser" — never publishing, never discarding.
+SAFETY MODEL (corrected 2026-08-18, superseding an earlier, wrong assumption): the current
+TikTok Studio upload flow has no distinct "Save as draft" button — only "Veröffentlichen"
+(post_video_button, publishes live) and "Verwerfen" (discard_post_button, deletes the upload
+entirely). An earlier version of this module assumed that leaving an upload unclicked and
+letting the browser session close would preserve it as a private draft. That assumption was
+never independently verified and was WRONG — directly disproven by the account owner
+checking TikTok Studio and the mobile app after a real test: the abandoned upload was not
+there. TikTok discards an unpublished, unclicked upload; it does not save it anywhere.
+
+There is therefore no safe "upload but don't publish" outcome available through this
+automation path. publish=False is not a safer mode of uploading — it is a refusal to touch
+the browser at all: upload_video()/try_upload_clip() with publish=False never open a page,
+never spend an upload attempt, and the clip stays exactly where it is on disk. A clip is
+either genuinely, verifiably published live (publish=True), or TikTok is never contacted.
+Callers that want a human review step before publishing must keep the rendered file local
+and let a person decide — this module no longer offers any in-between state.
 
 Usage:
-    python tiktok_uploader.py clip.mp4 --description "..." --hashtags gaming viral fy
-    python tiktok_uploader.py clip.mp4 --description "..." --publish   # posts live instead of leaving it a draft
+    python tiktok_uploader.py clip.mp4 --description "..." --publish   # the only way this actually posts anything
+    python tiktok_uploader.py clip.mp4 --description "..."             # no-op by design — see SAFETY MODEL above
 """
 
 import argparse
@@ -282,16 +292,26 @@ def upload_video(
     """Upload one clip through the TikTok creator upload page, authenticating via cookies
     from cookies.json instead of an interactive login.
 
-    `publish=False` (the default) fills in the caption and then stops — never clicking Post
-    (post_video_button) or Discard (discard_post_button), since the current TikTok upload
-    flow has no separate "save as draft" action. TikTok preserves an untouched, unpublished
-    upload as a private draft once the browser session closes (verified 2026-08-18). A
-    review step stays in the loop unless the caller explicitly opts into `--publish`. Never
-    raises; returns UploadOutcome(success, confirmed) — `success=False` on any failure, so
-    one failed browser upload never crashes an unattended pipeline; `confirmed` distinguishes
-    an actually-observed success signal from "we hoped" (see M-03 in the audit).
+    `publish=False` (the default) is a deliberate no-op: it never opens a browser or touches
+    TikTok at all. See the module docstring's SAFETY MODEL section — there is no "upload but
+    don't publish" outcome available anymore (TikTok discards an abandoned upload; it does
+    not save it as a draft, confirmed directly by the account owner after a real test on
+    2026-08-18). Only `publish=True` actually does anything. Never raises; returns
+    UploadOutcome(success, confirmed) — `success=False` on any failure (or on the
+    publish=False no-op) so one failed browser upload never crashes an unattended pipeline;
+    `confirmed` distinguishes an actually-observed success signal from "we hoped" (see M-03
+    in the audit).
     """
     video_path = Path(video_path)
+
+    if not publish:
+        logger.info(
+            "publish=False: not touching the browser or TikTok at all — there is no safe "
+            "'upload but don't publish' outcome anymore (see SAFETY MODEL in this module's "
+            "docstring). '%s' stays exactly where it is on disk.", video_path,
+        )
+        return UploadOutcome(success=False, confirmed=False)
+
     if not video_path.exists():
         logger.error("Video not found: %s", video_path)
         return UploadOutcome(success=False, confirmed=False)
@@ -333,7 +353,7 @@ def upload_video(
             file_input.set_input_files(str(video_path.resolve()))
 
             logger.info("Waiting for upload to reach 100%%...")
-            upload_confirmed = _wait_for_upload_complete(page)
+            _wait_for_upload_complete(page)
 
             # The "New editing features added" onboarding tooltip was observed appearing
             # only after the upload finished (2026-08-18) — dismiss again here, right before
@@ -348,18 +368,8 @@ def upload_video(
             caption_box.type(caption, delay=15)
             _wait_for_caption_filled(page, caption_box, caption)
 
-            if not publish:
-                # No separate "save as draft" action exists in the current flow — see the
-                # module docstring. Stopping here (never clicking post_video_button or
-                # discard_post_button) and letting `finally:` close the browser is what
-                # leaves this as a private draft.
-                logger.info(
-                    "Not publishing (publish=False) — leaving '%s' unpublished; TikTok "
-                    "preserves it as a draft once this browser session closes.",
-                    video_path.name,
-                )
-                return UploadOutcome(success=True, confirmed=upload_confirmed)
-
+            # publish=False already returned before ever opening the browser (see above) —
+            # everything past this point only ever runs with publish=True.
             logger.info("Clicking Veröffentlichen (Post, publishing live)...")
             button = page.locator("[data-e2e='post_video_button']")
             button.wait_for(state="visible", timeout=PROCESSING_TIMEOUT_MS)
@@ -390,7 +400,10 @@ def try_upload_clip(
 ) -> UploadOutcome:
     """Non-raising wrapper for automated pipelines (app.py, stream_watcher.py, auto_pilot.py)
     — always headless, catches every failure mode and returns UploadOutcome(success=False, ...)
-    instead of raising, so one failed upload never crashes an unattended loop."""
+    instead of raising, so one failed upload never crashes an unattended loop. Like
+    upload_video(), publish=False is a no-op that never touches the browser — see SAFETY
+    MODEL in this module's docstring. Callers must not treat that False as "it failed";
+    check the log for why (either a real failure, or the deliberate no-op)."""
     return upload_video(video_path, description, hashtags, publish=publish, headless=True)
 
 
@@ -399,9 +412,21 @@ def main():
     parser.add_argument("video", type=Path, help="Path to the rendered .mp4 clip")
     parser.add_argument("--description", default="", help="Caption/hook text")
     parser.add_argument("--hashtags", nargs="*", default=None, help="Hashtags, with or without leading #")
-    parser.add_argument("--publish", action="store_true", help="Post immediately instead of leaving it unpublished as a draft")
+    parser.add_argument(
+        "--publish", action="store_true",
+        help="Post live. Required — without it this command does nothing at all (no draft "
+        "mode exists anymore; see SAFETY MODEL in this module's docstring)",
+    )
     parser.add_argument("--headed", action="store_true", help="Show the browser window instead of running headless")
     args = parser.parse_args()
+
+    if not args.publish:
+        print(
+            "Nothing to do without --publish: TikTok has no draft-save action anymore, so "
+            f"there is no safe partial upload to perform. {args.video} was not touched. "
+            "Re-run with --publish to actually post it live."
+        )
+        raise SystemExit(0)
 
     outcome = upload_video(
         args.video, args.description, args.hashtags, publish=args.publish, headless=not args.headed

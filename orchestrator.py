@@ -98,6 +98,11 @@ def build_auto_pilot_cmd(entry: dict) -> List[str]:
         cmd += ["--profile", entry["profile"]]
     if entry.get("auto_upload"):
         cmd.append("--auto-upload")
+        # auto_pilot.py treats --auto-upload without --publish as "Phase 5 skipped every
+        # cycle" (TikTok has no draft-save action anymore) — only pass --publish through
+        # when the streamer's own config explicitly opts into actually going live.
+        if entry.get("publish"):
+            cmd.append("--publish")
     return cmd
 
 
@@ -165,6 +170,7 @@ def run_orchestrator(
             "url": entry["url"],
             "profile": entry.get("profile", ""),
             "auto_upload": bool(entry.get("auto_upload", False)),
+            "publish": bool(entry.get("publish", False)),
             "crash_streak": streak_info.get("streak", 0),
             "backoff_until": streak_info["retry_after"].isoformat() if streak_info.get("retry_after") else None,
         }

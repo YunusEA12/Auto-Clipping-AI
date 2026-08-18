@@ -292,7 +292,12 @@ with tab_fleet:
                     details = []
                     if entry.get("profile"):
                         details.append(f"Profil: {entry['profile']}")
-                    details.append("Auto-Upload: " + ("✅" if entry.get("auto_upload") else "❌"))
+                    if entry.get("auto_upload") and entry.get("publish"):
+                        details.append("🔴 Auto-Upload: live veröffentlichen")
+                    elif entry.get("auto_upload"):
+                        details.append("⚪ Auto-Upload an, aber Veröffentlichen aus (macht nichts — siehe Hinweis unten)")
+                    else:
+                        details.append("Auto-Upload: ❌")
                     st.caption(" · ".join(details))
                 with col_status:
                     if is_recording:
@@ -317,6 +322,19 @@ with tab_fleet:
             fleet_profile_options = [""] + dashboard_api.list_profiles()
             new_streamer_profile = st.selectbox("Profil (optional)", fleet_profile_options)
             new_streamer_auto_upload = st.checkbox("🚀 Auto-Upload zu TikTok aktivieren")
+            new_streamer_publish = st.checkbox(
+                "🔴 Sofort live veröffentlichen (nicht nur Entwurf)",
+                help=(
+                    "TikTok hat keinen Entwurfs-Modus mehr — ein Upload, der nicht "
+                    "veröffentlicht wird, wird von TikTok verworfen, nicht gespeichert. "
+                    "Ohne diesen Haken macht Auto-Upload daher nichts."
+                ),
+            )
+            if new_streamer_auto_upload and not new_streamer_publish:
+                st.caption(
+                    "⚠️ Auto-Upload ohne 'Sofort live veröffentlichen' tut nichts — "
+                    "TikTok speichert unveröffentlichte Uploads nicht als Entwurf."
+                )
 
         add_streamer_submitted = st.form_submit_button("Hinzufügen", type="primary")
         if add_streamer_submitted:
@@ -325,7 +343,8 @@ with tab_fleet:
             else:
                 try:
                     dashboard_api.add_streamer(
-                        new_streamer_name, new_streamer_url, new_streamer_profile, new_streamer_auto_upload
+                        new_streamer_name, new_streamer_url, new_streamer_profile,
+                        new_streamer_auto_upload, new_streamer_publish,
                     )
                     st.success(f"'{new_streamer_name}' hinzugefügt.")
                     st.rerun()
@@ -545,7 +564,16 @@ with tab_manual:
 
     with st.expander("⚙️ Erweiterte Optionen"):
         do_upload = st.checkbox("Automatischer Upload zu YouTube", value=False)
-        do_tiktok_upload = st.checkbox("🚀 Automatisch auf TikTok hochladen", value=False)
+        do_tiktok_upload = st.checkbox(
+            "🔴 Sofort live auf TikTok veröffentlichen",
+            value=False,
+            help=(
+                "TikTok hat keinen Entwurfs-Modus mehr — ein Upload, der nicht "
+                "veröffentlicht wird, wird von TikTok verworfen, nicht gespeichert. Dieser "
+                "Haken veröffentlicht jeden verarbeiteten Clip sofort live, ohne "
+                "Zwischenschritt."
+            ),
+        )
         do_notify = st.checkbox("🔔 Discord-Benachrichtigungen senden", value=False)
 
     st.divider()
@@ -579,7 +607,7 @@ with tab_manual:
         if do_tiktok_upload and not dashboard_api.tiktok_cookies_status()[0]:
             st.error(
                 "❌ Keine gültigen TikTok-Cookies gefunden. Führe `python get_cookies.py` aus, "
-                "bevor du den Auto-Upload aktivierst."
+                "bevor du live veröffentlichst."
             )
             st.stop()
 
@@ -645,7 +673,7 @@ with tab_manual:
 
                         if do_tiktok_upload:
                             outcome = dashboard_api.upload_clip_to_tiktok(
-                                output_path, clip.get("description", clip["title"]), hashtags
+                                output_path, clip.get("description", clip["title"]), hashtags, publish=True
                             )
                             upload_status = "uploaded" if outcome.success else "failed"
 
