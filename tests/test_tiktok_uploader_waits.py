@@ -263,3 +263,39 @@ def test_cli_without_publish_exits_zero_and_does_not_upload(monkeypatch, tmp_pat
 
     assert exc_info.value.code == 0
     assert "Nothing to do without --publish" in capsys.readouterr().out
+
+
+# --- post-click diagnostic pause (headed-only, never leaks into unattended runs) ----------
+
+class FakeSnapshotPage:
+    def __init__(self, fail=False):
+        self._fail = fail
+
+    def screenshot(self, path=None, full_page=None):
+        if self._fail:
+            raise RuntimeError("boom")
+
+    def content(self):
+        return "<html></html>"
+
+
+def test_save_post_click_snapshot_never_raises_on_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(tiktok_uploader, "POST_CLICK_SNAPSHOT_DIR", tmp_path / "selector_audit")
+    tiktok_uploader._save_post_click_snapshot(FakeSnapshotPage(fail=True), "test")  # must not raise
+
+
+def test_save_post_click_snapshot_writes_files(tmp_path, monkeypatch):
+    snapshot_dir = tmp_path / "selector_audit"
+    monkeypatch.setattr(tiktok_uploader, "POST_CLICK_SNAPSHOT_DIR", snapshot_dir)
+    tiktok_uploader._save_post_click_snapshot(FakeSnapshotPage(), "test")
+    assert list(snapshot_dir.glob("test_*.html"))
+
+
+def test_try_upload_clip_always_forces_headless_regardless_of_diagnostic_feature():
+    # The safety property the new headed-only diagnostic pause depends on: every automated
+    # caller (auto_pilot.py, app.py, stream_watcher.py) goes through try_upload_clip(), which
+    # must always force headless=True — otherwise the 15s post-click pause could silently
+    # leak into an unattended 24/7 run.
+    import inspect
+    source = inspect.getsource(tiktok_uploader.try_upload_clip)
+    assert "headless=True" in source

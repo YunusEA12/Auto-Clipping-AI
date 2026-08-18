@@ -46,6 +46,7 @@ Usage:
 import argparse
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, NamedTuple, Optional, Tuple
 
@@ -71,6 +72,16 @@ CAPTION_FILL_POLL_MS = 250
 POST_CONFIRM_TIMEOUT_MS = 15000
 POST_CONFIRM_POLL_MS = 500
 DEFAULT_HASHTAGS = ["#fyp", "#viral", "#shorts", "#gaming"]
+
+# Diagnostic-only, gated on headless=False (see upload_video()): the URL-change/form-gone
+# signal _wait_for_post_confirmation() checks for is itself unverified against what TikTok
+# actually shows a human on screen right after the click — a toast, a captcha, an error
+# dialog, or nothing at all. This pauses long enough after the click for a human watching a
+# --headed run to actually see it, before any confirmation heuristic has a chance to move
+# past it. Never fires for headless=True — every automated caller (auto_pilot.py, app.py,
+# stream_watcher.py) always passes headless=True, so this can't leak into unattended runs.
+POST_CLICK_INSPECTION_DELAY_MS = 15000
+POST_CLICK_SNAPSHOT_DIR = Path("selector_audit")
 
 
 class UploadOutcome(NamedTuple):
@@ -226,6 +237,21 @@ def _dismiss_blocking_overlays(page) -> None:
         logger.info("No onboarding tooltip to dismiss")
 
 
+def _save_post_click_snapshot(page, label: str) -> None:
+    """Best-effort screenshot + HTML dump to selector_audit/ (already gitignored) — a
+    durable record of exactly what was on screen at a given moment, independent of whatever
+    a human watching a --headed run does or doesn't catch live. Never raises: a failed debug
+    snapshot must not take down the upload it's trying to help diagnose."""
+    try:
+        POST_CLICK_SNAPSHOT_DIR.mkdir(exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        page.screenshot(path=str(POST_CLICK_SNAPSHOT_DIR / f"{label}_{timestamp}.png"), full_page=True)
+        (POST_CLICK_SNAPSHOT_DIR / f"{label}_{timestamp}.html").write_text(page.content(), encoding="utf-8")
+        logger.info("Saved post-click snapshot: %s/%s_%s.(png|html)", POST_CLICK_SNAPSHOT_DIR, label, timestamp)
+    except Exception as e:
+        logger.warning("Could not save post-click snapshot: %s", e)
+
+
 def _wait_for_caption_filled(page, caption_box, expected_text: str) -> None:
     """Polls the caption box's own text content until it actually contains what was typed
     (or a bounded timeout elapses), instead of a flat sleep with no verification that the
@@ -374,6 +400,19 @@ def upload_video(
             button = page.locator("[data-e2e='post_video_button']")
             button.wait_for(state="visible", timeout=PROCESSING_TIMEOUT_MS)
             button.click()
+
+            if not headless:
+                # Diagnostic only (see POST_CLICK_INSPECTION_DELAY_MS above) — never reached
+                # with headless=True, which every automated caller always passes.
+                _save_post_click_snapshot(page, "post_click_immediate")
+                logger.info(
+                    "Headed mode: pausing %ds right after the click, before any confirmation "
+                    "check runs, so you can see exactly what TikTok does — a toast, a "
+                    "captcha, an error, or nothing at all.", POST_CLICK_INSPECTION_DELAY_MS // 1000,
+                )
+                page.wait_for_timeout(POST_CLICK_INSPECTION_DELAY_MS)
+                _save_post_click_snapshot(page, "post_click_after_wait")
+
             confirmed = _wait_for_post_confirmation(page, file_input)
 
             logger.info(
