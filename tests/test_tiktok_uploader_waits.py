@@ -337,3 +337,80 @@ def test_no_op_when_review_already_finished():
     page = FakeConfirmPage(dialog_present=False)
     assert tiktok_uploader._confirm_publish_despite_pending_review(page) is False
     assert page.confirm_button.clicked is False
+
+
+# --- _tokenize_hashtag (found via live diagnostic, 2026-08-18: typing hashtags as part of
+# a continuous string never registers them as real entities — a published test post's own
+# public page data showed "textExtra": [] despite the caption visibly containing hashtags.
+# Clicking TikTok's own autocomplete suggestion is what actually tokenizes the just-typed
+# text in place, and that click also auto-appends a trailing space) -----------------------
+
+class FakeHashtagCaptionBox:
+    """Mimics the subset of Playwright's Locator API _tokenize_hashtag() uses: reading the
+    box's current text (to decide whether a leading space is needed) and typing more into
+    it, mirroring the real contenteditable box's append-only behavior for plain `.type()`."""
+
+    def __init__(self, initial_text=""):
+        self.text = initial_text
+
+    def text_content(self, timeout=None):
+        return self.text
+
+    def type(self, text, delay=None):
+        self.text += text
+
+
+class FakeSuggestionLocator:
+    def __init__(self, present):
+        self._present = present
+        self.clicked = False
+
+    @property
+    def first(self):
+        return self
+
+    def click(self, timeout=None):
+        if not self._present:
+            raise PlaywrightTimeoutError("no suggestion appeared")
+        self.clicked = True
+
+
+class FakeHashtagPage:
+    def __init__(self, suggestion_present):
+        self.suggestion = FakeSuggestionLocator(suggestion_present)
+
+    def locator(self, selector):
+        assert selector == "[role='option'].hashtag-suggestion-item"
+        return self.suggestion
+
+
+def test_tokenize_hashtag_clicks_suggestion_and_adds_leading_space_when_missing():
+    page = FakeHashtagPage(suggestion_present=True)
+    caption_box = FakeHashtagCaptionBox("Cool clip")
+    assert tiktok_uploader._tokenize_hashtag(page, caption_box, "fyp") is True
+    assert page.suggestion.clicked is True
+    assert caption_box.text == "Cool clip #fyp"
+
+
+def test_tokenize_hashtag_skips_leading_space_when_already_present():
+    # Simulates the box right after a previous _tokenize_hashtag call, whose suggestion
+    # click already appended a trailing space — verified live, not assumed.
+    page = FakeHashtagPage(suggestion_present=True)
+    caption_box = FakeHashtagCaptionBox("Cool clip #fyp ")
+    tiktok_uploader._tokenize_hashtag(page, caption_box, "viral")
+    assert caption_box.text == "Cool clip #fyp #viral"
+
+
+def test_tokenize_hashtag_normalizes_missing_hash_prefix():
+    page = FakeHashtagPage(suggestion_present=True)
+    caption_box = FakeHashtagCaptionBox("")
+    tiktok_uploader._tokenize_hashtag(page, caption_box, "shorts")
+    assert caption_box.text == "#shorts"
+
+
+def test_tokenize_hashtag_falls_back_to_plain_text_when_no_suggestion_appears():
+    page = FakeHashtagPage(suggestion_present=False)
+    caption_box = FakeHashtagCaptionBox("Cool clip")
+    assert tiktok_uploader._tokenize_hashtag(page, caption_box, "#obscuretag") is False
+    assert page.suggestion.clicked is False
+    assert caption_box.text == "Cool clip #obscuretag"

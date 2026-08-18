@@ -71,6 +71,7 @@ CAPTION_FILL_TIMEOUT_MS = 3000
 CAPTION_FILL_POLL_MS = 250
 POST_CONFIRM_TIMEOUT_MS = 15000
 POST_CONFIRM_POLL_MS = 500
+HASHTAG_SUGGESTION_TIMEOUT_MS = 4000
 DEFAULT_HASHTAGS = ["#fyp", "#viral", "#shorts", "#gaming"]
 
 # Diagnostic-only, gated on headless=False (see upload_video()): the URL-change/form-gone
@@ -280,6 +281,33 @@ def _save_post_click_snapshot(page, label: str) -> None:
         logger.warning("Could not save post-click snapshot: %s", e)
 
 
+def _tokenize_hashtag(page, caption_box, tag: str) -> bool:
+    """Types one '#tag' and clicks TikTok's own autocomplete suggestion to register it as
+    a real hashtag entity, instead of leaving it as plain text. Verified live (2026-08-18)
+    that typing hashtags as part of a continuous string — even space-separated — never
+    triggers this: a real published test post's own public page data showed
+    "textExtra": [] despite the caption visibly containing '#fyp #viral #shorts #gaming'.
+    Also verified live that clicking the suggestion converts the just-typed text into the
+    entity in place (no duplication) and appends a trailing space, so the next call needs
+    no leading space of its own — handled here by checking the box's current text first.
+    Best-effort: if no suggestion appears (slow response, or an obscure tag with literally
+    no matches), the tag is left as typed plain text rather than blocking the upload."""
+    if not tag.startswith("#"):
+        tag = f"#{tag}"
+    current_text = caption_box.text_content() or ""
+    if current_text and not current_text.endswith(" "):
+        caption_box.type(" ", delay=15)
+    caption_box.type(tag, delay=60)
+    try:
+        page.locator("[role='option'].hashtag-suggestion-item").first.click(
+            timeout=HASHTAG_SUGGESTION_TIMEOUT_MS
+        )
+        return True
+    except PlaywrightTimeoutError:
+        logger.warning("No hashtag suggestion appeared for '%s' — left as plain text", tag)
+        return False
+
+
 def _wait_for_caption_filled(page, caption_box, expected_text: str) -> None:
     """Polls the caption box's own text content until it actually contains what was typed
     (or a bounded timeout elapses), instead of a flat sleep with no verification that the
@@ -378,7 +406,8 @@ def upload_video(
         )
         return UploadOutcome(success=False, confirmed=False)
 
-    caption = build_caption_text(description, hashtags or DEFAULT_HASHTAGS)
+    tag_list = list(hashtags or DEFAULT_HASHTAGS)
+    caption = build_caption_text(description, tag_list)
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=headless)
@@ -419,7 +448,11 @@ def upload_video(
             caption_box.click()
             page.keyboard.press("Control+A")
             page.keyboard.press("Delete")
-            caption_box.type(caption, delay=15)
+            caption_box.type(description.strip(), delay=15)
+
+            tokenized = sum(1 for tag in tag_list if _tokenize_hashtag(page, caption_box, tag))
+            logger.info("Tokenized %d/%d hashtag(s) as real TikTok tags", tokenized, len(tag_list))
+
             _wait_for_caption_filled(page, caption_box, caption)
 
             # publish=False already returned before ever opening the browser (see above) —
