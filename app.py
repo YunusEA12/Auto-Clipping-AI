@@ -119,21 +119,30 @@ def state_age_seconds(state: dict, field: str = "last_updated") -> "float | None
     return (datetime.now(timezone.utc) - dt).total_seconds()
 
 
-agent_state = read_json_file(AGENT_STATE_PATH)
+# One entry per running auto_pilot.py instance — a manual/standalone run (no
+# --streamer-name) writes the legacy shared agent_state.json; orchestrator.py running
+# multiple streamers concurrently writes one agent_state_<slug>.json each, so two streamers
+# live at once no longer clobber each other's dashboard state (see H-14 in the audit).
+agent_states = {
+    path.stem: state
+    for path in dashboard_api.list_agent_state_paths()
+    if (state := read_json_file(path))
+}
 orchestrator_state = read_json_file(ORCHESTRATOR_STATE_PATH)
 
 with st.sidebar:
     st.header("🤖 Agent Status")
-    if not agent_state:
+    if not agent_states:
         st.caption("Auto-Pilot läuft nicht (agent_state.json nicht gefunden).")
     else:
-        age = state_age_seconds(agent_state)
-        offline = age is not None and age > STALE_THRESHOLD_SECONDS
-        st.caption(f"Ziel: **{agent_state.get('target_streamer', '–')}**")
-        if offline:
-            st.warning(f"⚠️ Offline (seit {int(age)}s)")
-        else:
-            st.success(agent_state.get("current_action", "Aktiv"))
+        for state in agent_states.values():
+            age = state_age_seconds(state)
+            offline = age is not None and age > STALE_THRESHOLD_SECONDS
+            st.caption(f"Ziel: **{state.get('target_streamer', '–')}**")
+            if offline:
+                st.warning(f"⚠️ Offline (seit {int(age)}s)")
+            else:
+                st.success(state.get("current_action", "Aktiv"))
 
     st.header("🛰️ Fleet Status")
     if not orchestrator_state:
@@ -199,42 +208,52 @@ tab_radar, tab_fleet, tab_brain, tab_analytics, tab_archive, tab_manual = st.tab
 with tab_radar:
     st.subheader("📡 Live Radar & Status")
 
-    if not agent_state:
+    if not agent_states:
         st.info(
             "Der Auto-Pilot läuft aktuell nicht. Starte ihn in einem separaten Terminal, "
             "z. B.:\n\n`python auto_pilot.py --profile eliasn97 --live`"
         )
     else:
-        age = state_age_seconds(agent_state)
-        target_streamer = agent_state.get("target_streamer", "–")
-        current_action = agent_state.get("current_action", "Unbekannt")
-        current_cycle = agent_state.get("current_cycle", 0)
-        kept_total = agent_state.get("clips_kept_total", 0)
-        purged_total = agent_state.get("clips_purged_total", 0)
+        # One card per running auto_pilot.py instance — with orchestrator.py driving several
+        # streamers concurrently, "the agent" is no longer singular (see H-14 in the audit).
+        multiple = len(agent_states) > 1
+        for state_key, state in agent_states.items():
+            age = state_age_seconds(state)
+            target_streamer = state.get("target_streamer", "–")
+            current_action = state.get("current_action", "Unbekannt")
+            current_cycle = state.get("current_cycle", 0)
+            kept_total = state.get("clips_kept_total", 0)
+            purged_total = state.get("clips_purged_total", 0)
 
-        if age is not None and age > STALE_THRESHOLD_SECONDS:
-            st.warning(f"⚠️ Agent scheint offline zu sein — letztes Update vor {int(age)}s.")
-        else:
-            st.success(f"🟢 Agent aktiv — Ziel: **{target_streamer}**")
+            if multiple:
+                st.markdown(f"##### 🎯 {target_streamer}")
 
-        st.markdown(f"### {current_action}")
+            if age is not None and age > STALE_THRESHOLD_SECONDS:
+                st.warning(f"⚠️ Agent scheint offline zu sein — letztes Update vor {int(age)}s.")
+            else:
+                st.success(f"🟢 Agent aktiv — Ziel: **{target_streamer}**")
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Zyklus", current_cycle)
-        col2.metric("🏆 Clips behalten", kept_total)
-        col3.metric("🗑️ Clips gelöscht", purged_total)
-        total_scored = kept_total + purged_total
-        survival_rate = f"{(kept_total / total_scored * 100):.0f}%" if total_scored else "–"
-        col4.metric("Überlebensrate", survival_rate)
+            st.markdown(f"### {current_action}")
 
-        if agent_state.get("purge_threshold") is not None:
-            st.caption(
-                f"Purge-Schwellenwert: reward_score < {agent_state['purge_threshold']} · "
-                f"Modus: {'🔴 Live' if agent_state.get('live') else '🎞️ VOD'}"
-            )
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Zyklus", current_cycle)
+            col2.metric("🏆 Clips behalten", kept_total)
+            col3.metric("🗑️ Clips gelöscht", purged_total)
+            total_scored = kept_total + purged_total
+            survival_rate = f"{(kept_total / total_scored * 100):.0f}%" if total_scored else "–"
+            col4.metric("Überlebensrate", survival_rate)
 
-        with st.expander("Rohdaten (agent_state.json)"):
-            st.json(agent_state)
+            if state.get("purge_threshold") is not None:
+                st.caption(
+                    f"Purge-Schwellenwert: reward_score < {state['purge_threshold']} · "
+                    f"Modus: {'🔴 Live' if state.get('live') else '🎞️ VOD'}"
+                )
+
+            with st.expander(f"Rohdaten ({state_key}.json)"):
+                st.json(state)
+
+            if multiple:
+                st.divider()
 
     st.divider()
     st.markdown("#### 🔗 TikTok Upload Status")
@@ -468,11 +487,19 @@ with tab_analytics:
 with tab_archive:
     st.subheader("🎞️ Clip Archiv")
 
-    video_files = sorted(OUTPUT_DIR.glob("*.mp4")) if OUTPUT_DIR.exists() else []
+    # rglob, not glob: auto_pilot.py running under orchestrator.py now renders into a
+    # per-streamer subdirectory (output/<slug>/...) instead of flat output/ (see H-14 in the
+    # audit) — rglob picks up both that and the original flat layout Manual Mode still uses.
+    video_files = sorted(OUTPUT_DIR.rglob("*.mp4")) if OUTPUT_DIR.exists() else []
 
     if not video_files:
         st.info("Noch keine Clips vorhanden. Starte den Auto-Piloten oder den manuellen Modus, um Ergebnisse zu sehen.")
     else:
+        # Fallback only, for clips rendered before per-clip metadata sidecars existed (see
+        # below) — index-matched against whichever *_clips.json happens to be newest, which
+        # can attribute the wrong clip's metadata once cycles or streamers overlap on the
+        # same clip_<N>_ index (the actual H-14 bug). Every clip rendered since the sidecar
+        # fix carries its own metadata right next to it and never touches this path.
         clips_by_index = {}
         clips_json_path = None
         if "last_clips_path" in st.session_state:
@@ -489,9 +516,19 @@ with tab_archive:
             clips_by_index = {i: c for i, c in enumerate(clips_data.get("clips", []), start=1)}
 
         for position, video_path in enumerate(video_files):
-            match = re.match(r"clip_(\d+)_", video_path.name)
-            index = int(match.group(1)) if match else None
-            clip = clips_by_index.get(index)
+            clip = None
+            sidecar_path = video_path.with_suffix(".json")
+            if sidecar_path.exists():
+                try:
+                    with open(sidecar_path, "r", encoding="utf-8") as f:
+                        clip = json.load(f)
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning("Could not read clip metadata sidecar %s: %s", sidecar_path, e)
+
+            if clip is None:
+                match = re.match(r"clip_(\d+)_", video_path.name)
+                index = int(match.group(1)) if match else None
+                clip = clips_by_index.get(index)
 
             clip_title = clip["title"] if clip else video_path.name
 
@@ -516,11 +553,14 @@ with tab_archive:
 
                     feedback_text = st.text_input(
                         "Was war schlecht an diesem Clip?",
-                        key=f"feedback_input_{video_path.name}",
+                        # position included: two streamer subdirectories can legitimately
+                        # contain a same-named clip_<N>_<slug>.mp4 (see H-14 in the audit) —
+                        # video_path.name alone would collide across Streamlit widget keys.
+                        key=f"feedback_input_{position}_{video_path.name}",
                     )
                     col_save, col_download, col_delete = st.columns(3)
                     with col_save:
-                        if st.button("Feedback speichern", key=f"feedback_btn_{video_path.name}"):
+                        if st.button("Feedback speichern", key=f"feedback_btn_{position}_{video_path.name}"):
                             if feedback_text:
                                 dashboard_api.save_feedback(clip_title, feedback_text)
                                 st.success("Feedback gespeichert ✅")
@@ -532,11 +572,13 @@ with tab_archive:
                             data=video_path.read_bytes(),
                             file_name=os.path.basename(video_path),
                             mime="video/mp4",
-                            key=f"download_{video_path.name}",
+                            key=f"download_{position}_{video_path.name}",
                         )
                     with col_delete:
-                        if st.button("🗑️ Clip löschen", key=f"del_{video_path.name}"):
+                        if st.button("🗑️ Clip löschen", key=f"del_{position}_{video_path.name}"):
                             os.remove(video_path)
+                            if sidecar_path.exists():
+                                os.remove(sidecar_path)
                             logger.info("Deleted clip %s", video_path)
                             st.rerun()
 

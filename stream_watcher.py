@@ -68,19 +68,28 @@ def resolve_streamlink_path() -> str:
     )
 
 
-def record_stream_chunk(url: str, duration: int = DEFAULT_CHUNK_DURATION) -> Path:
+def record_stream_chunk(url: str, duration: int = DEFAULT_CHUNK_DURATION, streamer_slug: Optional[str] = None) -> Path:
     """Record `duration` seconds of the live stream (video+audio) via streamlink -> ffmpeg,
-    saved as temp/live_chunk_[TIMESTAMP].ts.
+    saved as temp/live_chunk_[TIMESTAMP].ts (or temp/live_chunk_[SLUG]_[TIMESTAMP].ts when
+    `streamer_slug` is given).
 
     .ts (MPEG transport stream) instead of .wav: rendering a found clip later needs the
     actual video, not just audio, so the full A/V stream is captured with a fast `-c copy`
     remux (no re-encoding) straight off the live pipe. .ts also tolerates being cut off
     mid-stream far better than most container formats. Audio for Whisper is extracted from
     this file afterwards via ingest.extract_audio() — no separate audio-only capture needed.
-    """
+
+    `streamer_slug`: without it, two streamers whose auto_pilot.py cycles happen to start a
+    recording within the same wall-clock second collide on an identical filename — one
+    ffmpeg process fails outright (file locked) or, worse, both interleave writes into a
+    single corrupted file that then gets transcribed as if it were one streamer's content
+    (found in review, 2026-08-18: H-14). auto_pilot.py passes its own --streamer-name here
+    (already slugified) whenever it's running under orchestrator.py; a manual/standalone run
+    has no streamer identity to disambiguate and keeps the original filename."""
     TEMP_DIR.mkdir(exist_ok=True)
     timestamp = int(time.time())
-    output_path = TEMP_DIR / f"live_chunk_{timestamp}.ts"
+    prefix = f"live_chunk_{streamer_slug}_" if streamer_slug else "live_chunk_"
+    output_path = TEMP_DIR / f"{prefix}{timestamp}.ts"
 
     streamlink_cmd = [resolve_streamlink_path(), url, "best", "--stdout", "--quiet"]
     ffmpeg_cmd = [

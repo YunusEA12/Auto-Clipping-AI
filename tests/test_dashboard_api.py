@@ -25,6 +25,27 @@ def test_layout_constants_match_process_module():
     assert dashboard_api.HIGHLIGHT_COLORS == process.HIGHLIGHT_COLORS
 
 
+# --- list_agent_state_paths (2026-08-18: H-14 — two streamers live at once used to both
+# write the single shared agent_state.json, corrupting each other's dashboard state; each
+# now writes its own agent_state_<slug>.json and app.py reads every one of them) -----------
+
+def test_list_agent_state_paths_finds_legacy_and_per_streamer_files(tmp_path):
+    (tmp_path / "agent_state.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "agent_state_eliasn97.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "agent_state_papaplatte.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "unrelated.json").write_text("{}", encoding="utf-8")
+
+    paths = dashboard_api.list_agent_state_paths(root=tmp_path)
+
+    assert {p.name for p in paths} == {
+        "agent_state.json", "agent_state_eliasn97.json", "agent_state_papaplatte.json",
+    }
+
+
+def test_list_agent_state_paths_empty_when_none_exist(tmp_path):
+    assert dashboard_api.list_agent_state_paths(root=tmp_path) == []
+
+
 def test_streamer_crud_roundtrip_through_the_facade(tmp_path, monkeypatch):
     path = tmp_path / "streamers.json"
     monkeypatch.setattr(streamers_module, "STREAMERS_PATH", path)

@@ -18,4 +18,5 @@ playwright
 streamlit-autorefresh
 browser-cookie3
 filelock
+psutil
 pytest

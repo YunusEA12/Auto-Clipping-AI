@@ -6,11 +6,13 @@ import logging
 import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
 import cv2
 
+import atomic_io
 import vision
 
 import logging_setup
@@ -451,10 +453,17 @@ def render_clip(
     output_h: int,
     facecam_box: Tuple[int, int, int, int] | None = None,
     gameplay_box: Tuple[int, int, int, int] | None = None,
+    output_dir: Path | None = None,
 ) -> Path:
+    # output_dir defaults to the shared OUTPUT_DIR (single-video/manual/Streamlit usage,
+    # unchanged behavior) — auto_pilot.py passes a streamer-namespaced subdirectory instead
+    # when running under orchestrator.py, so two streamers rendering concurrently can never
+    # collide on the same clip_<index>_<slug>.mp4 path (found in review, 2026-08-18: H-14).
+    if output_dir is None:
+        output_dir = OUTPUT_DIR
     start = clip["start_time"]
     end = clip["end_time"]
-    output_path = OUTPUT_DIR / clip_output_filename(index, clip["title"])
+    output_path = output_dir / clip_output_filename(index, clip["title"])
 
     filter_complex = build_filter_complex(layout, ass_path, output_w, output_h, facecam_box, gameplay_box)
 
@@ -515,22 +524,44 @@ def resolve_layout(layout: str, video_path: Path, clip_start: float) -> str:
     return resolved
 
 
+def _write_clip_metadata_sidecar(output_path: Path, clip: dict) -> None:
+    """A small .json next to each rendered clip recording exactly what it is — title,
+    hook_explanation, viral_score, energy_rating, whatever else analyze.py/train_loop.py put
+    on the clip dict, plus when it was rendered. Lets a reader (app.py's Clip Archiv) look up
+    a clip's real metadata directly instead of re-deriving it from the filename's numeric
+    index against "whichever *_clips.json happens to be newest" — that reverse-engineering
+    breaks as soon as two cycles (or two concurrent streamers) both produce a clip_1_*.mp4
+    (found in review, 2026-08-18: H-14). Best-effort: a failed write never fails the render
+    it's describing."""
+    try:
+        atomic_io.atomic_write_json(output_path.with_suffix(".json"), {
+            **clip,
+            "rendered_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except OSError as e:
+        logger.warning("Could not write clip metadata sidecar for %s: %s", output_path, e)
+
+
 def process_clips_iter(
     source_video: Path | None = None,
     layout: str = LAYOUT_SPLIT_SCREEN,
     video_format: str = DEFAULT_FORMAT,
     highlight_color: str = DEFAULT_HIGHLIGHT_COLOR,
     transcript: dict | None = None,
+    output_dir: Path | None = None,
 ) -> Iterator[Tuple[int, int, dict, Path]]:
     """Render clips one at a time, yielding (position, total, clip, output_path) as each one
     finishes — lets a caller (e.g. the Streamlit UI) show real per-clip progress instead of
     blocking on the whole batch. `process()` below is a thin wrapper for callers that just
-    want the final list. `transcript`, if given, overrides temp/transcription.json."""
+    want the final list. `transcript`, if given, overrides temp/transcription.json.
+    `output_dir`, if given, overrides OUTPUT_DIR — see render_clip()'s docstring."""
     if layout not in SELECTABLE_LAYOUTS:
         raise ValueError(f"Unknown layout '{layout}', expected one of {SELECTABLE_LAYOUTS}")
     if video_format not in VIDEO_FORMATS:
         raise ValueError(f"Unknown video format '{video_format}', expected one of {tuple(VIDEO_FORMATS)}")
 
+    if output_dir is None:
+        output_dir = OUTPUT_DIR
     output_w, output_h = VIDEO_FORMATS[video_format]
 
     video_path = find_source_video(source_video)
@@ -546,7 +577,7 @@ def process_clips_iter(
     if not clips:
         raise RuntimeError(f"No clips found in {clips_path}")
 
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     TEMP_DIR.mkdir(exist_ok=True)
 
     gameplay_box = None
@@ -569,11 +600,13 @@ def process_clips_iter(
 
         ass_path = build_ass_for_clip(clip, transcript, i, highlight_color, output_w, output_h)
         output_path = render_clip(
-            video_path, clip, ass_path, i, effective_layout, output_w, output_h, facecam_box, gameplay_box
+            video_path, clip, ass_path, i, effective_layout, output_w, output_h, facecam_box, gameplay_box,
+            output_dir=output_dir,
         )
+        _write_clip_metadata_sidecar(output_path, clip)
         yield i, total, clip, output_path
 
-    logger.info("Processing complete: %d clips rendered to %s", total, OUTPUT_DIR)
+    logger.info("Processing complete: %d clips rendered to %s", total, output_dir)
 
 
 def process(

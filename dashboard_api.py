@@ -38,6 +38,19 @@ AI_GUIDELINES_PATH = analyze.AI_GUIDELINES_PATH
 ORCHESTRATOR_STATE_PATH = orchestrator.ORCHESTRATOR_STATE_PATH
 VIRAL_MEMORY_PATH = train_loop.VIRAL_MEMORY_PATH
 
+
+def list_agent_state_paths(root: Path = None) -> List[Path]:
+    """Every agent-state file currently on disk: the legacy shared AGENT_STATE_PATH (a
+    manual/standalone auto_pilot.py run with no --streamer-name) plus one
+    agent_state_<slug>.json per streamer orchestrator.py is running concurrently. Multiple
+    streamers used to all write the single shared file, corrupting each other's dashboard
+    state (see H-14 in the audit) — each now gets its own, so app.py just needs to read all
+    of them instead of assuming exactly one exists. `root` defaults to the project's own
+    directory (`.`), overridable for tests."""
+    if root is None:
+        root = Path(".")
+    return sorted(root.glob("agent_state*.json"))
+
 # --- Rendering constants ---------------------------------------------------------------
 LAYOUT_AUTO = process_module.LAYOUT_AUTO
 LAYOUT_SPLIT_SCREEN = process_module.LAYOUT_SPLIT_SCREEN

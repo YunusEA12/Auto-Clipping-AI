@@ -34,6 +34,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import psutil
+
 import atomic_io
 import streamers as streamers_module
 import stream_watcher
@@ -93,7 +95,11 @@ def is_stream_live(url: str, timeout: int = LIVENESS_CHECK_TIMEOUT_SECONDS) -> b
 
 
 def build_auto_pilot_cmd(entry: dict) -> List[str]:
-    cmd = [sys.executable, "auto_pilot.py", "--url", entry["url"], "--live"]
+    # --streamer-name is always passed (not conditional): it's what makes auto_pilot.py
+    # namespace its agent_state file, output/ subdirectory, and recording chunk filenames —
+    # without it, two streamers live at once share all three and silently corrupt or
+    # overwrite each other's state (found in review, 2026-08-18: H-14).
+    cmd = [sys.executable, "auto_pilot.py", "--url", entry["url"], "--live", "--streamer-name", entry["name"]]
     if entry.get("profile"):
         cmd += ["--profile", entry["profile"]]
     if entry.get("auto_upload"):
@@ -141,6 +147,112 @@ def _crash_backoff_seconds(streak: int) -> float:
     return min(CRASH_BACKOFF_MAX_SECONDS, CRASH_BACKOFF_BASE_SECONDS * (2 ** capped_streak))
 
 
+# --- Startup reconciliation (H-14) --------------------------------------------------------
+# orchestrator.py used to start every run with `tracked = {}`, no memory of anything from
+# before — fine for a normal first start, wrong for a restart (by process_supervisor.py,
+# after an OOM-kill or a force-kill neither of which lets orchestrator.py's own cleanup run):
+# any auto_pilot.py subprocess that was still alive and recording gets orphaned, and the new
+# orchestrator instance starts a brand-new one for the same streamer, doubling every
+# concurrency race and risking duplicate TikTok uploads if publish is on.
+
+class _AdoptedProcess:
+    """Wraps a psutil.Process for a subprocess this orchestrator instance didn't itself
+    subprocess.Popen() — one still running from before a restart — behind the same interface
+    stop_recording()/the crash-loop poll already use (.pid, .poll(), .returncode, .terminate(),
+    .kill(), .wait()), so an adopted subprocess can be tracked and later stopped exactly like
+    one this process started itself."""
+
+    def __init__(self, pid: int):
+        self._proc = psutil.Process(pid)
+        self.pid = pid
+        self.returncode: Optional[int] = None
+
+    def poll(self) -> Optional[int]:
+        if self.returncode is not None:
+            return self.returncode
+        if self._proc.is_running() and self._proc.status() != psutil.STATUS_ZOMBIE:
+            return None
+        # The real exit code isn't recoverable for a process we didn't Popen() ourselves —
+        # any non-None value is enough to mark it "no longer running" for the crash-loop check.
+        self.returncode = 0
+        return self.returncode
+
+    def terminate(self) -> None:
+        try:
+            self._proc.terminate()
+        except psutil.NoSuchProcess:
+            pass
+
+    def kill(self) -> None:
+        try:
+            self._proc.kill()
+        except psutil.NoSuchProcess:
+            pass
+
+    def wait(self, timeout: Optional[float] = None) -> None:
+        try:
+            self._proc.wait(timeout=timeout)
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.TimeoutExpired:
+            raise subprocess.TimeoutExpired(cmd="auto_pilot.py", timeout=timeout)
+        self.returncode = 0
+
+
+def _is_still_our_auto_pilot(pid: int, streamer_name: str) -> bool:
+    """Best-effort: is `pid` still alive AND plausibly the auto_pilot.py subprocess this
+    orchestrator previously started for `streamer_name`, checked via the process's own
+    command line (not just liveness) — psutil.pid_exists() alone can't distinguish our
+    subprocess from an unrelated process that happens to have been assigned the same PID
+    after ours already exited (PID reuse). Not a hardened defense against that race — just
+    enough to make the actually-common case (subprocess survived, orchestrator restarted)
+    safe instead of ignored entirely."""
+    try:
+        cmdline = " ".join(psutil.Process(pid).cmdline())
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return False
+    return "auto_pilot.py" in cmdline and streamer_name in cmdline
+
+
+def _read_orchestrator_state(path: Path = None) -> dict:
+    if path is None:
+        path = ORCHESTRATOR_STATE_PATH
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def reconcile_with_running_subprocesses(path: Path = None) -> Dict[str, dict]:
+    """Read the last-written orchestrator_state.json and adopt any streamer still marked
+    "recording" whose PID is confirmed still alive and still ours — used to seed `tracked`
+    at startup instead of always starting from empty. Returns {} (not an error) if the state
+    file is missing, empty, or nothing in it checks out — a normal first start behaves
+    exactly as before."""
+    tracked: Dict[str, dict] = {}
+    state = _read_orchestrator_state(path)
+
+    for name, info in state.get("streamers", {}).items():
+        pid = info.get("pid")
+        if not pid or not info.get("recording"):
+            continue
+        if not _is_still_our_auto_pilot(pid, name):
+            continue
+
+        started_at_raw = info.get("started_at")
+        try:
+            started_at = datetime.fromisoformat(started_at_raw) if started_at_raw else datetime.now(timezone.utc)
+        except ValueError:
+            started_at = datetime.now(timezone.utc)
+
+        tracked[name] = {"process": _AdoptedProcess(pid), "started_at": started_at}
+        logger.info("🔁 '%s' war beim Start bereits aktiv (PID %s) — übernommen statt neu gestartet", name, pid)
+
+    return tracked
+
+
 def run_orchestrator(
     streamers_path: Path = None,
     poll_interval: int = DEFAULT_POLL_INTERVAL_SECONDS,
@@ -148,7 +260,10 @@ def run_orchestrator(
 ) -> None:
     if streamers_path is None:
         streamers_path = streamers_module.STREAMERS_PATH
-    tracked: Dict[str, dict] = {}  # name -> {"process": Popen, "started_at": datetime}
+    # name -> {"process": Popen | _AdoptedProcess, "started_at": datetime} — seeded from
+    # orchestrator_state.json instead of always empty, so a restart doesn't orphan and then
+    # duplicate every streamer that was already recording (see reconcile_with_running_subprocesses).
+    tracked: Dict[str, dict] = reconcile_with_running_subprocesses()
     # Per-streamer crash-loop guard: a subprocess that exits within CRASH_LOOP_WINDOW_SECONDS
     # of starting no longer gets restarted immediately, forever — it backs off exponentially
     # instead, so one broken profile can't silently burn API calls in a hot loop.

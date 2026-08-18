@@ -8,19 +8,19 @@ import orchestrator
 # streamer's own config explicitly opts into it, not whenever auto_upload is on) ----------
 
 def test_cmd_never_includes_publish_when_auto_upload_is_off():
-    cmd = orchestrator.build_auto_pilot_cmd({"url": "https://twitch.tv/x", "auto_upload": False, "publish": True})
+    cmd = orchestrator.build_auto_pilot_cmd({"name": "x", "url": "https://twitch.tv/x", "auto_upload": False, "publish": True})
     assert "--auto-upload" not in cmd
     assert "--publish" not in cmd
 
 
 def test_cmd_omits_publish_when_auto_upload_on_but_publish_off():
-    cmd = orchestrator.build_auto_pilot_cmd({"url": "https://twitch.tv/x", "auto_upload": True, "publish": False})
+    cmd = orchestrator.build_auto_pilot_cmd({"name": "x", "url": "https://twitch.tv/x", "auto_upload": True, "publish": False})
     assert "--auto-upload" in cmd
     assert "--publish" not in cmd
 
 
 def test_cmd_includes_publish_only_when_both_flags_set():
-    cmd = orchestrator.build_auto_pilot_cmd({"url": "https://twitch.tv/x", "auto_upload": True, "publish": True})
+    cmd = orchestrator.build_auto_pilot_cmd({"name": "x", "url": "https://twitch.tv/x", "auto_upload": True, "publish": True})
     assert "--auto-upload" in cmd
     assert "--publish" in cmd
 
@@ -28,8 +28,17 @@ def test_cmd_includes_publish_only_when_both_flags_set():
 def test_cmd_omits_publish_when_missing_from_entry_entirely():
     # Backward compatibility: an older streamers.json written before the `publish` field
     # existed must not silently start publishing live.
-    cmd = orchestrator.build_auto_pilot_cmd({"url": "https://twitch.tv/x", "auto_upload": True})
+    cmd = orchestrator.build_auto_pilot_cmd({"name": "x", "url": "https://twitch.tv/x", "auto_upload": True})
     assert "--publish" not in cmd
+
+
+# --- --streamer-name always threaded through (2026-08-18: H-14 — without it, two streamers
+# live at once share agent_state.json, output/, and recording chunk filenames) -------------
+
+def test_cmd_always_includes_streamer_name():
+    cmd = orchestrator.build_auto_pilot_cmd({"name": "eliasn97", "url": "https://twitch.tv/eliasn97"})
+    assert "--streamer-name" in cmd
+    assert cmd[cmd.index("--streamer-name") + 1] == "eliasn97"
 
 
 def test_run_orchestrator_default_streamers_path_respects_monkeypatch(tmp_path, monkeypatch):

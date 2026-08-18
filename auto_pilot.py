@@ -74,15 +74,33 @@ UPLOADED_CLIPS_DIR = Path("uploaded_clips")
 # just this JSON file on disk.
 AGENT_STATE_PATH = Path("agent_state.json")
 
+# Set once in main() when --streamer-name is given (i.e. orchestrator.py launched this as
+# one of several concurrent streamer subprocesses) — every update_agent_state() call then
+# writes to a per-streamer file instead of the single shared AGENT_STATE_PATH. Two streamers
+# recording at once used to both read-modify-write the exact same file: whichever process's
+# partial update dict omitted a field kept whatever the OTHER streamer's last write left
+# there, so the dashboard could show one streamer's target_streamer next to another's
+# clips_kept_total — guaranteed, not a corner case, whenever 2+ streamers were live (found in
+# review, 2026-08-18: H-14). A module-level override (not a threaded parameter) because
+# update_agent_state() already has ~10 call sites across this file using **updates only.
+_agent_state_path_override: Optional[Path] = None
+# Same idea for rendered-clip output — see process.render_clip()'s docstring.
+_output_dir_override: Optional[Path] = None
+
+
+def _resolve_agent_state_path() -> Path:
+    return _agent_state_path_override or AGENT_STATE_PATH
+
 
 def update_agent_state(**updates) -> dict:
-    """Merge `updates` into agent_state.json and write it back. Called at every phase
-    transition in the loop below so app.py's Live Radar tab always reflects the agent's
-    current phase, not just its state at the end of a cycle."""
+    """Merge `updates` into this process's agent state file and write it back. Called at
+    every phase transition in the loop below so app.py's Live Radar tab always reflects the
+    agent's current phase, not just its state at the end of a cycle."""
+    path = _resolve_agent_state_path()
     state = {}
-    if AGENT_STATE_PATH.exists():
+    if path.exists():
         try:
-            state = json.loads(AGENT_STATE_PATH.read_text(encoding="utf-8"))
+            state = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             state = {}
 
@@ -90,9 +108,9 @@ def update_agent_state(**updates) -> dict:
     state["last_updated"] = datetime.now(timezone.utc).isoformat()
 
     try:
-        atomic_io.atomic_write_json(AGENT_STATE_PATH, state)
+        atomic_io.atomic_write_json(path, state)
     except OSError as e:
-        logger.warning("Could not write %s: %s", AGENT_STATE_PATH, e)
+        logger.warning("Could not write %s: %s", path, e)
 
     return state
 
@@ -147,6 +165,9 @@ def purge_low_scoring_clips(
         if score is not None and score < threshold:
             if output_path and output_path.exists():
                 output_path.unlink()
+                sidecar_path = output_path.with_suffix(".json")
+                if sidecar_path.exists():
+                    sidecar_path.unlink()
             logger.info("🗑️  Gelöscht (reward_score=%s < %d): '%s'", score, threshold, title)
             deleted += 1
         else:
@@ -215,6 +236,13 @@ def run_deployment_phase(survivors: List[Tuple[dict, Path, Optional[int]]], publ
         try:
             destination = UPLOADED_CLIPS_DIR / output_path.name
             shutil.move(str(output_path), str(destination))
+
+            # The render-time metadata sidecar (process._write_clip_metadata_sidecar) is left
+            # behind in output/ once only the .mp4 is moved — clean it up rather than leaving
+            # an orphaned .json with nothing to describe.
+            render_sidecar = output_path.with_suffix(".json")
+            if render_sidecar.exists():
+                render_sidecar.unlink()
 
             metadata = {
                 "title": title,
@@ -292,6 +320,7 @@ def run_cycle(
     for i, total, clip, output_path in process_module.process_clips_iter(
         video_path, layout=layout, video_format=video_format,
         highlight_color=highlight_color, transcript=transcript,
+        output_dir=_output_dir_override,
     ):
         rendered[clip["title"]] = output_path
 
@@ -386,6 +415,14 @@ def main():
         help="With --auto-upload: actually post survivors live. Required for Phase 5 to do "
         "anything at all — there is no safer partial-upload mode anymore",
     )
+    parser.add_argument(
+        "--streamer-name", default=None,
+        help="Set by orchestrator.py when running as one of several concurrent streamer "
+        "subprocesses — namespaces this process's agent_state file, rendered-clip output "
+        "directory, and recording chunk filenames so two streamers running at once can't "
+        "collide on any of the three. Omit for a manual/standalone run (original shared "
+        "agent_state.json / output/ behavior).",
+    )
     args = parser.parse_args()
 
     if args.publish and not args.auto_upload:
@@ -411,6 +448,17 @@ def main():
         else (url or (str(args.video) if args.video else "lokales Video"))
     )
 
+    streamer_slug: Optional[str] = None
+    if args.streamer_name:
+        global _agent_state_path_override, _output_dir_override
+        streamer_slug = process_module.slugify(args.streamer_name)
+        _agent_state_path_override = Path(f"agent_state_{streamer_slug}.json")
+        _output_dir_override = process_module.OUTPUT_DIR / streamer_slug
+        logger.info(
+            "Namespaced for concurrent multi-streamer operation: agent_state=%s, output_dir=%s",
+            _agent_state_path_override, _output_dir_override,
+        )
+
     cached_video_path: Optional[Path] = None
     kept_total, purged_total, uploaded_total = 0, 0, 0
 
@@ -435,7 +483,7 @@ def main():
                     update_agent_state(
                         current_action="🔴 Aufnahme läuft", current_cycle=cycle, target_streamer=target_streamer,
                     )
-                    video_path = stream_watcher.record_stream_chunk(url, args.chunk_duration)
+                    video_path = stream_watcher.record_stream_chunk(url, args.chunk_duration, streamer_slug)
                 else:
                     if cached_video_path is None:
                         cached_video_path = resolve_static_video(args, url)
