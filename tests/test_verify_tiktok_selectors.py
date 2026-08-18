@@ -66,3 +66,14 @@ def test_manual_login_flag_requires_visible_browser():
     )
     assert result.returncode == 2
     assert "--manual-login needs a visible browser" in result.stderr
+
+
+def test_pause_before_check_flag_requires_visible_browser():
+    import subprocess
+    import sys
+    result = subprocess.run(
+        [sys.executable, "verify_tiktok_selectors.py", "--pause-before-check", "--headless"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 2
+    assert "--pause-before-check needs a visible browser" in result.stderr

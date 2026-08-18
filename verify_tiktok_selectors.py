@@ -28,9 +28,19 @@ platform's anti-bot protections, which is the same category of thing this projec
 already deliberately avoided (see: no anti-detection/stealth measures in tiktok_uploader.py).
 A human typing their own password into a browser they can see is not that.
 
+Note on the upload page specifically: the caption box, Post button, Save-as-draft button,
+and progress indicator genuinely do not exist in the DOM until a video has actually been
+selected and finished processing — a plain run of this script (which never selects a file,
+by design) can only ever verify the file-input selector, not those four. Use
+--pause-before-check to get real coverage of them: it opens the page and waits for you to
+manually get it into whatever state you want to inspect (select a real or throwaway test
+clip yourself, wait for it to process, however far you want to go) before running the check
+— same principle as --manual-login: a human drives the browser, this script only reads.
+
 Usage:
     python verify_tiktok_selectors.py                    # uses cookies.json
     python verify_tiktok_selectors.py --manual-login      # log in by hand instead
+    python verify_tiktok_selectors.py --pause-before-check    # get the page into the right state yourself first
     python verify_tiktok_selectors.py --headless          # no visible browser (cookies.json only)
     python verify_tiktok_selectors.py --skip-upload-page      # only check the content list
     python verify_tiktok_selectors.py --skip-content-page     # only check the upload page
@@ -139,7 +149,22 @@ def _offer_to_save_session_cookies(context) -> None:
     print(f"Saved {len(tiktok_cookies)} cookie(s) to {tiktok_uploader.COOKIES_PATH}.")
 
 
-def run_audit(headless: bool, check_upload: bool, check_content: bool, manual_login: bool) -> None:
+def _wait_for_manual_page_setup(page_label: str, url: str) -> None:
+    """Blocks on terminal input so the human can drive the already-open browser to whatever
+    DOM state they want checked (select a test video, wait for it to process, open the
+    caption editor, etc.) before the selector check runs. This script only reads afterward —
+    it never selects a file, types anything, or clicks anything itself."""
+    print(
+        f"\nThe browser is on {url}. Get it into the state you want checked yourself — e.g. "
+        "select/drag in a small test video and wait for it to finish processing, or open "
+        "the caption editor. Nothing here will click Post or Save as draft for you."
+    )
+    input(f"Press Enter here once {page_label} looks the way you want it checked... ")
+
+
+def run_audit(
+    headless: bool, check_upload: bool, check_content: bool, manual_login: bool, pause_before_check: bool
+) -> None:
     cookies = None
     if not manual_login:
         cookies = tiktok_uploader.load_cookies()
@@ -172,6 +197,8 @@ def run_audit(headless: bool, check_upload: bool, check_content: bool, manual_lo
                 if "login" in page.url:
                     print("  Redirected to login — the session is expired or wasn't accepted.")
                 else:
+                    if pause_before_check:
+                        _wait_for_manual_page_setup("the upload page", tiktok_uploader.UPLOAD_URL)
                     _check_selectors(page, UPLOAD_PAGE_SELECTORS)
                     _save_snapshot(page, "upload_page")
 
@@ -182,6 +209,8 @@ def run_audit(headless: bool, check_upload: bool, check_content: bool, manual_lo
                 if "login" in page.url:
                     print("  Redirected to login — the session is expired or wasn't accepted.")
                 else:
+                    if pause_before_check:
+                        _wait_for_manual_page_setup("the content list page", metrics_tracker.CONTENT_URL)
                     _check_selectors(page, CONTENT_PAGE_SELECTORS)
                     _save_snapshot(page, "content_page")
 
@@ -204,19 +233,27 @@ def main():
         help="Log in by hand in a visible browser instead of using cookies.json — nothing "
         "here reads or types your credentials, you do the login yourself.",
     )
-    parser.add_argument("--headless", action="store_true", help="Run without a visible browser window (not available with --manual-login)")
+    parser.add_argument(
+        "--pause-before-check", action="store_true",
+        help="Pause on each page so you can manually get it into the state you want checked "
+        "(e.g. select a test video) before the selector check runs.",
+    )
+    parser.add_argument("--headless", action="store_true", help="Run without a visible browser window (not available with --manual-login/--pause-before-check)")
     parser.add_argument("--skip-upload-page", action="store_true")
     parser.add_argument("--skip-content-page", action="store_true")
     args = parser.parse_args()
 
     if args.manual_login and args.headless:
         parser.error("--manual-login needs a visible browser window to log in — drop --headless")
+    if args.pause_before_check and args.headless:
+        parser.error("--pause-before-check needs a visible browser window — drop --headless")
 
     run_audit(
         headless=args.headless,
         check_upload=not args.skip_upload_page,
         check_content=not args.skip_content_page,
         manual_login=args.manual_login,
+        pause_before_check=args.pause_before_check,
     )
 
 
