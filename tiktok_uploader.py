@@ -237,6 +237,34 @@ def _dismiss_blocking_overlays(page) -> None:
         logger.info("No onboarding tooltip to dismiss")
 
 
+PENDING_REVIEW_CONFIRM_TIMEOUT_MS = 8000
+
+
+def _confirm_publish_despite_pending_review(page) -> bool:
+    """Found live (2026-08-18) via the headed post-click diagnostic pause, from the real
+    saved screenshot/HTML: clicking post_video_button doesn't always publish directly — if
+    TikTok's own automated content check ("Kurze Inhaltsprüfung") hasn't finished yet at that
+    exact moment, a modal appears instead ("Weiter und veröffentlichen? Wir prüfen dein Video
+    noch auf mögliche Probleme...") with Abbrechen/"Jetzt veröffentlichen" buttons — the
+    actual publish only happens once that second button is clicked. This isn't a distracting
+    overlay to dismiss; it's a required step to complete the exact publish action `publish=True`
+    already authorized, so clicking "Jetzt veröffentlichen" here is finishing that same
+    action, not a new one. Best-effort: not every run hits this (the review can finish before
+    the click), so a short timeout with no match is the expected common case, not an error.
+    Returns whether the dialog was found and confirmed."""
+    try:
+        confirm_button = page.get_by_role("button", name="Jetzt veröffentlichen")
+        confirm_button.click(timeout=PENDING_REVIEW_CONFIRM_TIMEOUT_MS)
+        logger.info(
+            "Content review hadn't finished yet — confirmed 'Jetzt veröffentlichen' to "
+            "publish anyway (as already authorized by --publish)"
+        )
+        return True
+    except PlaywrightTimeoutError:
+        logger.info("No pending-review confirmation dialog appeared — review had already finished")
+        return False
+
+
 def _save_post_click_snapshot(page, label: str) -> None:
     """Best-effort screenshot + HTML dump to selector_audit/ (already gitignored) — a
     durable record of exactly what was on screen at a given moment, independent of whatever
@@ -400,6 +428,7 @@ def upload_video(
             button = page.locator("[data-e2e='post_video_button']")
             button.wait_for(state="visible", timeout=PROCESSING_TIMEOUT_MS)
             button.click()
+            _confirm_publish_despite_pending_review(page)
 
             if not headless:
                 # Diagnostic only (see POST_CLICK_INSPECTION_DELAY_MS above) — never reached

@@ -299,3 +299,41 @@ def test_try_upload_clip_always_forces_headless_regardless_of_diagnostic_feature
     import inspect
     source = inspect.getsource(tiktok_uploader.try_upload_clip)
     assert "headless=True" in source
+
+
+# --- _confirm_publish_despite_pending_review (found via the headed diagnostic pause,
+# 2026-08-18: clicking post_video_button doesn't always publish directly — if TikTok's
+# content review isn't finished yet, a "Weiter und veröffentlichen?" modal appears instead,
+# and the actual publish only happens once "Jetzt veröffentlichen" is clicked) -------------
+
+class FakeConfirmButton:
+    def __init__(self, present):
+        self._present = present
+        self.clicked = False
+
+    def click(self, timeout=None):
+        if not self._present:
+            raise PlaywrightTimeoutError("dialog not present")
+        self.clicked = True
+
+
+class FakeConfirmPage:
+    def __init__(self, dialog_present):
+        self.confirm_button = FakeConfirmButton(dialog_present)
+
+    def get_by_role(self, role, name=None):
+        assert role == "button"
+        assert name == "Jetzt veröffentlichen"
+        return self.confirm_button
+
+
+def test_confirms_pending_review_dialog_when_present():
+    page = FakeConfirmPage(dialog_present=True)
+    assert tiktok_uploader._confirm_publish_despite_pending_review(page) is True
+    assert page.confirm_button.clicked is True
+
+
+def test_no_op_when_review_already_finished():
+    page = FakeConfirmPage(dialog_present=False)
+    assert tiktok_uploader._confirm_publish_despite_pending_review(page) is False
+    assert page.confirm_button.clicked is False
