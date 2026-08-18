@@ -97,3 +97,54 @@ def test_upload_outcome_is_a_named_tuple_with_success_and_confirmed():
     # Unpacking still works like a plain bool tuple, for any caller that only cares about [0]
     success, confirmed = outcome
     assert (success, confirmed) == (True, False)
+
+
+# --- _wait_for_upload_complete (C-01: real success-icon signal, verified 2026-08-18) -------
+
+class FakeIconLocator:
+    def __init__(self, appears_after_calls):
+        self._appears_after_calls = appears_after_calls
+        self.calls = 0
+
+    def count(self):
+        self.calls += 1
+        return 1 if self._appears_after_calls is not None and self.calls >= self._appears_after_calls else 0
+
+
+class FakeTextLocator:
+    """Stands in for page.locator("text=/\\d{1,3}\\s*%/") — never has progress text in
+    these tests, since they're specifically exercising the icon-based signal."""
+
+    @property
+    def first(self):
+        return self
+
+    def text_content(self, timeout=None):
+        raise PlaywrightTimeoutError("no progress text in this test")
+
+
+class FakeUploadPage:
+    def __init__(self, icon_appears_after_calls):
+        self._icon = FakeIconLocator(icon_appears_after_calls)
+        self.wait_calls = 0
+
+    def locator(self, selector):
+        if selector == "[data-e2e='upload_status_container'] [data-icon='CheckCircleFill']":
+            return self._icon
+        return FakeTextLocator()
+
+    def wait_for_timeout(self, ms):
+        self.wait_calls += 1
+
+
+def test_upload_complete_returns_true_and_stops_as_soon_as_icon_appears():
+    page = FakeUploadPage(icon_appears_after_calls=2)
+    assert tiktok_uploader._wait_for_upload_complete(page) is True
+    # Confirmed quickly, not by exhausting the full UPLOAD_BAR_TIMEOUT_MS budget.
+    max_possible_polls = tiktok_uploader.UPLOAD_BAR_TIMEOUT_MS // tiktok_uploader.UPLOAD_BAR_POLL_MS
+    assert page.wait_calls < max_possible_polls
+
+
+def test_upload_complete_falls_back_to_settle_delay_when_icon_never_appears():
+    page = FakeUploadPage(icon_appears_after_calls=None)
+    assert tiktok_uploader._wait_for_upload_complete(page) is False

@@ -4,6 +4,109 @@ from datetime import datetime, timedelta, timezone
 import metrics_tracker
 
 
+# --- embedded-JSON content extraction (C-01: real per-row DOM has no views/likes words at
+# all, only the column headers do, so this replaced the old text-pattern-regex scrape
+# entirely) -------------------------------------------------------------------------------
+
+# Trimmed-down but structurally real shape of TikTok Studio's __Creator_Center_Context__
+# script tag payload, confirmed against a real content-list page snapshot on 2026-08-18 —
+# not synthesized from guesswork.
+REAL_SHAPE_CONTEXT_PAYLOAD = {
+    "firstBatchQueryItems": {
+        "cursor": 5,
+        "has_more": False,
+        "item_list": [
+            {
+                "desc": "clip_3_Preise_die_schockieren #fyp #viral",
+                "play_count": "1234",
+                "like_count": "56",
+                "comment_count": "3",
+                "share_count": "1",
+                "item_id": "7675442700526570774",
+                "status": 102,
+                "visibility": 1,
+            },
+        ],
+    },
+}
+
+
+def test_rows_from_context_extracts_real_shaped_payload():
+    rows = metrics_tracker._rows_from_context(REAL_SHAPE_CONTEXT_PAYLOAD)
+    assert rows == [{"caption": "clip_3_Preise_die_schockieren #fyp #viral", "views": 1234, "likes": 56}]
+
+
+def test_rows_from_context_handles_empty_item_list():
+    assert metrics_tracker._rows_from_context({"firstBatchQueryItems": {"item_list": []}}) == []
+
+
+def test_rows_from_context_handles_missing_key_entirely():
+    assert metrics_tracker._rows_from_context({}) == []
+
+
+def test_rows_from_context_skips_malformed_items_not_the_whole_batch():
+    payload = {
+        "firstBatchQueryItems": {
+            "item_list": [
+                "not a dict",
+                {"desc": "real one", "play_count": "10", "like_count": "2"},
+            ]
+        }
+    }
+    rows = metrics_tracker._rows_from_context(payload)
+    assert rows == [{"caption": "real one", "views": 10, "likes": 2}]
+
+
+def test_rows_from_context_defaults_missing_counts_to_none():
+    payload = {"firstBatchQueryItems": {"item_list": [{"desc": "no counts here"}]}}
+    rows = metrics_tracker._rows_from_context(payload)
+    assert rows == [{"caption": "no counts here", "views": None, "likes": None}]
+
+
+def test_coerce_int_handles_string_numbers_and_none():
+    assert metrics_tracker._coerce_int("42") == 42
+    assert metrics_tracker._coerce_int(None) is None
+    assert metrics_tracker._coerce_int("not a number") is None
+
+
+class _FakeScriptLocator:
+    def __init__(self, text):
+        self._text = text
+
+    def text_content(self, timeout=None):
+        return self._text
+
+
+class _FakePage:
+    def __init__(self, script_text):
+        self._script_text = script_text
+
+    def locator(self, selector):
+        assert selector == f"script#{metrics_tracker.CONTEXT_SCRIPT_ID}"
+        return _FakeScriptLocator(self._script_text)
+
+
+def test_extract_context_json_parses_valid_json():
+    page = _FakePage(json.dumps(REAL_SHAPE_CONTEXT_PAYLOAD))
+    result = metrics_tracker._extract_context_json(page)
+    assert result == REAL_SHAPE_CONTEXT_PAYLOAD
+
+
+def test_extract_context_json_returns_none_on_missing_script():
+    page = _FakePage(None)
+    assert metrics_tracker._extract_context_json(page) is None
+
+
+def test_extract_context_json_returns_none_on_invalid_json():
+    page = _FakePage("{not valid json")
+    assert metrics_tracker._extract_context_json(page) is None
+
+
+def test_extract_context_json_returns_none_on_non_dict_json():
+    page = _FakePage("[1, 2, 3]")
+    assert metrics_tracker._extract_context_json(page) is None
+
+
 # --- default-path monkeypatch actually takes effect (late-binding regression guard) -------
 # A plain `path: Path = VIRAL_MEMORY_PATH` default captures the value once at function
 # definition time — monkeypatching metrics_tracker.VIRAL_MEMORY_PATH afterward would

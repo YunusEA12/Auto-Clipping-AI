@@ -17,11 +17,20 @@ API, which most platforms' terms of service restrict. Understand and accept that
 for your own account before relying on it.
 
 TikTok's web markup isn't a stable public contract like an API is and changes over time, so
-the selectors below are best-effort. Spot-check with --headed after any TikTok UI change.
+the selectors below are best-effort — verified once against the live TikTok Studio UI on
+2026-08-18 via verify_tiktok_selectors.py (see C-01 in the audit), not guessed. Spot-check
+with --headed (or re-run verify_tiktok_selectors.py) after any TikTok UI change.
+
+Note on "draft" mode (publish=False, the default): the current TikTok Studio upload flow has
+no distinct "Save as draft" button — only "Veröffentlichen" (post_video_button, publishes
+live) and "Verwerfen" (discard_post_button, deletes the upload entirely). Verified directly:
+leaving an upload without clicking either and letting the browser session close preserves it
+as a private draft in TikTok Studio's content list. So publish=False now means "fill the
+caption, then stop and close the browser" — never publishing, never discarding.
 
 Usage:
     python tiktok_uploader.py clip.mp4 --description "..." --hashtags gaming viral fy
-    python tiktok_uploader.py clip.mp4 --description "..." --publish   # posts live instead of drafting
+    python tiktok_uploader.py clip.mp4 --description "..." --publish   # posts live instead of leaving it a draft
 """
 
 import argparse
@@ -120,17 +129,31 @@ def cookies_status() -> Tuple[bool, str]:
     return True, f"{len(cookies)} Cookie(s) gefunden, inkl. sessionid"
 
 
-def _wait_for_upload_complete(page) -> None:
-    """Wait until the upload progress indicator reaches 100% (or disappears, which TikTok
-    also does once processing finishes) before touching the caption editor — filling in the
-    caption too early is a common cause of it being silently discarded. Best-effort: if no
-    percentage text is ever found (selector drift), falls back to a fixed settle delay
-    instead of hard-failing the whole upload."""
+def _wait_for_upload_complete(page) -> bool:
+    """Wait until the upload finishes before touching the caption editor — filling in the
+    caption too early is a common cause of it being silently discarded. Returns whether a
+    real completion signal was actually observed (as opposed to falling back to a blind
+    settle delay), so the caller can tell a confirmed upload apart from a guess.
+
+    Primary signal (verified against the live UI): [data-e2e='upload_status_container']
+    shows a CheckCircleFill icon once processing succeeds. Secondary/legacy signal: a "N%"
+    progress text reaching 100 or disappearing — kept as a second check since it costs
+    nothing and may still fire in some states the icon doesn't. Falls back to a fixed settle
+    delay only if neither is ever observed."""
     deadline_ms = UPLOAD_BAR_TIMEOUT_MS
     elapsed_ms = 0
     saw_progress_indicator = False
+    success_icon = page.locator("[data-e2e='upload_status_container'] [data-icon='CheckCircleFill']")
 
     while elapsed_ms < deadline_ms:
+        try:
+            if success_icon.count() > 0:
+                logger.info("Upload finished (success icon present)")
+                page.wait_for_timeout(500)
+                return True
+        except Exception:
+            pass  # a stale locator mid-navigation isn't an error here
+
         try:
             progress_text = page.locator("text=/\\d{1,3}\\s*%/").first.text_content(timeout=UPLOAD_BAR_POLL_MS)
         except PlaywrightTimeoutError:
@@ -142,13 +165,13 @@ def _wait_for_upload_complete(page) -> None:
             if digits and int(digits) >= 100:
                 logger.info("Upload bar reached 100%%")
                 page.wait_for_timeout(1500)
-                return
+                return True
             logger.info("Upload progress: %s", progress_text.strip())
         elif saw_progress_indicator:
             # The percentage element was present and is now gone — TikTok replaces it with
             # the caption editor/preview once processing completes.
             logger.info("Upload progress indicator finished")
-            return
+            return True
 
         page.wait_for_timeout(UPLOAD_BAR_POLL_MS)
         elapsed_ms += UPLOAD_BAR_POLL_MS
@@ -161,6 +184,7 @@ def _wait_for_upload_complete(page) -> None:
         page.wait_for_timeout(5000)
     else:
         logger.warning("Upload progress bar did not confirm 100%% within %ds; continuing anyway", deadline_ms // 1000)
+    return False
 
 
 def _wait_for_caption_filled(page, caption_box, expected_text: str) -> None:
@@ -188,13 +212,12 @@ def _wait_for_caption_filled(page, caption_box, expected_text: str) -> None:
 
 
 def _wait_for_post_confirmation(page, file_input) -> bool:
-    """Polls for a real signal that clicking Post/Save as draft actually did something —
-    the page navigating away from the upload URL, or the upload form (the file input) no
-    longer being present, either of which TikTok does once a post/draft is actually
-    accepted. Returns whether such a signal was observed within POST_CONFIRM_TIMEOUT_MS.
-    Best-effort, same as every other wait in this file: TikTok's real post-success UI has
-    never been verified against the live site (see C-01 in the audit / verify_tiktok_selectors.py),
-    so this can only report what it can actually detect, not guarantee a real success."""
+    """Polls for a real signal that clicking Post actually did something — the page
+    navigating away from the upload URL, or the upload form (the file input) no longer
+    being present, either of which TikTok does once a post is actually accepted. Returns
+    whether such a signal was observed within POST_CONFIRM_TIMEOUT_MS. Only used for the
+    publish=True path — the publish=False path never clicks anything, so there's no click
+    to confirm (see upload_video())."""
     deadline_ms = POST_CONFIRM_TIMEOUT_MS
     elapsed_ms = 0
 
@@ -230,11 +253,14 @@ def upload_video(
     """Upload one clip through the TikTok creator upload page, authenticating via cookies
     from cookies.json instead of an interactive login.
 
-    `publish=False` (the default) clicks "Save as draft" instead of "Post" — a review step
-    stays in the loop unless the caller explicitly opts into `--publish`. Never raises;
-    returns UploadOutcome(success, confirmed) — `success=False` on any failure, so one failed
-    browser upload never crashes an unattended pipeline; `confirmed` distinguishes an actually
-    -observed post-click success signal from "we clicked it and hoped" (see M-03 in the audit).
+    `publish=False` (the default) fills in the caption and then stops — never clicking Post
+    (post_video_button) or Discard (discard_post_button), since the current TikTok upload
+    flow has no separate "save as draft" action. TikTok preserves an untouched, unpublished
+    upload as a private draft once the browser session closes (verified 2026-08-18). A
+    review step stays in the loop unless the caller explicitly opts into `--publish`. Never
+    raises; returns UploadOutcome(success, confirmed) — `success=False` on any failure, so
+    one failed browser upload never crashes an unattended pipeline; `confirmed` distinguishes
+    an actually-observed success signal from "we hoped" (see M-03 in the audit).
     """
     video_path = Path(video_path)
     if not video_path.exists():
@@ -274,23 +300,30 @@ def upload_video(
             file_input.set_input_files(str(video_path.resolve()))
 
             logger.info("Waiting for upload to reach 100%%...")
-            _wait_for_upload_complete(page)
+            upload_confirmed = _wait_for_upload_complete(page)
 
             logger.info("Filling in caption...")
-            caption_box = page.locator("div[contenteditable='true']").first
+            caption_box = page.locator("[data-e2e='caption_container'] div[contenteditable='true']").first
             caption_box.click()
             page.keyboard.press("Control+A")
             page.keyboard.press("Delete")
             caption_box.type(caption, delay=15)
             _wait_for_caption_filled(page, caption_box, caption)
 
-            if publish:
-                logger.info("Clicking Post (publishing live)...")
-                button = page.get_by_role("button", name="Post", exact=False)
-            else:
-                logger.info("Clicking Save as draft (safer default)...")
-                button = page.get_by_role("button", name="Save as draft", exact=False)
+            if not publish:
+                # No separate "save as draft" action exists in the current flow — see the
+                # module docstring. Stopping here (never clicking post_video_button or
+                # discard_post_button) and letting `finally:` close the browser is what
+                # leaves this as a private draft.
+                logger.info(
+                    "Not publishing (publish=False) — leaving '%s' unpublished; TikTok "
+                    "preserves it as a draft once this browser session closes.",
+                    video_path.name,
+                )
+                return UploadOutcome(success=True, confirmed=upload_confirmed)
 
+            logger.info("Clicking Veröffentlichen (Post, publishing live)...")
+            button = page.locator("[data-e2e='post_video_button']")
             button.wait_for(state="visible", timeout=PROCESSING_TIMEOUT_MS)
             button.click()
             confirmed = _wait_for_post_confirmation(page, file_input)
@@ -328,7 +361,7 @@ def main():
     parser.add_argument("video", type=Path, help="Path to the rendered .mp4 clip")
     parser.add_argument("--description", default="", help="Caption/hook text")
     parser.add_argument("--hashtags", nargs="*", default=None, help="Hashtags, with or without leading #")
-    parser.add_argument("--publish", action="store_true", help="Post immediately instead of saving as a draft")
+    parser.add_argument("--publish", action="store_true", help="Post immediately instead of leaving it unpublished as a draft")
     parser.add_argument("--headed", action="store_true", help="Show the browser window instead of running headless")
     args = parser.parse_args()
 

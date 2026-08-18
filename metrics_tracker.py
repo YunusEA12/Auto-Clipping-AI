@@ -18,9 +18,16 @@ Run this as its own long-lived process, independent of auto_pilot.py/orchestrato
     python metrics_tracker.py --poll-interval 1800
     python metrics_tracker.py --once            # single pass, then exit
 
-TikTok's Studio UI isn't a stable public contract and changes over time, so the scraping
-selectors here are best-effort — spot-check with --headed if metrics stop updating. Never
-raises out of its own loop: a broken scrape just skips that cycle instead of crashing.
+TikTok's Studio UI isn't a stable public contract and changes over time. Verified against
+the live UI on 2026-08-18 (see C-01 in the audit): the content list's real per-row DOM has
+no "views"/"likes" *words* next to the numbers at all (only the column headers say that), so
+a text-pattern regex over row text could never reliably work regardless of which CSS
+selector picked the row. Instead, this extracts TikTok's own embedded item data — a JSON
+blob it renders the page from — out of a <script type="application/json"
+id="__Creator_Center_Context__"> tag, falling back to best-effort DOM scraping only if that
+script tag itself goes missing (real drift). Spot-check with --headed (or re-run
+verify_tiktok_selectors.py) if metrics stop updating. Never raises out of its own loop: a
+broken scrape just skips that cycle instead of crashing.
 """
 
 import argparse
@@ -61,6 +68,10 @@ CONSECUTIVE_FAILURE_ALERT_THRESHOLD = 3
 # username needs to be configured. Same domain as tiktok_uploader.py's upload page.
 CONTENT_URL = "https://www.tiktok.com/tiktokstudio/content"
 NAV_TIMEOUT_MS = 60_000
+
+# The <script type="application/json" id="..."> tag TikTok Studio's own frontend hydrates
+# the content list from — confirmed present via a real content-list snapshot on 2026-08-18.
+CONTEXT_SCRIPT_ID = "__Creator_Center_Context__"
 
 # viral_memory.json is a pure accumulator with nothing pruning it — every clip ever checked
 # stays in it forever, growing the block of text injected into every future critic prompt
@@ -121,7 +132,9 @@ def _extract_count(text: str, patterns: List[str]) -> Optional[int]:
 
 
 # English + German (TikTok Studio locale depends on the account's language setting, not the
-# machine running this script) plus emoji fallbacks that work regardless of locale.
+# machine running this script) plus emoji fallbacks that work regardless of locale. Only
+# used by the DOM-scraping fallback path below — the primary path (embedded JSON) doesn't
+# need pattern matching at all, since play_count/like_count are already plain integers.
 VIEW_COUNT_PATTERNS = [
     r"([\d.,]+[KM]?)\s*views?", r"([\d.,]+[KM]?)\s*Aufrufe", r"👁\D*([\d.,]+[KM]?)",
 ]
@@ -130,10 +143,99 @@ LIKE_COUNT_PATTERNS = [
 ]
 
 
+def _coerce_int(value) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_context_json(page) -> Optional[dict]:
+    """Pulls TikTok Studio's own embedded item data out of the <script type="application/json"
+    id="__Creator_Center_Context__"> tag its frontend hydrates the content list from. Returns
+    None (never raises) if that tag isn't present or isn't valid JSON — real drift, not a
+    routine empty-list case, which this distinguishes from downstream by still returning a
+    (possibly empty) list from a *successfully parsed* payload."""
+    try:
+        raw = page.locator(f"script#{CONTEXT_SCRIPT_ID}").text_content(timeout=5000)
+    except PlaywrightTimeoutError:
+        return None
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _rows_from_context(data: dict) -> List[dict]:
+    """[{"caption": str, "views": int|None, "likes": int|None}, ...] from the parsed
+    __Creator_Center_Context__ payload's firstBatchQueryItems.item_list (desc/play_count/
+    like_count) — confirmed field names from a real content-list snapshot on 2026-08-18.
+    A malformed individual item is skipped rather than losing the whole batch."""
+    items = ((data.get("firstBatchQueryItems") or {}).get("item_list")) or []
+    rows = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        rows.append({
+            "caption": str(item.get("desc") or "").strip(),
+            "views": _coerce_int(item.get("play_count")),
+            "likes": _coerce_int(item.get("like_count")),
+        })
+    return rows
+
+
+def _fetch_content_list_via_dom(page) -> List[dict]:
+    """Fallback path, only reached if the embedded-JSON extraction above fails (the script
+    tag itself went missing — real TikTok markup drift). Best-effort DOM/text-pattern
+    scraping — see the module docstring for why this can't reliably recover views/likes even
+    when it works (no "views"/"likes" words sit next to the numbers in the real per-row DOM),
+    kept only so a caption (and thus a match) can still be recovered without them."""
+    try:
+        page.wait_for_selector(
+            "[data-e2e='content-item'], [class*='ContentItem'], [class*='content-item']",
+            timeout=8000,
+        )
+    except PlaywrightTimeoutError:
+        page.wait_for_timeout(4000)
+
+    items = page.locator("[data-e2e='content-item']").all()
+    if not items:
+        items = page.locator("[class*='ContentItem'], [class*='content-item']").all()
+
+    rows = []
+    for item in items:
+        try:
+            text = item.text_content(timeout=3000) or ""
+        except PlaywrightTimeoutError:
+            continue
+        if not text.strip():
+            continue
+
+        try:
+            caption_el = item.locator(
+                "[data-e2e='content-item-caption'], [class*='caption'], [class*='Caption']"
+            ).first
+            caption = caption_el.text_content(timeout=2000)
+        except PlaywrightTimeoutError:
+            caption = text[:200]
+
+        rows.append({
+            "caption": (caption or "").strip(),
+            "views": _extract_count(text, VIEW_COUNT_PATTERNS),
+            "likes": _extract_count(text, LIKE_COUNT_PATTERNS),
+        })
+    return rows
+
+
 def fetch_content_list(headless: bool = True) -> List[dict]:
-    """Best-effort scrape of the TikTok Studio content list:
-    [{"caption": str, "views": int | None, "likes": int | None}, ...]. Returns [] (never
-    raises) on any failure — a broken scrape must degrade gracefully, not crash the loop."""
+    """[{"caption": str, "views": int | None, "likes": int | None}, ...] for every post in
+    the TikTok Studio content list. Returns [] (never raises) on any failure — a broken
+    fetch must degrade gracefully, not crash the loop."""
     cookies = tiktok_uploader.load_cookies()
     if not cookies:
         logger.error(
@@ -152,45 +254,17 @@ def fetch_content_list(headless: bool = True) -> List[dict]:
 
             try:
                 page.goto(CONTENT_URL, wait_until="domcontentloaded")
-                try:
-                    # Real signal first: wait for a content row (or its selector-drift
-                    # fallback) to actually appear, instead of always paying a flat 4s sleep
-                    # regardless of how fast the page actually loaded.
-                    page.wait_for_selector(
-                        "[data-e2e='content-item'], [class*='ContentItem'], [class*='content-item']",
-                        timeout=8000,
+
+                context_data = _extract_context_json(page)
+                if context_data is not None:
+                    rows = _rows_from_context(context_data)
+                else:
+                    logger.warning(
+                        "%s script tag not found or unparseable — falling back to DOM "
+                        "scraping (views/likes may come back empty; see module docstring)",
+                        CONTEXT_SCRIPT_ID,
                     )
-                except PlaywrightTimeoutError:
-                    # Not necessarily a failure — could be a genuinely empty content list —
-                    # so fall through to the row scrape below rather than bailing out here.
-                    page.wait_for_timeout(4000)
-
-                items = page.locator("[data-e2e='content-item']").all()
-                if not items:
-                    # Selector drift fallback — TikTok Studio's markup changes often.
-                    items = page.locator("[class*='ContentItem'], [class*='content-item']").all()
-
-                for item in items:
-                    try:
-                        text = item.text_content(timeout=3000) or ""
-                    except PlaywrightTimeoutError:
-                        continue
-                    if not text.strip():
-                        continue
-
-                    try:
-                        caption_el = item.locator(
-                            "[data-e2e='content-item-caption'], [class*='caption'], [class*='Caption']"
-                        ).first
-                        caption = caption_el.text_content(timeout=2000)
-                    except PlaywrightTimeoutError:
-                        caption = text[:200]
-
-                    rows.append({
-                        "caption": (caption or "").strip(),
-                        "views": _extract_count(text, VIEW_COUNT_PATTERNS),
-                        "likes": _extract_count(text, LIKE_COUNT_PATTERNS),
-                    })
+                    rows = _fetch_content_list_via_dom(page)
             finally:
                 context.close()
                 browser.close()

@@ -65,20 +65,28 @@ logger = logging.getLogger(__name__)
 AUDIT_DIR = Path("selector_audit")
 LOGIN_URL = "https://www.tiktok.com/login"
 
-# (label, selector) pairs actually used in tiktok_uploader.py's upload flow.
+# (label, selector) pairs actually used in tiktok_uploader.py's upload flow. Verified against
+# the live UI on 2026-08-18 — see C-01 in the audit. There is no "Save as draft" button in
+# the current flow (only Post/post_video_button and Discard/discard_post_button); the safe,
+# non-publishing default is to stop before either — see tiktok_uploader.py's module docstring.
 UPLOAD_PAGE_SELECTORS = [
     ("file input (video upload)", "input[type='file']"),
-    ("caption box", "div[contenteditable='true']"),
-    ("Post button", "button:has-text('Post')"),
-    ("Save as draft button", "button:has-text('Save as draft')"),
-    ("upload progress %% text", "text=/\\d{1,3}\\s*%/"),
+    ("caption box", "[data-e2e='caption_container'] div[contenteditable='true']"),
+    ("upload success icon", "[data-e2e='upload_status_container'] [data-icon='CheckCircleFill']"),
+    ("upload progress %% text (legacy/secondary signal)", "text=/\\d{1,3}\\s*%/"),
+    ("Post/Veröffentlichen button", "[data-e2e='post_video_button']"),
+    ("Discard/Verwerfen button (not used by the safe/draft path)", "[data-e2e='discard_post_button']"),
 ]
 
-# (label, selector) pairs actually used in metrics_tracker.py's content-list scrape.
+# (label, selector) pairs used only by metrics_tracker.py's DOM-scraping *fallback* path —
+# the primary path extracts a <script type="application/json" id="__Creator_Center_Context__">
+# tag instead (checked separately by _check_content_json() below), since the real per-row DOM
+# has no "views"/"likes" words next to the numbers at all for these CSS selectors to ever
+# reliably recover.
 CONTENT_PAGE_SELECTORS = [
-    ("content item (primary)", "[data-e2e='content-item']"),
-    ("content item (fallback)", "[class*='ContentItem'], [class*='content-item']"),
-    ("content item caption", "[data-e2e='content-item-caption'], [class*='caption'], [class*='Caption']"),
+    ("content item (primary, DOM fallback only)", "[data-e2e='content-item']"),
+    ("content item (fallback, DOM fallback only)", "[class*='ContentItem'], [class*='content-item']"),
+    ("content item caption (DOM fallback only)", "[data-e2e='content-item-caption'], [class*='caption'], [class*='Caption']"),
 ]
 
 
@@ -91,6 +99,28 @@ def _check_selectors(page, selectors) -> None:
             continue
         status = "MATCHES" if count > 0 else "NO MATCH"
         print(f"  [{status:>8}] {label} ({selector!r}) -> {count} element(s)")
+
+
+def _check_content_json(page) -> None:
+    """Checks metrics_tracker.py's actual primary content-list path — the embedded
+    __Creator_Center_Context__ JSON payload — instead of a CSS selector. Reuses the real
+    extraction functions directly rather than reimplementing them, so this check can never
+    silently drift out of sync with what metrics_tracker.py actually does."""
+    data = metrics_tracker._extract_context_json(page)
+    if data is None:
+        print(
+            f"  [NO MATCH] {metrics_tracker.CONTEXT_SCRIPT_ID} script tag "
+            "(primary content-list path) -> not found or unparseable"
+        )
+        return
+
+    rows = metrics_tracker._rows_from_context(data)
+    print(
+        f"  [ MATCHES] {metrics_tracker.CONTEXT_SCRIPT_ID} script tag "
+        f"(primary content-list path) -> parsed, {len(rows)} item(s)"
+    )
+    for row in rows[:3]:
+        print(f"             - {row['caption']!r}: views={row['views']}, likes={row['likes']}")
 
 
 def _save_snapshot(page, name: str) -> None:
@@ -211,12 +241,13 @@ def run_audit(
                 else:
                     if pause_before_check:
                         _wait_for_manual_page_setup("the content list page", metrics_tracker.CONTENT_URL)
+                    _check_content_json(page)
                     _check_selectors(page, CONTENT_PAGE_SELECTORS)
                     _save_snapshot(page, "content_page")
 
             print(
-                "\nDone. This did not click Post, Save as draft, or modify your account in any "
-                "way — it only checked which selectors currently match."
+                "\nDone. This did not click Post/Veröffentlichen, Discard/Verwerfen, or modify "
+                "your account in any way — it only checked what's currently on the page."
             )
             if not headless:
                 print("Browser window will stay open for 15s so you can look around...")

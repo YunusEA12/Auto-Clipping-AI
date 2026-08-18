@@ -2,8 +2,8 @@
 
 `tiktok_uploader.py` (und darüber `auto_pilot.py --auto-upload`, `stream_watcher.py --auto-upload`,
 sowie der "🚀 Automatisch auf TikTok hochladen"-Schalter in `app.py`) laden Videos über einen
-echten Browser (Playwright) hoch, statt über die offizielle TikTok-API — das erlaubt einen
-echten "Posten"/"Als Entwurf speichern"-Klick statt nur eines privaten Inbox-Drafts. Damit das
+echten Browser (Playwright) hoch, statt über die offizielle TikTok-API — das erlaubt ein
+echtes "Veröffentlichen" statt nur eines privaten Inbox-Drafts. Damit das
 ohne manuellen Login funktioniert, braucht der Bot deine bereits eingeloggte TikTok-Session als
 Cookies in einer Datei namens `cookies.json` im Projekt-Hauptverzeichnis.
 
@@ -114,8 +114,12 @@ python tiktok_uploader.py output/clip_1_beispiel.mp4 --description "Test" --hash
 
 `--headed` zeigt den Browser sichtbar an, damit du den Ablauf einmal live beobachten kannst,
 bevor du dich auf den unbeaufsichtigten (`--headed`-losen) Modus in `auto_pilot.py` o.ä.
-verlässt. Ohne `--publish` wird der Clip nur als **Entwurf gespeichert** (sicherer Standard) —
-erst mit `--publish` geht er sofort live.
+verlässt. Ohne `--publish` (sicherer Standard) klickt der Bot **nichts** — TikToks aktueller
+Upload-Flow hat keinen eigenen "Als Entwurf speichern"-Button mehr, nur "Veröffentlichen"
+(live) und "Verwerfen" (löscht den Upload). Stattdessen wird die Caption ausgefüllt, dann
+schließt der Browser, ohne zu klicken — TikTok behält einen so unangetasteten Upload
+automatisch als privaten Entwurf (verifiziert am 2026-08-18). Erst mit `--publish` klickt der
+Bot aktiv auf "Veröffentlichen" und der Clip geht sofort live.
 
 ## Wenn der Login fehlschlägt
 
