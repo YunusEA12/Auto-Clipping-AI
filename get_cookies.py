@@ -22,12 +22,12 @@ Usage:
 """
 
 import argparse
-import json
 import logging
 from typing import List, Optional
 
 import browser_cookie3
 
+import atomic_io
 from tiktok_uploader import COOKIES_PATH
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -125,7 +125,7 @@ def main():
         logger.error("%s", e)
         raise SystemExit(1)
 
-    COOKIES_PATH.write_text(json.dumps(cookies, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_io.atomic_write_json(COOKIES_PATH, cookies)
     logger.info("✅ ERFOLG: %d Cookie(s) gespeichert in %s", len(cookies), COOKIES_PATH)
 
 

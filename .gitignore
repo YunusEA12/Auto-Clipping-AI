@@ -20,4 +20,6 @@ tiktok_token.json
 tiktok_cookies.json
 cookies.json
 uploaded_clips/
+openai_call_budget.json
+selector_audit/
 .tiktok_browser_profile/

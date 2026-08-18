@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import List
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -27,6 +27,12 @@ def profile_path(profile_name: str) -> Path:
     return PROFILES_DIR / f"{profile_name}.json"
 
 
+class ProfileCorruptError(Exception):
+    """Raised when a profile file exists but its content is unusable (invalid JSON or fails
+    schema validation) — distinct from FileNotFoundError so callers can tell "missing" apart
+    from "present but broken"."""
+
+
 def load_profile(profile_name: str) -> StreamerProfile:
     path = profile_path(profile_name)
     if not path.exists():
@@ -34,10 +40,13 @@ def load_profile(profile_name: str) -> StreamerProfile:
             f"Streamer profile not found: {path}. Available profiles: {list_profiles()}"
         )
 
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        profile = StreamerProfile(**data)
+    except (json.JSONDecodeError, ValidationError) as e:
+        raise ProfileCorruptError(f"Streamer profile {path} is present but invalid: {e}") from e
 
-    profile = StreamerProfile(**data)
     logger.info(
         "Loaded streamer profile '%s' (energy_threshold=%d, %d trigger word(s))",
         profile.name, profile.energy_threshold, len(profile.trigger_words),
@@ -46,33 +55,40 @@ def load_profile(profile_name: str) -> StreamerProfile:
 
 
 def load_profile_or_fallback(profile_name: str, fallback: str = DEFAULT_FALLBACK_PROFILE) -> StreamerProfile:
-    """Like load_profile(), but never crashes the caller (e.g. stream_watcher.py's --profile
-    startup) over a missing/misspelled profile name: logs a clear warning and falls back to
-    `fallback` (default_streamer), or the first available profile if even that is missing.
-    Only raises if no profile at all can be found."""
+    """Like load_profile(), but never crashes the caller (e.g. auto_pilot.py's --profile
+    startup, called outside any try/except) over a missing/misspelled profile name OR a
+    profile file that exists but is malformed (invalid JSON, fails schema validation): logs a
+    clear warning and falls back to `fallback` (default_streamer), or the first available
+    profile if even that is missing/broken. Only raises if no usable profile at all can be
+    found — a genuine "nothing to fall back to" case, not a routine startup hiccup."""
     try:
         return load_profile(profile_name)
-    except FileNotFoundError:
-        available = list_profiles()
+    except (FileNotFoundError, ProfileCorruptError) as e:
+        available = [p for p in list_profiles() if p != profile_name]
         logger.warning(
-            "Streamer-Profil '%s' nicht gefunden. Verfügbare Profile: %s",
-            profile_name, available or "keine",
+            "Streamer-Profil '%s' nicht nutzbar (%s). Verfügbare Profile: %s",
+            profile_name, e, available or "keine",
         )
 
         if fallback != profile_name and fallback in available:
-            logger.warning("Verwende Fallback-Profil '%s'.", fallback)
-            return load_profile(fallback)
+            try:
+                logger.warning("Verwende Fallback-Profil '%s'.", fallback)
+                return load_profile(fallback)
+            except (FileNotFoundError, ProfileCorruptError) as fallback_error:
+                logger.warning("Fallback-Profil '%s' ebenfalls nicht nutzbar: %s", fallback, fallback_error)
+                available = [p for p in available if p != fallback]
 
-        if available:
-            next_best = available[0]
-            logger.warning(
-                "Fallback-Profil '%s' ebenfalls nicht verfügbar, verwende stattdessen '%s'.",
-                fallback, next_best,
-            )
-            return load_profile(next_best)
+        for candidate in available:
+            try:
+                logger.warning("Verwende stattdessen Profil '%s'.", candidate)
+                return load_profile(candidate)
+            except (FileNotFoundError, ProfileCorruptError) as candidate_error:
+                logger.warning("Profil '%s' ebenfalls nicht nutzbar: %s", candidate, candidate_error)
+                continue
 
         raise FileNotFoundError(
-            f"Kein Streamer-Profil verfügbar (weder '{profile_name}' noch ein Fallback) in {PROFILES_DIR}."
+            f"Kein nutzbares Streamer-Profil verfügbar (weder '{profile_name}' noch ein "
+            f"Fallback) in {PROFILES_DIR}."
         )
 
 

@@ -12,6 +12,8 @@ from typing import List
 
 from pydantic import BaseModel
 
+import atomic_io
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -51,8 +53,7 @@ def load_streamers(path: Path = STREAMERS_PATH) -> List[dict]:
 
 def save_streamers(entries: List[dict], path: Path = STREAMERS_PATH) -> None:
     validated = [StreamerEntry(**e).model_dump() for e in entries]
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(validated, f, ensure_ascii=False, indent=2)
+    atomic_io.atomic_write_json(path, validated)
     logger.info("Saved %d streamer(s) to %s", len(validated), path)
 
 

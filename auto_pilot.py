@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import analyze
+import atomic_io
 import ingest
 import process as process_module
 import profiles
@@ -87,7 +88,7 @@ def update_agent_state(**updates) -> dict:
     state["last_updated"] = datetime.now(timezone.utc).isoformat()
 
     try:
-        AGENT_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_io.atomic_write_json(AGENT_STATE_PATH, state)
     except OSError as e:
         logger.warning("Could not write %s: %s", AGENT_STATE_PATH, e)
 
@@ -108,8 +109,7 @@ def _trim_to_batch(clips_path: Path, batch_size: int) -> list:
     )
     batch = ranked[:batch_size]
 
-    with open(clips_path, "w", encoding="utf-8") as f:
-        json.dump({"clips": batch}, f, ensure_ascii=False, indent=2)
+    atomic_io.atomic_write_json(clips_path, {"clips": batch})
 
     return batch
 
@@ -153,8 +153,7 @@ def purge_low_scoring_clips(
             if output_path and output_path.exists():
                 survivors.append((clip, output_path, score))
 
-    with open(clips_path, "w", encoding="utf-8") as f:
-        json.dump({"clips": surviving_clips}, f, ensure_ascii=False, indent=2)
+    atomic_io.atomic_write_json(clips_path, {"clips": surviving_clips})
 
     return kept, deleted, survivors
 
@@ -200,9 +199,7 @@ def run_deployment_phase(survivors: List[Tuple[dict, Path, Optional[int]]], publ
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
                 "publish": publish,
             }
-            destination.with_suffix(".json").write_text(
-                json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            atomic_io.atomic_write_json(destination.with_suffix(".json"), metadata)
 
             logger.info("📦 '%s' hochgeladen und nach %s verschoben", title, destination)
         except OSError as e:

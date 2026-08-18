@@ -30,10 +30,11 @@ import logging
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import atomic_io
 import streamers as streamers_module
 import stream_watcher
 
@@ -43,6 +44,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_POLL_INTERVAL_SECONDS = 90
 LIVENESS_CHECK_TIMEOUT_SECONDS = 30
 STOP_GRACE_PERIOD_SECONDS = 15
+
+# --- Crash-loop backoff -----------------------------------------------------------------
+# A subprocess that exits within this many seconds of starting is considered a "crash", not
+# a normal end-of-stream stop — restarting it immediately, forever, is exactly the failure
+# mode that let a single malformed profiles/<name>.json burn OpenAI calls in an unbounded
+# hot loop. A process that ran longer than this is considered healthy and resets the count.
+CRASH_LOOP_WINDOW_SECONDS = 60
+CRASH_BACKOFF_BASE_SECONDS = 30
+CRASH_BACKOFF_MAX_SECONDS = 1800
+CRASH_BACKOFF_MAX_STREAK = 20  # caps 2**streak from overflowing before the max clamp applies
 
 # Telemetry file app.py's Fleet tab polls — analogous to auto_pilot.py's agent_state.json,
 # just one level up (which streamers are live/recording, not what one agent is doing).
@@ -113,9 +124,14 @@ def write_orchestrator_state(streamers_status: Dict[str, dict], poll_interval: i
         "streamers": streamers_status,
     }
     try:
-        ORCHESTRATOR_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_io.atomic_write_json(ORCHESTRATOR_STATE_PATH, state)
     except OSError as e:
         logger.warning("Could not write %s: %s", ORCHESTRATOR_STATE_PATH, e)
+
+
+def _crash_backoff_seconds(streak: int) -> float:
+    capped_streak = min(streak, CRASH_BACKOFF_MAX_STREAK)
+    return min(CRASH_BACKOFF_MAX_SECONDS, CRASH_BACKOFF_BASE_SECONDS * (2 ** capped_streak))
 
 
 def run_orchestrator(
@@ -123,11 +139,31 @@ def run_orchestrator(
     poll_interval: int = DEFAULT_POLL_INTERVAL_SECONDS,
     max_iterations: Optional[int] = None,
 ) -> None:
-    tracked: Dict[str, dict] = {}  # name -> {"process": Popen, "started_at": iso, "entry": dict}
+    tracked: Dict[str, dict] = {}  # name -> {"process": Popen, "started_at": datetime}
+    # Per-streamer crash-loop guard: a subprocess that exits within CRASH_LOOP_WINDOW_SECONDS
+    # of starting no longer gets restarted immediately, forever — it backs off exponentially
+    # instead, so one broken profile can't silently burn API calls in a hot loop.
+    crash_state: Dict[str, dict] = {}  # name -> {"streak": int, "retry_after": datetime}
+    status_snapshot: Dict[str, dict] = {}
 
     logger.info(
         "🛰️ Orchestrator gestartet (streamers=%s, poll_interval=%ds)", streamers_path, poll_interval
     )
+
+    def snapshot_entry(entry: dict, live: bool) -> dict:
+        tracked_info = tracked.get(entry["name"])
+        streak_info = crash_state.get(entry["name"], {})
+        return {
+            "live": live,
+            "recording": tracked_info is not None,
+            "pid": tracked_info["process"].pid if tracked_info else None,
+            "started_at": tracked_info["started_at"].isoformat() if tracked_info else None,
+            "url": entry["url"],
+            "profile": entry.get("profile", ""),
+            "auto_upload": bool(entry.get("auto_upload", False)),
+            "crash_streak": streak_info.get("streak", 0),
+            "backoff_until": streak_info["retry_after"].isoformat() if streak_info.get("retry_after") else None,
+        }
 
     iteration = 0
     try:
@@ -147,8 +183,10 @@ def run_orchestrator(
                     except Exception as e:
                         logger.error("Fehler beim Beenden von '%s': %s", name, e)
                     del tracked[name]
+                    crash_state.pop(name, None)
+                    status_snapshot.pop(name, None)
+                    write_orchestrator_state(status_snapshot, poll_interval)
 
-            status_snapshot: Dict[str, dict] = {}
             for entry in entries:
                 name = entry["name"]
                 try:
@@ -159,39 +197,62 @@ def run_orchestrator(
 
                 current = tracked.get(name)
                 if current is not None and current["process"].poll() is not None:
-                    logger.warning(
-                        "auto_pilot.py für '%s' ist unerwartet beendet (exit=%s)",
-                        name, current["process"].returncode,
-                    )
+                    exit_code = current["process"].returncode
+                    ran_for = (datetime.now(timezone.utc) - current["started_at"]).total_seconds()
                     del tracked[name]
+
+                    if ran_for < CRASH_LOOP_WINDOW_SECONDS:
+                        streak = crash_state.get(name, {}).get("streak", 0) + 1
+                        backoff = _crash_backoff_seconds(streak)
+                        retry_after = datetime.now(timezone.utc) + timedelta(seconds=backoff)
+                        crash_state[name] = {"streak": streak, "retry_after": retry_after}
+                        logger.warning(
+                            "auto_pilot.py für '%s' ist nach nur %.0fs abgestürzt (exit=%s) — "
+                            "Absturz #%d in Folge, warte %.0fs vor dem nächsten Neustart.",
+                            name, ran_for, exit_code, streak, backoff,
+                        )
+                    else:
+                        crash_state.pop(name, None)
+                        logger.warning(
+                            "auto_pilot.py für '%s' ist unerwartet beendet (exit=%s, lief %.0fs)",
+                            name, exit_code, ran_for,
+                        )
                     current = None
 
-                if live and current is None:
+                streak_info = crash_state.get(name)
+                in_backoff = bool(streak_info) and datetime.now(timezone.utc) < streak_info["retry_after"]
+
+                if live and current is None and not in_backoff:
                     try:
                         process = start_recording(entry)
                         tracked[name] = {
                             "process": process,
-                            "started_at": datetime.now(timezone.utc).isoformat(),
+                            "started_at": datetime.now(timezone.utc),
                         }
+                        # Write immediately (not batched to the end of the poll cycle) so the
+                        # window in which this child is running but untracked on disk is
+                        # milliseconds, not up to a full poll_interval — a restart of this
+                        # orchestrator inside that window is what previously could spawn a
+                        # second, duplicate recorder for the same streamer.
+                        status_snapshot[name] = snapshot_entry(entry, live)
+                        write_orchestrator_state(status_snapshot, poll_interval)
                     except Exception as e:
                         logger.error("Konnte auto_pilot.py für '%s' nicht starten: %s", name, e)
+                elif live and current is None and in_backoff:
+                    logger.info(
+                        "'%s' ist live, aber im Crash-Backoff bis %s — warte.",
+                        name, streak_info["retry_after"].isoformat(),
+                    )
                 elif not live and current is not None:
                     try:
                         stop_recording(name, current["process"])
                     except Exception as e:
                         logger.error("Konnte auto_pilot.py für '%s' nicht sauber beenden: %s", name, e)
                     tracked.pop(name, None)
+                    status_snapshot[name] = snapshot_entry(entry, live)
+                    write_orchestrator_state(status_snapshot, poll_interval)
 
-                tracked_info = tracked.get(name)
-                status_snapshot[name] = {
-                    "live": live,
-                    "recording": tracked_info is not None,
-                    "pid": tracked_info["process"].pid if tracked_info else None,
-                    "started_at": tracked_info["started_at"] if tracked_info else None,
-                    "url": entry["url"],
-                    "profile": entry.get("profile", ""),
-                    "auto_upload": bool(entry.get("auto_upload", False)),
-                }
+                status_snapshot[name] = snapshot_entry(entry, live)
 
             write_orchestrator_state(status_snapshot, poll_interval)
 

@@ -28,6 +28,7 @@ import argparse
 import base64
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -35,7 +36,11 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
+from fractions import Fraction
+
 import analyze
+import atomic_io
+import openai_utils
 import process as process_module
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -54,7 +59,28 @@ MAX_COMPLETION_TOKENS = 4096
 # clip is exceptional enough to generalize into a standing rule).
 POSITIVE_RULE_THRESHOLD = 7
 
-CRITIC_SYSTEM_PROMPT = """You are a ruthless TikTok/Shorts content critic reviewing clips
+_FRACTION_NAMES = {
+    Fraction(1, 2): "half", Fraction(1, 3): "third", Fraction(2, 3): "two-thirds",
+    Fraction(1, 4): "quarter", Fraction(3, 4): "three-quarters",
+}
+
+
+def _describe_fraction(fraction: Fraction) -> str:
+    return _FRACTION_NAMES.get(fraction, f"{float(fraction) * 100:.0f}%")
+
+
+def _describe_split_ratio() -> Tuple[str, str]:
+    """Describes process_module.SPLIT_SCREEN_FACE_RATIO in prose, generated from the actual
+    constant instead of restating it by hand — previously "top third / bottom two-thirds"
+    was hardcoded English prose that happened to match SPLIT_SCREEN_FACE_RATIO = 1/3 by
+    convention only, with nothing tying the two together if the ratio was ever re-tuned."""
+    face_fraction = Fraction(process_module.SPLIT_SCREEN_FACE_RATIO).limit_denominator(12)
+    return _describe_fraction(face_fraction), _describe_fraction(1 - face_fraction)
+
+
+_FACE_ZONE_DESC, _GAME_ZONE_DESC = _describe_split_ratio()
+
+CRITIC_SYSTEM_PROMPT = f"""You are a ruthless TikTok/Shorts content critic reviewing clips
 that an upstream AI already selected from a longer video. For each clip you're given its
 title, hook explanation, the actual transcript text spoken during its time range, any human
 feedback already recorded about it, and — when available — 3 preview screenshots (near-
@@ -69,10 +95,10 @@ Evaluate TWO independent dimensions:
    an actual hook, or is it boring/rambling without a payoff?
 
 2. VISUAL COMPOSITION (only when screenshots are provided): Is the split-screen layout
-   correct — facecam centered in the top third, gameplay clearly visible filling the bottom
-   two-thirds? Are there visual glitches, duplicated footage, unexpected black bars, a
-   misplaced or cropped-wrong facecam, or anything else visually broken? Judge purely from
-   what's visible in the screenshots, not from the transcript.
+   correct — facecam centered in the top {_FACE_ZONE_DESC}, gameplay clearly visible filling
+   the bottom {_GAME_ZONE_DESC}? Are there visual glitches, duplicated footage, unexpected
+   black bars, a misplaced or cropped-wrong facecam, or anything else visually broken? Judge
+   purely from what's visible in the screenshots, not from the transcript.
 
 Score each clip's overall reward_score from -10 to +10, weighing both dimensions:
 - Negative scores (-10 to -1): bad on either dimension — boring/flat with no payoff,
@@ -224,24 +250,40 @@ def extract_frames_for_clips(clips: List[dict], rendered: Optional[Dict[str, Pat
     """Best-effort frame extraction for every clip that has a known rendered .mp4 path.
     `rendered` (clip_title -> output_path) is normally supplied by auto_pilot.py, which
     just rendered these clips; when called standalone (train_loop.py's CLI), falls back to
-    matching output/clip_<index>_*.mp4 by position within the clips list. Returns {} — not
-    an exception — if nothing could be extracted, so the caller can degrade to text-only."""
-    frames_by_title: Dict[str, List[Path]] = {}
+    matching output/clip_<index>_*.mp4 by position within the clips list (via
+    process_module.clip_glob_pattern() — the one shared definition of that filename format,
+    also used by process.render_clip() to write it). Returns {} — not an exception — if
+    nothing could be extracted, so the caller can degrade to text-only."""
+    resolved_paths: Dict[str, Path] = {}
 
     for i, clip in enumerate(clips, start=1):
         title = clip.get("title", "")
         output_path = (rendered or {}).get(title)
 
         if output_path is None:
-            candidates = sorted(process_module.OUTPUT_DIR.glob(f"clip_{i}_*.mp4"))
+            candidates = sorted(process_module.OUTPUT_DIR.glob(process_module.clip_glob_pattern(i)))
             output_path = candidates[0] if candidates else None
 
-        if output_path is None or not Path(output_path).exists():
-            continue
+        if output_path is not None and Path(output_path).exists():
+            resolved_paths[title] = Path(output_path)
 
-        frames = process_module.extract_preview_frames(Path(output_path))
-        if frames:
-            frames_by_title[title] = frames
+    # Each clip's 3-frame extraction is independent I/O-bound ffmpeg work against its own
+    # rendered file — running the whole batch concurrently (not just the 3 frames within one
+    # clip, handled inside process.extract_preview_frames itself) cuts wall-clock time
+    # roughly in proportion to batch size instead of paying for every clip serially.
+    frames_by_title: Dict[str, List[Path]] = {}
+    if not resolved_paths:
+        return frames_by_title
+
+    with ThreadPoolExecutor(max_workers=min(8, len(resolved_paths))) as pool:
+        futures = {
+            title: pool.submit(process_module.extract_preview_frames, path)
+            for title, path in resolved_paths.items()
+        }
+        for title, future in futures.items():
+            frames = future.result()
+            if frames:
+                frames_by_title[title] = frames
 
     return frames_by_title
 
@@ -284,14 +326,17 @@ def _call_critic(content: List[dict], model: str) -> CriticBatch:
     if viral_section:
         content = content + [{"type": "text", "text": viral_section}]
 
-    completion = client.chat.completions.parse(
-        model=model,
-        messages=[
-            {"role": "system", "content": CRITIC_SYSTEM_PROMPT},
-            {"role": "user", "content": content},
-        ],
-        response_format=CriticBatch,
-        max_completion_tokens=MAX_COMPLETION_TOKENS,
+    completion = openai_utils.call_with_retry(
+        lambda: client.chat.completions.parse(
+            model=model,
+            messages=[
+                {"role": "system", "content": CRITIC_SYSTEM_PROMPT},
+                {"role": "user", "content": content},
+            ],
+            response_format=CriticBatch,
+            max_completion_tokens=MAX_COMPLETION_TOKENS,
+        ),
+        description=f"train_loop._call_critic({model})",
     )
 
     choice = completion.choices[0]
@@ -401,7 +446,7 @@ def save_guidelines(categories: Dict[str, List[str]]) -> None:
         lines += [f"- {rule}" for rule in rules] if rules else ["- (noch keine)"]
         lines.append("")
 
-    analyze.AI_GUIDELINES_PATH.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    atomic_io.atomic_write_text(analyze.AI_GUIDELINES_PATH, "\n".join(lines).rstrip() + "\n")
     logger.info(
         "Saved guidelines to %s: %s",
         analyze.AI_GUIDELINES_PATH, {key: len(categories.get(key) or []) for key in CATEGORY_ORDER},

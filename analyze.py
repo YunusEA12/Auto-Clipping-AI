@@ -12,6 +12,9 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
+import atomic_io
+import openai_utils
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -286,8 +289,7 @@ def save_feedback(clip_title: str, feedback_text: str) -> None:
 
     entries.append({"clip_title": clip_title, "feedback": feedback_text})
 
-    with open(FEEDBACK_PATH, "w", encoding="utf-8") as f:
-        json.dump(entries, f, ensure_ascii=False, indent=2)
+    atomic_io.atomic_write_json(FEEDBACK_PATH, entries)
 
     logger.info("Saved feedback for clip '%s'", clip_title)
 
@@ -440,14 +442,17 @@ def select_clips(
 
     logger.info("Sending transcript to %s for scene selection", model)
     try:
-        completion = client.chat.completions.parse(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Transcript:\n{transcript_text}{energy_section}"},
-            ],
-            response_format=ClipSelection,
-            max_completion_tokens=MAX_COMPLETION_TOKENS,
+        completion = openai_utils.call_with_retry(
+            lambda: client.chat.completions.parse(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Transcript:\n{transcript_text}{energy_section}"},
+                ],
+                response_format=ClipSelection,
+                max_completion_tokens=MAX_COMPLETION_TOKENS,
+            ),
+            description="analyze.select_clips",
         )
     except Exception as e:
         logger.error("LLM API call failed: %s", e)
@@ -496,9 +501,37 @@ def select_clips(
             for clip in valid_clips
         ]
 
+    valid_clips = ensure_unique_titles(valid_clips)
+
     # No raise here on empty: the caller (analyze()) has the raw transcript and can fall
     # back to the longest available segment instead of failing the whole pipeline.
     return ClipSelection(clips=valid_clips)
+
+
+def ensure_unique_titles(clips: List[Clip]) -> List[Clip]:
+    """clip["title"] is the join key used everywhere downstream (rendered filenames, the
+    critic's clip_title verdicts, auto_pilot.py's purge/upload lookups) — nowhere enforced
+    unique before this. Two clips sharing a title used to silently collide: the second
+    clip's rendered file/verdict would overwrite or orphan the first's in every dict keyed
+    by title. Renaming the collision here, once, at the single point every clip list is
+    produced, makes every downstream title-keyed lookup safe by construction."""
+    seen: dict = {}
+    result = []
+    for clip in clips:
+        title = clip.title
+        if title not in seen:
+            seen[title] = 1
+            result.append(clip)
+            continue
+        seen[title] += 1
+        new_title = f"{title} ({seen[title]})"
+        while new_title in seen:
+            seen[title] += 1
+            new_title = f"{title} ({seen[title]})"
+        seen[new_title] = 1
+        logger.warning("Duplicate clip title '%s' renamed to '%s' to keep it a unique join key", title, new_title)
+        result.append(clip.model_copy(update={"title": new_title}))
+    return result
 
 
 def find_longest_segment_fallback(transcript: dict) -> "ClipSelection":
@@ -597,8 +630,7 @@ def analyze(
 
     output_path = clips_path_for(transcription_path)
     TEMP_DIR.mkdir(exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(selection.model_dump(), f, ensure_ascii=False, indent=2)
+    atomic_io.atomic_write_json(output_path, selection.model_dump())
 
     logger.info("Analysis complete: %s (%d clips)", output_path, len(selection.clips))
     return output_path

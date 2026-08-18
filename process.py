@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
@@ -77,6 +78,18 @@ def format_ass_timestamp(seconds: float) -> str:
 def slugify(text: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_")
     return slug or "clip"
+
+
+# Single source of truth for the rendered-clip filename format — render_clip() below writes
+# it, and train_loop.py's extract_frames_for_clips() re-derives it via clip_glob_pattern()
+# when no explicit rendered-path dict was handed to it (its standalone-CLI code path). The
+# two used to be independently hardcoded in both files, kept in sync only by convention.
+def clip_output_filename(index: int, title: str) -> str:
+    return f"clip_{index}_{slugify(title)}.mp4"
+
+
+def clip_glob_pattern(index: int) -> str:
+    return f"clip_{index}_*.mp4"
 
 
 def load_json(path: Path) -> dict:
@@ -230,24 +243,37 @@ def extract_preview_frames(video_path: Path, frames_dir: Path = TEMP_DIR) -> Lis
         return []
 
     frames_dir.mkdir(exist_ok=True)
-    frame_paths = []
-    for i, fraction in enumerate(PREVIEW_FRAME_FRACTIONS):
+
+    def _extract_one(i: int, fraction: float) -> Optional[Path]:
         timestamp = max(0.0, duration * fraction)
         frame_path = frames_dir / f"{video_path.stem}_frame{i}.jpg"
         cmd = [
             "ffmpeg", "-y", "-ss", str(timestamp), "-i", str(video_path),
             "-frames:v", "1", "-q:v", "2", str(frame_path),
         ]
-        result = _run_ffmpeg(cmd)
+        try:
+            result = _run_ffmpeg(cmd, timeout=FFMPEG_FRAME_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "Preview frame extraction at %.2fs from %s timed out after %ds",
+                timestamp, video_path, FFMPEG_FRAME_TIMEOUT_SECONDS,
+            )
+            return None
         if result.returncode != 0 or not frame_path.exists():
             logger.warning(
                 "Could not extract preview frame at %.2fs from %s: %s",
                 timestamp, video_path, result.stderr[-500:] if result.stderr else "",
             )
-            continue
-        frame_paths.append(frame_path)
+            return None
+        return frame_path
 
-    return frame_paths
+    # The 3 frame grabs read the same source video but write distinct output files and share
+    # no mutable state — an independent, embarrassingly-parallel ffmpeg subprocess spawn each,
+    # so running them concurrently is a safe, meaningful cut in wall-clock time per clip.
+    with ThreadPoolExecutor(max_workers=len(PREVIEW_FRAME_FRACTIONS)) as pool:
+        results = list(pool.map(lambda args: _extract_one(*args), enumerate(PREVIEW_FRAME_FRACTIONS)))
+
+    return [p for p in results if p is not None]
 
 
 def escape_subtitles_path(path: Path) -> str:
@@ -354,11 +380,20 @@ def _build_render_cmd(source_video: Path, start: float, end: float, filter_compl
     ]
 
 
-def _run_ffmpeg(cmd: list) -> subprocess.CompletedProcess:
+# A full clip render (decode + filter graph + encode) legitimately needs minutes; a single
+# still-frame grab should take well under a second. These used to share one 600s timeout,
+# so a hung ffmpeg during a trivial preview-frame extraction could stall an entire cycle for
+# up to 30 minutes (3 frames x 10 minutes each) before the vision critic even got a chance
+# to degrade to text-only.
+FFMPEG_RENDER_TIMEOUT_SECONDS = 600
+FFMPEG_FRAME_TIMEOUT_SECONDS = 30
+
+
+def _run_ffmpeg(cmd: list, timeout: int = FFMPEG_RENDER_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
     # encoding="utf-8" is required here: without it, subprocess.run's text mode falls back
     # to the system locale (cp1252/"charmap" on German Windows), which crashes with
     # UnicodeDecodeError the moment ffmpeg's UTF-8 log output contains a German umlaut.
-    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
 def render_clip(
@@ -374,8 +409,7 @@ def render_clip(
 ) -> Path:
     start = clip["start_time"]
     end = clip["end_time"]
-    title_slug = slugify(clip["title"])
-    output_path = OUTPUT_DIR / f"clip_{index}_{title_slug}.mp4"
+    output_path = OUTPUT_DIR / clip_output_filename(index, clip["title"])
 
     filter_complex = build_filter_complex(layout, ass_path, output_w, output_h, facecam_box, gameplay_box)
 

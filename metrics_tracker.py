@@ -34,6 +34,7 @@ from typing import Dict, List, Optional
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
+import atomic_io
 import tiktok_uploader
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -98,8 +99,14 @@ def _extract_count(text: str, patterns: List[str]) -> Optional[int]:
     return None
 
 
-VIEW_COUNT_PATTERNS = [r"([\d.,]+[KM]?)\s*views?", r"👁\D*([\d.,]+[KM]?)"]
-LIKE_COUNT_PATTERNS = [r"([\d.,]+[KM]?)\s*likes?", r"❤\D*([\d.,]+[KM]?)"]
+# English + German (TikTok Studio locale depends on the account's language setting, not the
+# machine running this script) plus emoji fallbacks that work regardless of locale.
+VIEW_COUNT_PATTERNS = [
+    r"([\d.,]+[KM]?)\s*views?", r"([\d.,]+[KM]?)\s*Aufrufe", r"👁\D*([\d.,]+[KM]?)",
+]
+LIKE_COUNT_PATTERNS = [
+    r"([\d.,]+[KM]?)\s*likes?", r"([\d.,]+[KM]?)\s*(?:Gefällt mir|Likes)", r"❤\D*([\d.,]+[KM]?)",
+]
 
 
 def fetch_content_list(headless: bool = True) -> List[dict]:
@@ -183,8 +190,7 @@ def load_viral_memory(path: Path = VIRAL_MEMORY_PATH) -> Dict[str, dict]:
 
 
 def save_viral_memory(memory: Dict[str, dict], path: Path = VIRAL_MEMORY_PATH) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(memory, f, ensure_ascii=False, indent=2)
+    atomic_io.atomic_write_json(path, memory)
     logger.info("Saved %d entrie(s) to %s", len(memory), path)
 
 
