@@ -1,0 +1,74 @@
+"""dashboard_api.py is the interface boundary between app.py and the pipeline modules
+(M-06 in the audit) — these tests confirm every function app.py actually calls exists with
+the expected signature and correctly delegates to the underlying module, using the same
+monkeypatch-the-real-module isolation pattern as the rest of this suite (never touching real
+project state files)."""
+
+import dashboard_api
+import streamers as streamers_module
+import profiles
+
+
+def test_paths_are_reexported_from_the_real_modules():
+    import analyze, auto_pilot, orchestrator, train_loop
+    assert dashboard_api.AGENT_STATE_PATH == auto_pilot.AGENT_STATE_PATH
+    assert dashboard_api.AI_GUIDELINES_PATH == analyze.AI_GUIDELINES_PATH
+    assert dashboard_api.ORCHESTRATOR_STATE_PATH == orchestrator.ORCHESTRATOR_STATE_PATH
+    assert dashboard_api.VIRAL_MEMORY_PATH == train_loop.VIRAL_MEMORY_PATH
+
+
+def test_layout_constants_match_process_module():
+    import process
+    assert dashboard_api.LAYOUT_AUTO == process.LAYOUT_AUTO
+    assert dashboard_api.LAYOUT_SPLIT_SCREEN == process.LAYOUT_SPLIT_SCREEN
+    assert dashboard_api.LAYOUT_BLUR_BACKGROUND == process.LAYOUT_BLUR_BACKGROUND
+    assert dashboard_api.HIGHLIGHT_COLORS == process.HIGHLIGHT_COLORS
+
+
+def test_streamer_crud_roundtrip_through_the_facade(tmp_path, monkeypatch):
+    path = tmp_path / "streamers.json"
+    monkeypatch.setattr(streamers_module, "STREAMERS_PATH", path)
+
+    dashboard_api.add_streamer("elias", "https://twitch.tv/elias", profile="p1", auto_upload=True)
+    entries = dashboard_api.load_streamers()
+    assert [e["name"] for e in entries] == ["elias"]
+    assert entries[0]["auto_upload"] is True
+
+    assert dashboard_api.remove_streamer("elias") is True
+    assert dashboard_api.load_streamers() == []
+
+
+def test_load_profile_returns_a_plain_dict_not_a_pydantic_model(tmp_path, monkeypatch):
+    monkeypatch.setattr(profiles, "PROFILES_DIR", tmp_path)
+    (tmp_path / "test_profile.json").write_text('{"name": "test_profile"}', encoding="utf-8")
+
+    result = dashboard_api.load_profile("test_profile")
+    assert isinstance(result, dict)
+    assert result["name"] == "test_profile"
+
+
+def test_list_profiles_delegates_to_profiles_module(tmp_path, monkeypatch):
+    monkeypatch.setattr(profiles, "PROFILES_DIR", tmp_path)
+    (tmp_path / "a.json").write_text('{"name": "a"}', encoding="utf-8")
+    (tmp_path / "b.json").write_text('{"name": "b"}', encoding="utf-8")
+    assert dashboard_api.list_profiles() == ["a", "b"]
+
+
+def test_parse_guidelines_file_delegates_correctly():
+    import train_loop
+    content = train_loop.CATEGORY_HEADERS["content_positive"] + "\n- some rule\n"
+    result = dashboard_api.parse_guidelines_file(content)
+    assert result["content_positive"] == ["some rule"]
+
+
+def test_tiktok_cookies_status_returns_a_tuple(tmp_path, monkeypatch):
+    import tiktok_uploader
+    monkeypatch.setattr(tiktok_uploader, "COOKIES_PATH", tmp_path / "cookies.json")
+    ready, detail = dashboard_api.tiktok_cookies_status()
+    assert ready is False
+    assert isinstance(detail, str)
+
+
+def test_default_hashtags_matches_tiktok_uploader():
+    import tiktok_uploader
+    assert dashboard_api.DEFAULT_HASHTAGS == tiktok_uploader.DEFAULT_HASHTAGS

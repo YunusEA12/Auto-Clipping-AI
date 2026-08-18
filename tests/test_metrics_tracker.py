@@ -4,6 +4,34 @@ from datetime import datetime, timedelta, timezone
 import metrics_tracker
 
 
+# --- default-path monkeypatch actually takes effect (late-binding regression guard) -------
+# A plain `path: Path = VIRAL_MEMORY_PATH` default captures the value once at function
+# definition time — monkeypatching metrics_tracker.VIRAL_MEMORY_PATH afterward would
+# silently have no effect, and the function would keep writing to the real project file.
+# This bit for real once already this session (streamers.py) before being caught and fixed.
+
+def test_load_viral_memory_respects_monkeypatched_default_path(tmp_path, monkeypatch):
+    path = tmp_path / "viral_memory.json"
+    path.write_text('{"a": {"views": 1}}', encoding="utf-8")
+    monkeypatch.setattr(metrics_tracker, "VIRAL_MEMORY_PATH", path)
+    assert metrics_tracker.load_viral_memory() == {"a": {"views": 1}}
+
+
+def test_save_viral_memory_respects_monkeypatched_default_path(tmp_path, monkeypatch):
+    path = tmp_path / "viral_memory.json"
+    monkeypatch.setattr(metrics_tracker, "VIRAL_MEMORY_PATH", path)
+    metrics_tracker.save_viral_memory({"a": {"views": 1}})
+    assert json.loads(path.read_text(encoding="utf-8")) == {"a": {"views": 1}}
+
+
+def test_scrape_health_respects_monkeypatched_default_path(tmp_path, monkeypatch):
+    path = tmp_path / "health.json"
+    monkeypatch.setattr(metrics_tracker, "SCRAPE_HEALTH_PATH", path)
+    metrics_tracker._record_scrape_result(success=False)
+    assert path.exists()
+    assert metrics_tracker.load_scrape_health()["consecutive_failures"] == 1
+
+
 # --- scrape health tracking (M-01) -----------------------------------------------------
 
 def test_record_success_resets_streak(tmp_path):

@@ -29,7 +29,14 @@ class StreamerEntry(BaseModel):
     auto_upload: bool = False
 
 
-def load_streamers(path: Path = STREAMERS_PATH) -> List[dict]:
+def load_streamers(path: Path = None) -> List[dict]:
+    # `path: Path = None`, resolved to STREAMERS_PATH dynamically below, not bound as a
+    # default-argument value: a plain `path: Path = STREAMERS_PATH` default captures the
+    # value once at function-definition time, so monkeypatching streamers.STREAMERS_PATH in
+    # a test (or reassigning it anywhere at runtime) would silently have no effect on calls
+    # that rely on the default — every function below in this file follows the same pattern.
+    if path is None:
+        path = STREAMERS_PATH
     if not path.exists():
         return []
 
@@ -53,15 +60,19 @@ def load_streamers(path: Path = STREAMERS_PATH) -> List[dict]:
     return entries
 
 
-def save_streamers(entries: List[dict], path: Path = STREAMERS_PATH) -> None:
+def save_streamers(entries: List[dict], path: Path = None) -> None:
+    if path is None:
+        path = STREAMERS_PATH
     validated = [StreamerEntry(**e).model_dump() for e in entries]
     atomic_io.atomic_write_json(path, validated)
     logger.info("Saved %d streamer(s) to %s", len(validated), path)
 
 
 def add_streamer(
-    name: str, url: str, profile: str = "", auto_upload: bool = False, path: Path = STREAMERS_PATH
+    name: str, url: str, profile: str = "", auto_upload: bool = False, path: Path = None
 ) -> None:
+    if path is None:
+        path = STREAMERS_PATH
     entries = load_streamers(path)
     if any(e["name"] == name for e in entries):
         raise ValueError(f"Streamer '{name}' existiert bereits.")
@@ -70,8 +81,10 @@ def add_streamer(
     save_streamers(entries, path)
 
 
-def remove_streamer(name: str, path: Path = STREAMERS_PATH) -> bool:
+def remove_streamer(name: str, path: Path = None) -> bool:
     """Returns True if a streamer was actually removed, False if `name` wasn't found."""
+    if path is None:
+        path = STREAMERS_PATH
     entries = load_streamers(path)
     remaining = [e for e in entries if e["name"] != name]
     if len(remaining) == len(entries):

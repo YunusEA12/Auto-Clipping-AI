@@ -137,10 +137,12 @@ def _crash_backoff_seconds(streak: int) -> float:
 
 
 def run_orchestrator(
-    streamers_path: Path = streamers_module.STREAMERS_PATH,
+    streamers_path: Path = None,
     poll_interval: int = DEFAULT_POLL_INTERVAL_SECONDS,
     max_iterations: Optional[int] = None,
 ) -> None:
+    if streamers_path is None:
+        streamers_path = streamers_module.STREAMERS_PATH
     tracked: Dict[str, dict] = {}  # name -> {"process": Popen, "started_at": datetime}
     # Per-streamer crash-loop guard: a subprocess that exits within CRASH_LOOP_WINDOW_SECONDS
     # of starting no longer gets restarted immediately, forever — it backs off exponentially

@@ -597,11 +597,13 @@ def find_audio_path() -> Optional[Path]:
 
 
 def analyze(
-    transcription_path: Path = TRANSCRIPTION_PATH,
+    transcription_path: Path = None,
     model: str = MODEL,
     audio_path: Optional[Path] = None,
     profile: Optional[dict] = None,
 ) -> Path:
+    if transcription_path is None:
+        transcription_path = TRANSCRIPTION_PATH
     load_dotenv()
 
     transcript = load_transcript(transcription_path)

@@ -250,7 +250,13 @@ def _match_uploaded_to_content_rows(uploaded: List[dict], content_rows: List[dic
     return matches
 
 
-def load_viral_memory(path: Path = VIRAL_MEMORY_PATH) -> Dict[str, dict]:
+def load_viral_memory(path: Path = None) -> Dict[str, dict]:
+    # path=None, resolved dynamically below rather than bound as a default-argument value —
+    # see streamers.py's load_streamers() for why (a bound default silently ignores a later
+    # monkeypatch/reassignment of the module-level constant). Same pattern in every
+    # path-defaulting function in this file.
+    if path is None:
+        path = VIRAL_MEMORY_PATH
     if not path.exists():
         return {}
     try:
@@ -262,7 +268,9 @@ def load_viral_memory(path: Path = VIRAL_MEMORY_PATH) -> Dict[str, dict]:
     return data if isinstance(data, dict) else {}
 
 
-def save_viral_memory(memory: Dict[str, dict], path: Path = VIRAL_MEMORY_PATH) -> None:
+def save_viral_memory(memory: Dict[str, dict], path: Path = None) -> None:
+    if path is None:
+        path = VIRAL_MEMORY_PATH
     atomic_io.atomic_write_json(path, memory)
     logger.info("Saved %d entrie(s) to %s", len(memory), path)
 
@@ -289,7 +297,9 @@ def prune_viral_memory(memory: Dict[str, dict], max_age_days: int = VIRAL_MEMORY
     return kept
 
 
-def load_scrape_health(path: Path = SCRAPE_HEALTH_PATH) -> dict:
+def load_scrape_health(path: Path = None) -> dict:
+    if path is None:
+        path = SCRAPE_HEALTH_PATH
     if not path.exists():
         return {"consecutive_failures": 0, "last_success": None, "last_failure": None}
     try:
@@ -298,11 +308,13 @@ def load_scrape_health(path: Path = SCRAPE_HEALTH_PATH) -> dict:
         return {"consecutive_failures": 0, "last_success": None, "last_failure": None}
 
 
-def _record_scrape_result(success: bool, path: Path = SCRAPE_HEALTH_PATH) -> dict:
+def _record_scrape_result(success: bool, path: Path = None) -> dict:
     """Persists whether fetch_content_list() actually returned anything this cycle, and
     returns the updated health record. A run of consecutive failures — as opposed to one
     isolated hiccup — is what actually indicates the scraper is broken (selector drift, a
     TikTok layout change, an expired session), not routine flakiness."""
+    if path is None:
+        path = SCRAPE_HEALTH_PATH
     health = load_scrape_health(path)
     now = datetime.now(timezone.utc).isoformat()
     if success:

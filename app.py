@@ -21,18 +21,7 @@ from pathlib import Path
 
 import streamlit as st
 
-import analyze
-import auto_pilot
-import ingest
-import notify
-import orchestrator
-import process as process_module
-import profiles
-import streamers as streamers_module
-import train_loop
-import transcribe
-import upload as upload_module
-import tiktok_uploader
+import dashboard_api
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -49,10 +38,10 @@ ENV_PATH = Path(".env")
 CLIENT_SECRET_PATH = Path("client_secret.json")
 TEMP_DIR = Path("temp")
 OUTPUT_DIR = Path("output")
-AGENT_STATE_PATH = auto_pilot.AGENT_STATE_PATH
-AI_GUIDELINES_PATH = analyze.AI_GUIDELINES_PATH
-ORCHESTRATOR_STATE_PATH = orchestrator.ORCHESTRATOR_STATE_PATH
-VIRAL_MEMORY_PATH = train_loop.VIRAL_MEMORY_PATH
+AGENT_STATE_PATH = dashboard_api.AGENT_STATE_PATH
+AI_GUIDELINES_PATH = dashboard_api.AI_GUIDELINES_PATH
+ORCHESTRATOR_STATE_PATH = dashboard_api.ORCHESTRATOR_STATE_PATH
+VIRAL_MEMORY_PATH = dashboard_api.VIRAL_MEMORY_PATH
 
 # If the agent's/orchestrator's last telemetry update is older than this, treat it as
 # offline/stalled rather than "just between phases" — generous enough to cover a slow
@@ -65,11 +54,11 @@ FORMAT_OPTIONS = {
     "16:9 (Landscape)": "16:9",
 }
 LAYOUT_OPTIONS = {
-    "Auto (KI entscheidet)": process_module.LAYOUT_AUTO,
-    "Split-Screen": process_module.LAYOUT_SPLIT_SCREEN,
-    "Blur-Background": process_module.LAYOUT_BLUR_BACKGROUND,
+    "Auto (KI entscheidet)": dashboard_api.LAYOUT_AUTO,
+    "Split-Screen": dashboard_api.LAYOUT_SPLIT_SCREEN,
+    "Blur-Background": dashboard_api.LAYOUT_BLUR_BACKGROUND,
 }
-HIGHLIGHT_OPTIONS = process_module.HIGHLIGHT_COLORS
+HIGHLIGHT_OPTIONS = dashboard_api.HIGHLIGHT_COLORS
 NO_PROFILE_LABEL = "Kein Profil (Standard)"
 
 st.set_page_config(page_title="Auto-Clipping AI — Agent Control Center", page_icon="🛰️", layout="wide")
@@ -180,7 +169,7 @@ with st.sidebar:
     else:
         st.error("❌ Fehlt — client_secret.json (YouTube)")
 
-    tiktok_ready, tiktok_detail = tiktok_uploader.cookies_status()
+    tiktok_ready, tiktok_detail = dashboard_api.tiktok_cookies_status()
     if tiktok_ready:
         st.success("🟢 TikTok verknüpft (Bereit für Upload)")
     else:
@@ -189,12 +178,12 @@ with st.sidebar:
 
     st.divider()
     st.header("🕴️ Streamer-Mitarbeiter")
-    profile_names = profiles.list_profiles()
+    profile_names = dashboard_api.list_profiles()
     profile_labels = [NO_PROFILE_LABEL] + profile_names
     selected_profile_label = st.selectbox("Profil", profile_labels)
     selected_profile = None
     if selected_profile_label != NO_PROFILE_LABEL:
-        selected_profile = profiles.load_profile(selected_profile_label).model_dump()
+        selected_profile = dashboard_api.load_profile(selected_profile_label)
         st.caption(f"Trigger-Wörter: {', '.join(selected_profile['trigger_words']) or '–'}")
         if selected_profile["context_prompt"]:
             st.caption(f"Kontext: {selected_profile['context_prompt']}")
@@ -249,7 +238,7 @@ with tab_radar:
 
     st.divider()
     st.markdown("#### 🔗 TikTok Upload Status")
-    tiktok_ready, tiktok_detail = tiktok_uploader.cookies_status()
+    tiktok_ready, tiktok_detail = dashboard_api.tiktok_cookies_status()
     if tiktok_ready:
         st.success("🟢 TikTok verknüpft (Bereit für Upload)")
     else:
@@ -284,7 +273,7 @@ with tab_fleet:
     st.divider()
     st.markdown("#### Konfigurierte Streamer")
 
-    streamer_entries = streamers_module.load_streamers()
+    streamer_entries = dashboard_api.load_streamers()
     orchestrator_streamers = (orchestrator_state or {}).get("streamers", {})
 
     if not streamer_entries:
@@ -314,7 +303,7 @@ with tab_fleet:
                         st.caption("⚪ Offline")
                 with col_delete:
                     if st.button("🗑️ Entfernen", key=f"del_streamer_{entry['name']}"):
-                        streamers_module.remove_streamer(entry["name"])
+                        dashboard_api.remove_streamer(entry["name"])
                         st.rerun()
 
     st.divider()
@@ -325,7 +314,7 @@ with tab_fleet:
             new_streamer_name = st.text_input("Name")
             new_streamer_url = st.text_input("Stream-URL", placeholder="https://twitch.tv/...")
         with col2:
-            fleet_profile_options = [""] + profiles.list_profiles()
+            fleet_profile_options = [""] + dashboard_api.list_profiles()
             new_streamer_profile = st.selectbox("Profil (optional)", fleet_profile_options)
             new_streamer_auto_upload = st.checkbox("🚀 Auto-Upload zu TikTok aktivieren")
 
@@ -335,7 +324,7 @@ with tab_fleet:
                 st.error("Name und Stream-URL sind erforderlich.")
             else:
                 try:
-                    streamers_module.add_streamer(
+                    dashboard_api.add_streamer(
                         new_streamer_name, new_streamer_url, new_streamer_profile, new_streamer_auto_upload
                     )
                     st.success(f"'{new_streamer_name}' hinzugefügt.")
@@ -360,7 +349,7 @@ with tab_brain:
         )
     else:
         content = AI_GUIDELINES_PATH.read_text(encoding="utf-8")
-        categories = train_loop.parse_guidelines_file(content)
+        categories = dashboard_api.parse_guidelines_file(content)
 
         st.markdown("### 📝 Text/Content Rules")
         col_pos, col_neg = st.columns(2)
@@ -511,7 +500,7 @@ with tab_archive:
                     with col_save:
                         if st.button("Feedback speichern", key=f"feedback_btn_{video_path.name}"):
                             if feedback_text:
-                                analyze.save_feedback(clip_title, feedback_text)
+                                dashboard_api.save_feedback(clip_title, feedback_text)
                                 st.success("Feedback gespeichert ✅")
                             else:
                                 st.warning("Bitte zuerst ein Feedback eingeben.")
@@ -570,7 +559,7 @@ with tab_manual:
             return dest
 
         if url:
-            return ingest.download_from_url(url)
+            return dashboard_api.download_from_url(url)
 
         raise ValueError("Bitte eine URL angeben oder ein Video hochladen.")
 
@@ -587,7 +576,7 @@ with tab_manual:
             st.error("❌ client_secret.json fehlt. Wird für den automatischen YouTube-Upload benötigt.")
             st.stop()
 
-        if do_tiktok_upload and not tiktok_uploader.cookies_status()[0]:
+        if do_tiktok_upload and not dashboard_api.tiktok_cookies_status()[0]:
             st.error(
                 "❌ Keine gültigen TikTok-Cookies gefunden. Führe `python get_cookies.py` aus, "
                 "bevor du den Auto-Upload aktivierst."
@@ -602,16 +591,16 @@ with tab_manual:
                 video_path = resolve_source_video()
 
                 status.write("🎧 Extrahiere Audio...")
-                wav_path = ingest.extract_audio(video_path)
+                wav_path = dashboard_api.extract_audio(video_path)
 
                 status.write("📝 Transkribiere (faster-whisper)...")
-                transcription_path = transcribe.transcribe(wav_path)
+                transcription_path = dashboard_api.transcribe_audio(wav_path)
 
                 profile_note = f" mit Profil '{selected_profile['name']}'" if selected_profile else ""
                 status.write(f"🤖 KI-Analyse der Szenen (inkl. Emotional-Energy-Scoring){profile_note}...")
-                clips_path = analyze.analyze(transcription_path, audio_path=wav_path, profile=selected_profile)
+                clips_path = dashboard_api.analyze_transcript(transcription_path, audio_path=wav_path, profile=selected_profile)
 
-                transcript = analyze.load_transcript(transcription_path)
+                transcript = dashboard_api.load_transcript(transcription_path)
                 with open(clips_path, "r", encoding="utf-8") as f:
                     clips_data = json.load(f)
                 clips = clips_data.get("clips", [])
@@ -643,7 +632,7 @@ with tab_manual:
                 progress_bar = st.progress(0.0)
                 clip_status = st.empty()
 
-                for i, total, clip, output_path in process_module.process_clips_iter(
+                for i, total, clip, output_path in dashboard_api.process_clips_iter(
                     video_path,
                     layout=selected_layout,
                     video_format=selected_format,
@@ -652,16 +641,16 @@ with tab_manual:
                 ):
                     with clip_status, st.spinner(f"Clip {i}/{total}: {clip['title']}"):
                         upload_status = "rendered"
-                        hashtags = clip.get("hashtags") or tiktok_uploader.DEFAULT_HASHTAGS
+                        hashtags = clip.get("hashtags") or dashboard_api.DEFAULT_HASHTAGS
 
                         if do_tiktok_upload:
-                            outcome = tiktok_uploader.try_upload_clip(
+                            outcome = dashboard_api.upload_clip_to_tiktok(
                                 output_path, clip.get("description", clip["title"]), hashtags
                             )
                             upload_status = "uploaded" if outcome.success else "failed"
 
                         if do_notify:
-                            notify.send_notification(
+                            dashboard_api.send_notification(
                                 title=clip["title"],
                                 energy=clip.get("energy_rating", 0),
                                 filepath=output_path,
@@ -676,7 +665,7 @@ with tab_manual:
 
                 if do_upload:
                     with st.spinner("☁️ Lade Clips zu YouTube hoch (privat)..."):
-                        upload_module.upload_all()
+                        dashboard_api.upload_all_to_youtube()
 
                 st.success(f"✅ Fertig! {len(clips)} Clip(s) verarbeitet. Siehe Tab \"🎞️ Clip Archiv\".")
         except Exception as e:

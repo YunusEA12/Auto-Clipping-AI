@@ -12,6 +12,14 @@ exponential-backoff-on-fast-crash logic orchestrator.py itself uses for auto_pil
 exits unexpectedly. It does not replace orchestrator.py/metrics_tracker.py or duplicate their
 logic — it only supervises the two OS processes.
 
+Named process_supervisor.py, not watchdog.py: an earlier version of this file WAS named
+watchdog.py, which silently shadowed the third-party `watchdog` package (a dependency of
+Streamlit's file-watcher) for every script run from this project's root — since the current
+directory takes precedence on sys.path, `import watchdog` anywhere in this project resolved
+to this file instead of the real package, breaking `streamlit run app.py` outright. Caught by
+actually launching Streamlit and inspecting its server log, not by reasoning about it — do
+the same before ever reusing a name that could plausibly collide with a real package again.
+
 This is still a single point of failure at the very top: if THIS process's host machine goes
 down, or this process itself is killed with nothing outside it to restart it, the fleet stops.
 Turning it into a true no-single-point-of-failure setup means wiring it into an OS-level
@@ -21,9 +29,9 @@ step outside what a Python script can safely do on its own (it needs admin right
 interaction), so it's left as an explicit manual step rather than attempted here.
 
 Usage:
-    python watchdog.py
-    python watchdog.py --poll-interval 30
-    python watchdog.py --skip-metrics-tracker   # e.g. cookies.json isn't set up yet
+    python process_supervisor.py
+    python process_supervisor.py --poll-interval 30
+    python process_supervisor.py --skip-metrics-tracker   # e.g. cookies.json isn't set up yet
 """
 
 import argparse
@@ -103,7 +111,7 @@ class SupervisedProcess:
             self.process.wait(timeout=15)
 
 
-def run_watchdog(
+def run_supervisor(
     poll_interval: int = DEFAULT_POLL_INTERVAL_SECONDS,
     include_metrics_tracker: bool = True,
     max_iterations: Optional[int] = None,
@@ -116,7 +124,7 @@ def run_watchdog(
             "metrics_tracker.py", [sys.executable, "metrics_tracker.py"]
         )
 
-    logger.info("🛡️ Watchdog gestartet, überwacht: %s", ", ".join(supervised))
+    logger.info("🛡️ Supervisor gestartet, überwacht: %s", ", ".join(supervised))
 
     for proc in supervised.values():
         proc.start()
@@ -135,7 +143,7 @@ def run_watchdog(
                 if not proc.in_backoff():
                     proc.start()
     except KeyboardInterrupt:
-        logger.info("Watchdog durch Nutzer gestoppt — beende alle überwachten Prozesse...")
+        logger.info("Supervisor durch Nutzer gestoppt — beende alle überwachten Prozesse...")
     finally:
         for proc in supervised.values():
             proc.stop()
@@ -157,7 +165,7 @@ def main():
     parser.add_argument("--max-iterations", type=int, default=None, help="Stop after N polling cycles (omit to run forever)")
     args = parser.parse_args()
 
-    run_watchdog(args.poll_interval, include_metrics_tracker=not args.skip_metrics_tracker, max_iterations=args.max_iterations)
+    run_supervisor(args.poll_interval, include_metrics_tracker=not args.skip_metrics_tracker, max_iterations=args.max_iterations)
 
 
 if __name__ == "__main__":
