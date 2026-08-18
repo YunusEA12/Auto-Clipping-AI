@@ -15,4 +15,6 @@ agent_state.json
 tiktok_client_secret.json
 tiktok_token.json
 tiktok_cookies.json
+cookies.json
+uploaded_clips/
 .tiktok_browser_profile/

@@ -1,24 +1,25 @@
 """Browser-based TikTok upload bot (Playwright): authenticates by injecting session cookies
-from tiktok_cookies.json into a fresh browser context, then drives tiktok.com/upload the
-same way a human would in a browser.
+from cookies.json into a fresh browser context, then drives the TikTok creator upload page
+the same way a human would in a browser — no login step, no captcha, since the session is
+already authenticated via the injected cookies.
 
 Why this exists alongside upload_tiktok.py: TikTok's official Content Posting API only
 allows an unaudited developer app to send a video to the creator's private inbox as a draft
 (see upload_tiktok.py's INIT_UPLOAD_URL docstring) — it cannot publish directly. This script
-drives the real tiktok.com upload page instead, so a fully hands-off post is possible.
+drives the real TikTok upload page instead, so a fully hands-off post is possible.
 
-tiktok_cookies.json holds real TikTok session cookies (export them from an already-logged-in
-browser session using a cookie-export extension) and must never be committed — see
-.gitignore. This is NOT TikTok's official, supported integration path — it automates their
-web UI rather than calling a documented API, which most platforms' terms of service
-restrict. Understand and accept that trade-off for your own account before relying on it.
+See README_UPLOAD.md for exactly how to produce cookies.json. It holds real TikTok session
+cookies and must never be committed — see .gitignore. This is NOT TikTok's official,
+supported integration path — it automates their web UI rather than calling a documented
+API, which most platforms' terms of service restrict. Understand and accept that trade-off
+for your own account before relying on it.
 
 TikTok's web markup isn't a stable public contract like an API is and changes over time, so
 the selectors below are best-effort. Spot-check with --headed after any TikTok UI change.
 
 Usage:
-    python upload_tiktok_browser.py clip.mp4 --description "..." --hashtags gaming viral fy
-    python upload_tiktok_browser.py clip.mp4 --description "..." --publish   # posts live instead of drafting
+    python tiktok_uploader.py clip.mp4 --description "..." --hashtags gaming viral fy
+    python tiktok_uploader.py clip.mp4 --description "..." --publish   # posts live instead of drafting
 """
 
 import argparse
@@ -33,12 +34,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # Exported session cookies from an already-logged-in TikTok browser session — never commit
-# this (see .gitignore).
-COOKIES_PATH = Path("tiktok_cookies.json")
+# this (see .gitignore and README_UPLOAD.md).
+COOKIES_PATH = Path("cookies.json")
 
+# tiktok.com/creator redirects here in practice; this is the real, current upload page.
 UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=webapp"
 NAV_TIMEOUT_MS = 60_000
+UPLOAD_BAR_TIMEOUT_MS = 180_000
 PROCESSING_TIMEOUT_MS = 120_000
+UPLOAD_BAR_POLL_MS = 1000
 DEFAULT_HASHTAGS = ["#fyp", "#viral", "#shorts", "#gaming"]
 
 
@@ -79,6 +83,49 @@ def load_cookies() -> Optional[List[dict]]:
     return [_normalize_cookie(c) for c in raw_cookies]
 
 
+def _wait_for_upload_complete(page) -> None:
+    """Wait until the upload progress indicator reaches 100% (or disappears, which TikTok
+    also does once processing finishes) before touching the caption editor — filling in the
+    caption too early is a common cause of it being silently discarded. Best-effort: if no
+    percentage text is ever found (selector drift), falls back to a fixed settle delay
+    instead of hard-failing the whole upload."""
+    deadline_ms = UPLOAD_BAR_TIMEOUT_MS
+    elapsed_ms = 0
+    saw_progress_indicator = False
+
+    while elapsed_ms < deadline_ms:
+        try:
+            progress_text = page.locator("text=/\\d{1,3}\\s*%/").first.text_content(timeout=UPLOAD_BAR_POLL_MS)
+        except PlaywrightTimeoutError:
+            progress_text = None
+
+        if progress_text:
+            saw_progress_indicator = True
+            digits = "".join(ch for ch in progress_text if ch.isdigit())
+            if digits and int(digits) >= 100:
+                logger.info("Upload bar reached 100%%")
+                page.wait_for_timeout(1500)
+                return
+            logger.info("Upload progress: %s", progress_text.strip())
+        elif saw_progress_indicator:
+            # The percentage element was present and is now gone — TikTok replaces it with
+            # the caption editor/preview once processing completes.
+            logger.info("Upload progress indicator finished")
+            return
+
+        page.wait_for_timeout(UPLOAD_BAR_POLL_MS)
+        elapsed_ms += UPLOAD_BAR_POLL_MS
+
+    if not saw_progress_indicator:
+        logger.warning(
+            "Never found an upload-progress indicator (selector drift?) — falling back to "
+            "a fixed settle delay instead of failing the upload."
+        )
+        page.wait_for_timeout(5000)
+    else:
+        logger.warning("Upload progress bar did not confirm 100%% within %ds; continuing anyway", deadline_ms // 1000)
+
+
 def upload_video(
     video_path: Path,
     description: str,
@@ -86,8 +133,8 @@ def upload_video(
     publish: bool = False,
     headless: bool = True,
 ) -> bool:
-    """Upload one clip through the tiktok.com web UI, authenticating via cookies from
-    tiktok_cookies.json instead of an interactive login.
+    """Upload one clip through the TikTok creator upload page, authenticating via cookies
+    from cookies.json instead of an interactive login.
 
     `publish=False` (the default) clicks "Save as draft" instead of "Post" — a review step
     stays in the loop unless the caller explicitly opts into `--publish`. Never raises;
@@ -102,8 +149,8 @@ def upload_video(
     cookies = load_cookies()
     if not cookies:
         logger.error(
-            "No usable cookies found in %s. Export your TikTok session cookies (while "
-            "logged in via a normal browser) to that file before uploading.", COOKIES_PATH,
+            "No usable cookies found in %s. See README_UPLOAD.md for how to export your "
+            "TikTok session cookies into that file before uploading.", COOKIES_PATH,
         )
         return False
 
@@ -123,7 +170,7 @@ def upload_video(
             if "login" in page.url:
                 logger.error(
                     "Not logged in (redirected to %s). The cookies in %s are likely "
-                    "expired — re-export a fresh set.", page.url, COOKIES_PATH,
+                    "expired — re-export a fresh set (see README_UPLOAD.md).", page.url, COOKIES_PATH,
                 )
                 return False
 
@@ -131,9 +178,8 @@ def upload_video(
             file_input = page.locator("input[type='file']").first
             file_input.set_input_files(str(video_path.resolve()))
 
-            # TikTok transcodes/previews the video client-side before the caption editor and
-            # post button become interactive — give that a moment to settle.
-            page.wait_for_timeout(5000)
+            logger.info("Waiting for upload to reach 100%%...")
+            _wait_for_upload_complete(page)
 
             logger.info("Filling in caption...")
             caption_box = page.locator("div[contenteditable='true']").first
@@ -155,29 +201,30 @@ def upload_video(
             page.wait_for_timeout(5000)
 
             logger.info(
-                "TikTok browser upload finished for %s (publish=%s)", video_path.name, publish
+                "TikTok upload finished for %s (publish=%s)", video_path.name, publish
             )
             return True
 
         except PlaywrightTimeoutError as e:
-            logger.error("TikTok browser upload timed out for %s: %s", video_path, e)
+            logger.error("TikTok upload timed out for %s: %s", video_path, e)
             return False
         except Exception as e:
-            logger.error("TikTok browser upload failed for %s: %s", video_path, e)
+            logger.error("TikTok upload failed for %s: %s", video_path, e)
             return False
         finally:
             context.close()
             browser.close()
 
 
-def try_upload_to_tiktok_browser(
+def try_upload_clip(
     video_path: Path,
     description: str,
     hashtags: Optional[List[str]] = None,
     publish: bool = False,
 ) -> bool:
-    """Non-raising wrapper for automated pipelines (app.py, stream_watcher.py) — always
-    headless, matching the naming/contract of upload_tiktok.try_upload_to_tiktok()."""
+    """Non-raising wrapper for automated pipelines (app.py, stream_watcher.py, auto_pilot.py)
+    — always headless, catches every failure mode and returns False instead of raising, so
+    one failed upload never crashes an unattended loop."""
     return upload_video(video_path, description, hashtags, publish=publish, headless=True)
 
 

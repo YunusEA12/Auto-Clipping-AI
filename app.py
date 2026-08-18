@@ -26,7 +26,7 @@ import profiles
 import train_loop
 import transcribe
 import upload as upload_module
-import upload_tiktok_browser
+import tiktok_uploader
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 ENV_PATH = Path(".env")
 CLIENT_SECRET_PATH = Path("client_secret.json")
-TIKTOK_COOKIES_PATH = upload_tiktok_browser.COOKIES_PATH
+TIKTOK_COOKIES_PATH = tiktok_uploader.COOKIES_PATH
 TEMP_DIR = Path("temp")
 OUTPUT_DIR = Path("output")
 AGENT_STATE_PATH = auto_pilot.AGENT_STATE_PATH
@@ -158,9 +158,9 @@ with st.sidebar:
         st.error("❌ Fehlt — client_secret.json (YouTube)")
 
     if TIKTOK_COOKIES_PATH.exists():
-        st.success("✅ Bereit — tiktok_cookies.json gefunden")
+        st.success("✅ Bereit — cookies.json gefunden")
     else:
-        st.warning("⚠️ tiktok_cookies.json fehlt (Session-Cookies für den TikTok-Upload-Bot exportieren)")
+        st.warning("⚠️ cookies.json fehlt (siehe README_UPLOAD.md für den TikTok-Upload-Bot)")
 
     st.divider()
     st.header("🕴️ Streamer-Mitarbeiter")
@@ -391,8 +391,8 @@ with tab_manual:
 
         if do_tiktok_upload and not TIKTOK_COOKIES_PATH.exists():
             st.error(
-                "❌ tiktok_cookies.json fehlt. Exportiere deine TikTok-Session-Cookies in diese "
-                "Datei, bevor du den Auto-Upload aktivierst."
+                "❌ cookies.json fehlt. Siehe README_UPLOAD.md, um deine TikTok-Session-Cookies "
+                "zu exportieren, bevor du den Auto-Upload aktivierst."
             )
             st.stop()
 
@@ -454,10 +454,10 @@ with tab_manual:
                 ):
                     with clip_status, st.spinner(f"Clip {i}/{total}: {clip['title']}"):
                         upload_status = "rendered"
-                        hashtags = clip.get("hashtags") or upload_tiktok_browser.DEFAULT_HASHTAGS
+                        hashtags = clip.get("hashtags") or tiktok_uploader.DEFAULT_HASHTAGS
 
                         if do_tiktok_upload:
-                            success = upload_tiktok_browser.try_upload_to_tiktok_browser(
+                            success = tiktok_uploader.try_upload_clip(
                                 output_path, clip.get("description", clip["title"]), hashtags
                             )
                             upload_status = "uploaded" if success else "failed"

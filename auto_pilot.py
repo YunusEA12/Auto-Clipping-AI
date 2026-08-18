@@ -1,42 +1,49 @@
-"""Autonomous, self-improving agent loop: Collect -> Evaluate -> Purge -> Repeat, forever.
+"""Autonomous, self-improving agent loop: Collect -> Evaluate -> Purge -> Deploy -> Repeat,
+forever.
 
 Each cycle:
-  1. Collect  — run the existing ingest -> transcribe -> analyze -> process pipeline to
+  1. Collect    — run the existing ingest -> transcribe -> analyze -> process pipeline to
      render a fresh batch of 3-5 clips into output/.
-  2. Evaluate — hand that batch to train_loop.py's critic, which scores each clip
+  2. Evaluate   — hand that batch to train_loop.py's critic, which scores each clip
      (reward_score -10..+10) and derives new AVOID/DO rules into ai_guidelines.txt.
-  3. Purge    — physically delete any clip (its .mp4 AND its entry in the batch's
+  3. Purge      — physically delete any clip (its .mp4 AND its entry in the batch's
      *_clips.json) whose reward_score falls below --purge-threshold. Only "winners" survive
      on disk.
-  4. Repeat   — go back to step 1. analyze.py re-reads ai_guidelines.txt fresh on every call
-     (see analyze.load_ai_guidelines_section()), so each new cycle's clip selection is
+  5. Deployment — with --auto-upload: every surviving clip is handed to tiktok_uploader.py
+     (a cookie-authenticated Playwright bot) and, once uploaded, moved out of output/ into
+     uploaded_clips/ to keep the working directory limited to undecided clips.
+  6. Repeat     — go back to step 1. analyze.py re-reads ai_guidelines.txt fresh on every
+     call (see analyze.load_ai_guidelines_section()), so each new cycle's clip selection is
      informed by everything the critic has learned so far.
 
 This script does not duplicate any pipeline logic — it only orchestrates the existing
-ingest.py / transcribe.py / analyze.py / process.py / train_loop.py / stream_watcher.py
-functions in a loop.
+ingest.py / transcribe.py / analyze.py / process.py / train_loop.py / stream_watcher.py /
+tiktok_uploader.py functions in a loop.
 
 Usage:
     python auto_pilot.py --video some_vod.mp4                    # reprocess one local VOD repeatedly
     python auto_pilot.py --url https://youtube.com/watch?v=...    # download once, reprocess repeatedly
     python auto_pilot.py --live --url https://twitch.tv/<channel> # record a fresh chunk every cycle
     python auto_pilot.py --profile eliasn97 --live                # same, via a streamer profile
+    python auto_pilot.py --profile eliasn97 --live --auto-upload  # also deploy survivors to TikTok (as drafts)
 """
 
 import argparse
 import json
 import logging
 import random
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import analyze
 import ingest
 import process as process_module
 import profiles
 import stream_watcher
+import tiktok_uploader
 import train_loop
 import transcribe
 
@@ -49,6 +56,10 @@ BATCH_SIZE_MAX = 5
 DEFAULT_PURGE_THRESHOLD = 0
 DEFAULT_COOLDOWN_SECONDS = 30
 DEFAULT_ERROR_COOLDOWN_SECONDS = 90
+
+# Where successfully-uploaded clips are archived to, out of output/ — keeps the working
+# directory limited to clips still awaiting a decision (upload or the next purge pass).
+UPLOADED_CLIPS_DIR = Path("uploaded_clips")
 
 # Telemetry file the Streamlit "Agent Control Center" dashboard (app.py) polls to show what
 # this process is doing right now — there's no direct connection between the two processes,
@@ -103,16 +114,20 @@ def purge_low_scoring_clips(
     rendered: Dict[str, Path],
     clips_path: Path,
     threshold: int,
-) -> Tuple[int, int]:
+) -> Tuple[int, int, List[Tuple[dict, Path]]]:
     """Phase 3 (Purge): delete the .mp4 and remove the clips.json entry for every clip whose
     critic reward_score is below `threshold`. Clips the critic couldn't score (e.g. its
-    response was unparseable) are kept rather than guessed at — never delete on ambiguity."""
+    response was unparseable) are kept rather than guessed at — never delete on ambiguity.
+
+    Returns (kept, deleted, survivors) — survivors is [(clip, output_path), ...] for every
+    clip that made it through, which Phase 5 (Deployment) uploads."""
     score_by_title = {v.clip_title: v.reward_score for v in batch.verdicts}
 
     with open(clips_path, "r", encoding="utf-8") as f:
         clips_data = json.load(f)
 
     surviving_clips = []
+    survivors: List[Tuple[dict, Path]] = []
     kept, deleted = 0, 0
 
     for clip in clips_data.get("clips", []):
@@ -128,11 +143,43 @@ def purge_low_scoring_clips(
         else:
             surviving_clips.append(clip)
             kept += 1
+            if output_path and output_path.exists():
+                survivors.append((clip, output_path))
 
     with open(clips_path, "w", encoding="utf-8") as f:
         json.dump({"clips": surviving_clips}, f, ensure_ascii=False, indent=2)
 
-    return kept, deleted
+    return kept, deleted, survivors
+
+
+def run_deployment_phase(survivors: List[Tuple[dict, Path]], publish: bool) -> Tuple[int, int]:
+    """Phase 5 (Deployment): upload every clip that survived Phase 3's purge to TikTok via
+    tiktok_uploader.py (cookie-authenticated Playwright bot), then move successfully
+    uploaded files out of output/ into uploaded_clips/ to keep it clean. A failed upload
+    just leaves that clip in output/ for a future opportunity — it never stops the loop."""
+    UPLOADED_CLIPS_DIR.mkdir(exist_ok=True)
+    uploaded, failed = 0, 0
+
+    for clip, output_path in survivors:
+        title = clip.get("title", output_path.name)
+        hashtags = clip.get("hashtags") or tiktok_uploader.DEFAULT_HASHTAGS
+        description = clip.get("description") or title
+
+        success = tiktok_uploader.try_upload_clip(output_path, description, hashtags, publish=publish)
+        if not success:
+            failed += 1
+            logger.warning("Upload fehlgeschlagen für '%s' — bleibt in output/", title)
+            continue
+
+        uploaded += 1
+        try:
+            destination = UPLOADED_CLIPS_DIR / output_path.name
+            shutil.move(str(output_path), str(destination))
+            logger.info("📦 '%s' hochgeladen und nach %s verschoben", title, destination)
+        except OSError as e:
+            logger.warning("Upload für '%s' erfolgreich, aber Verschieben nach %s fehlgeschlagen: %s", title, UPLOADED_CLIPS_DIR, e)
+
+    return uploaded, failed
 
 
 def run_cycle(
@@ -147,11 +194,14 @@ def run_cycle(
     target_streamer: str,
     kept_total: int,
     purged_total: int,
+    uploaded_total: int,
     live: bool,
-) -> Tuple[int, int]:
-    """Runs one full Collect -> Evaluate -> Purge cycle, updating agent_state.json at each
-    phase transition. Returns (kept, deleted) for THIS cycle, so the caller can track
-    running totals across cycles."""
+    auto_upload: bool,
+    publish: bool,
+) -> Tuple[int, int, int]:
+    """Runs one full Collect -> Evaluate -> Purge -> (optionally) Deploy cycle, updating
+    agent_state.json at each phase transition. Returns (kept, deleted, uploaded) for THIS
+    cycle, so the caller can track running totals across cycles."""
     common_state = dict(current_cycle=cycle, target_streamer=target_streamer)
 
     update_agent_state(
@@ -172,9 +222,10 @@ def run_cycle(
         logger.info("Zyklus abgeschlossen: kein Content mit hohem viralem Potenzial gefunden, nichts gerendert.")
         update_agent_state(
             current_action="😴 Kein Content gefunden — warte auf nächsten Zyklus",
-            clips_kept_total=kept_total, clips_purged_total=purged_total, **common_state,
+            clips_kept_total=kept_total, clips_purged_total=purged_total,
+            clips_uploaded_total=uploaded_total, **common_state,
         )
-        return 0, 0
+        return 0, 0, 0
 
     batch_size = random.randint(BATCH_SIZE_MIN, BATCH_SIZE_MAX)
     batch_clips = _trim_to_batch(clips_path, batch_size)
@@ -196,18 +247,27 @@ def run_cycle(
 
     # Phase 3 (Clean & Purge)
     update_agent_state(current_action="🧹 Bereinigung — lösche schwache Clips", **common_state)
-    kept, deleted = purge_low_scoring_clips(batch, rendered, clips_path, purge_threshold)
+    kept, deleted, survivors = purge_low_scoring_clips(batch, rendered, clips_path, purge_threshold)
 
     logger.info(
         "✅ Batch abgeschlossen: %d Clip(s) behalten, %d gelöscht, Regeln aktualisiert (%s).",
         kept, deleted, guidelines_path,
     )
+
+    # Phase 5 (Deployment) — every clip that survived the purge gets uploaded to TikTok.
+    uploaded = 0
+    if auto_upload and survivors:
+        update_agent_state(current_action=f"📤 Upload läuft ({len(survivors)} Clip(s))", **common_state)
+        uploaded, upload_failed = run_deployment_phase(survivors, publish)
+        logger.info("📤 Deployment: %d hochgeladen, %d fehlgeschlagen", uploaded, upload_failed)
+
     update_agent_state(
         current_action="✅ Zyklus abgeschlossen — Cooldown",
         clips_kept_total=kept_total + kept, clips_purged_total=purged_total + deleted,
+        clips_uploaded_total=uploaded_total + uploaded,
         **common_state,
     )
-    return kept, deleted
+    return kept, deleted, uploaded
 
 
 def resolve_static_video(args, url: Optional[str]) -> Path:
@@ -249,7 +309,19 @@ def main():
         help="Seconds to wait before retrying after a failed cycle (network error, stream drop, etc.)",
     )
     parser.add_argument("--max-cycles", type=int, default=None, help="Stop after N cycles (omit to run forever)")
+    parser.add_argument(
+        "--auto-upload", action="store_true",
+        help="Enable Phase 5 (Deployment): upload every clip that survives the purge to "
+        "TikTok via tiktok_uploader.py (requires cookies.json — see README_UPLOAD.md)",
+    )
+    parser.add_argument(
+        "--publish", action="store_true",
+        help="With --auto-upload: post live instead of saving as a draft (default: draft)",
+    )
     args = parser.parse_args()
+
+    if args.publish and not args.auto_upload:
+        parser.error("--publish requires --auto-upload")
 
     profile_dict = None
     if args.profile:
@@ -265,15 +337,16 @@ def main():
     )
 
     cached_video_path: Optional[Path] = None
-    kept_total, purged_total = 0, 0
+    kept_total, purged_total, uploaded_total = 0, 0, 0
 
     logger.info(
-        "🤖 Auto-Pilot startet (live=%s, purge_threshold=%d, batch=%d-%d Clips/Zyklus)",
-        args.live, args.purge_threshold, BATCH_SIZE_MIN, BATCH_SIZE_MAX,
+        "🤖 Auto-Pilot startet (live=%s, purge_threshold=%d, batch=%d-%d Clips/Zyklus, auto_upload=%s)",
+        args.live, args.purge_threshold, BATCH_SIZE_MIN, BATCH_SIZE_MAX, args.auto_upload,
     )
     update_agent_state(
         current_action="🚀 Auto-Pilot gestartet", current_cycle=0, target_streamer=target_streamer,
-        clips_kept_total=0, clips_purged_total=0, purge_threshold=args.purge_threshold, live=args.live,
+        clips_kept_total=0, clips_purged_total=0, clips_uploaded_total=0,
+        purge_threshold=args.purge_threshold, live=args.live, auto_upload=args.auto_upload,
     )
 
     cycle = 0
@@ -293,13 +366,15 @@ def main():
                         cached_video_path = resolve_static_video(args, url)
                     video_path = cached_video_path
 
-                kept, deleted = run_cycle(
+                kept, deleted, uploaded = run_cycle(
                     video_path, profile_dict, args.layout, args.video_format,
                     args.highlight_color, args.purge_threshold, args.critic_model,
-                    cycle, target_streamer, kept_total, purged_total, args.live,
+                    cycle, target_streamer, kept_total, purged_total, uploaded_total,
+                    args.live, args.auto_upload, args.publish,
                 )
                 kept_total += kept
                 purged_total += deleted
+                uploaded_total += uploaded
             except Exception as e:
                 logger.error(
                     "Zyklus %d fehlgeschlagen (%s: %s) — warte %ds und versuche es erneut.",
@@ -309,6 +384,7 @@ def main():
                     current_action=f"⚠️ Fehler: {e} — Cooldown ({args.error_cooldown}s)",
                     current_cycle=cycle, target_streamer=target_streamer,
                     clips_kept_total=kept_total, clips_purged_total=purged_total,
+                    clips_uploaded_total=uploaded_total,
                 )
                 time.sleep(args.error_cooldown)
                 continue
@@ -320,6 +396,7 @@ def main():
         update_agent_state(
             current_action="⏹️ Gestoppt (Nutzer)", current_cycle=cycle, target_streamer=target_streamer,
             clips_kept_total=kept_total, clips_purged_total=purged_total,
+            clips_uploaded_total=uploaded_total,
         )
 
 
