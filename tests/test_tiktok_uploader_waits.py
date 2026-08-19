@@ -470,3 +470,36 @@ def test_tokenize_hashtag_falls_back_to_plain_text_when_no_suggestion_appears():
     assert page.focused.clicked is False
     assert page.fallback.clicked is False
     assert caption_box.text == "Cool clip #obscuretag"
+
+
+# --- _dismiss_mention_suggestions (2026-08-19: analyze.py's streamer-credit rule bakes
+# "@<streamer_name>" into the description; Twitch usernames frequently don't match the
+# streamer's real TikTok handle, and clicking a wrong autocomplete suggestion would tag an
+# unrelated real account, so this deliberately only closes the dropdown via Escape rather
+# than trying to resolve/click anything) -----------------------------------------------------
+
+class FakeKeyboard:
+    def __init__(self, raise_on_press=False):
+        self.pressed = []
+        self._raise_on_press = raise_on_press
+
+    def press(self, key):
+        if self._raise_on_press:
+            raise Exception("boom")
+        self.pressed.append(key)
+
+
+class FakeMentionPage:
+    def __init__(self, raise_on_press=False):
+        self.keyboard = FakeKeyboard(raise_on_press)
+
+
+def test_dismiss_mention_suggestions_presses_escape():
+    page = FakeMentionPage()
+    tiktok_uploader._dismiss_mention_suggestions(page)
+    assert page.keyboard.pressed == ["Escape"]
+
+
+def test_dismiss_mention_suggestions_never_raises():
+    page = FakeMentionPage(raise_on_press=True)
+    tiktok_uploader._dismiss_mention_suggestions(page)  # must not raise

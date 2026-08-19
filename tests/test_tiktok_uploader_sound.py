@@ -6,9 +6,19 @@ published) test-clip upload — see tiktok_uploader.py's SOUND_* constants for t
 
 import random
 
+import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 import tiktok_uploader
+
+
+@pytest.fixture(autouse=True)
+def _reset_last_track_title(monkeypatch):
+    # _last_track_title is module-level state (see its own docstring: it must genuinely
+    # persist across consecutive in-process uploads) -- reset it before every test so one
+    # test's successful pick can't leak into another's and make an unrelated randrange mock
+    # nondeterministic.
+    monkeypatch.setattr(tiktok_uploader, "_last_track_title", None)
 
 
 class FakeClickable:
@@ -197,6 +207,67 @@ def test_adjusts_volume_after_adding(monkeypatch):
 
     assert page.volume_input.value == tiktok_uploader.SOUND_VOLUME_DB
     assert "Tab" in page.keys_pressed
+
+
+# --- duplicate-avoidance: _last_track_title / _pick_track_index (2026-08-19: found live --
+# two consecutive clips carried the exact same track) ------------------------------------------
+
+def test_add_background_sound_remembers_the_track_it_added(monkeypatch):
+    monkeypatch.setattr(random, "randrange", lambda n: 0)
+    row = FakeRow("Tenfold Love")
+    page = FakeSoundPage(rows=[row])
+
+    tiktok_uploader._add_background_sound(page)
+
+    assert tiktok_uploader._last_track_title == "Tenfold Love"
+
+
+def test_second_upload_avoids_repeating_the_first_upload_s_track(monkeypatch):
+    monkeypatch.setattr(tiktok_uploader, "_last_track_title", "Track 0")
+    rows = [FakeRow("Track 0"), FakeRow("Track 1"), FakeRow("Track 2")]
+    monkeypatch.setattr(random, "randrange", lambda n: 0)  # first pick always lands on "Track 0"
+    monkeypatch.setattr(random, "choice", lambda choices: choices[0])  # deterministic re-roll
+    page = FakeSoundPage(rows=rows)
+
+    title = tiktok_uploader._add_background_sound(page)
+
+    assert title != "Track 0"
+
+
+def test_pick_track_index_keeps_original_pick_when_pool_has_no_alternative(monkeypatch):
+    monkeypatch.setattr(tiktok_uploader, "_last_track_title", "Only Track")
+    rows = [FakeRow("Only Track")]
+    index = tiktok_uploader._pick_track_index(rows_locator := FakeRowsLocator(rows), 1)
+    assert index == 0
+
+
+def test_pick_track_index_keeps_original_pick_when_title_read_fails(monkeypatch):
+    monkeypatch.setattr(tiktok_uploader, "_last_track_title", "Track 0")
+    monkeypatch.setattr(random, "randrange", lambda n: 0)
+
+    class BoomRow(FakeRow):
+        def locator(self, selector):
+            if selector == tiktok_uploader.SOUND_TRACK_TITLE_SELECTOR:
+                raise Exception("boom")
+            return super().locator(selector)
+
+    rows = FakeRowsLocator([BoomRow("Track 0"), FakeRow("Track 1")])
+    index = tiktok_uploader._pick_track_index(rows, 2)
+    assert index == 0
+
+
+def test_pick_track_index_no_repeat_check_when_no_prior_track(monkeypatch):
+    # _last_track_title is None on the very first upload of a process's lifetime -- must not
+    # even attempt to read a title to compare against.
+    monkeypatch.setattr(random, "randrange", lambda n: 0)
+
+    class BoomRow(FakeRow):
+        def locator(self, selector):
+            raise AssertionError("should never read a title when there's no prior track")
+
+    rows = FakeRowsLocator([BoomRow("Track 0")])
+    index = tiktok_uploader._pick_track_index(rows, 1)
+    assert index == 0
 
 
 # --- _add_background_sound: best-effort degradation -----------------------------------------

@@ -127,9 +127,18 @@ SOUND_LOAD_POLL_MS = 500
 # mastered level — empirical starting point (same "verify by listening to a real render and
 # adjusting" caveat as every other empirical constant in this codebase), not derived from a
 # spec. TikTok's own slider ranges -60..20 dB; this is a moderate attenuation, not a mute.
-SOUND_VOLUME_DB = "-48"  # slider range is -60..20 (verified live via the widget's own
-# aria-valuemin/max) -- -14, -24, and -35 all still read as competing with the streamer's
-# voice (three separate live reports); jumping further down rather than another small step
+SOUND_VOLUME_DB = "-30"  # slider range is -60..20 (verified live via the widget's own
+# aria-valuemin/max) -- moved through -14/-24/-35/-48 chasing live "still too loud" reports;
+# settled back around -30 per explicit feedback once someone actually heard a render
+
+# Best-effort duplicate-avoidance: remembers the title of whichever track the last
+# _add_background_sound_impl() call actually added. try_upload_clip() runs in-process per
+# clip (auto_pilot.py/stream_watcher.py call it directly in a loop, never respawn
+# tiktok_uploader.py per upload — see those callers), so this module-level value genuinely
+# persists across consecutive uploads within one orchestrator run. Found live 2026-08-19: two
+# back-to-back clips carried the exact same track. Resets to None on a process restart —
+# fine, this is a nicety (avoid an immediate repeat), not a hard cross-run guarantee.
+_last_track_title: Optional[str] = None
 
 # Diagnostic-only, gated on headless=False (see upload_video()): the URL-change/form-gone
 # signal _wait_for_post_confirmation() checks for is itself unverified against what TikTok
@@ -380,6 +389,25 @@ def _tokenize_hashtag(page, caption_box, tag: str) -> bool:
         return False
 
 
+def _dismiss_mention_suggestions(page) -> None:
+    """analyze.py's streamer-credit rule bakes "@<streamer_name>" straight into the
+    description text, which caption_box.type() then types character-by-character — the same
+    "@" trigger that opens TikTok's own live user-mention autocomplete dropdown. Twitch
+    usernames frequently don't match the streamer's real TikTok handle (or they have no
+    TikTok account at all), so there's often no genuine match to select.
+
+    Deliberately never clicks a suggestion here even when one appears: unlike hashtag
+    suggestions (_tokenize_hashtag), clicking the wrong one would tag an unrelated real
+    TikTok account in a live, public post — a worse outcome than just leaving "@name" as
+    harmless plain text. Escape is a safe, universal way to close any open autocomplete
+    overlay without needing this project's usual live-verified selector for its exact (and
+    here, deliberately never inspected) DOM structure. Best-effort, never raises."""
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+
+
 def _wait_for_caption_filled(page, caption_box, expected_text: str) -> None:
     """Polls the caption box's own text content until it actually contains what was typed
     (or a bounded timeout elapses), instead of a flat sleep with no verification that the
@@ -601,7 +629,8 @@ def _add_background_sound_impl(page) -> Optional[str]:
         return None
 
     pool_size = min(rows.count(), SOUND_CANDIDATE_POOL)
-    chosen_row = rows.nth(random.randrange(pool_size))
+    chosen_index = _pick_track_index(rows, pool_size)
+    chosen_row = rows.nth(chosen_index)
 
     try:
         title = (chosen_row.locator(SOUND_TRACK_TITLE_SELECTOR).text_content() or "").strip()
@@ -615,8 +644,29 @@ def _add_background_sound_impl(page) -> Optional[str]:
     _set_sound_volume(page)
     _close_sound_panel(page)
 
+    global _last_track_title
+    _last_track_title = title or None
+
     logger.info("Added background sound: %s", title or "(untitled track)")
     return title or None
+
+
+def _pick_track_index(rows, pool_size: int) -> int:
+    """Random pick among the candidate pool, re-rolled once against a different index if the
+    first pick's title matches _last_track_title (the previous upload's track) — avoids two
+    consecutive clips carrying identical background music. Best-effort: if reading the title
+    to check fails, or the pool is too small to have an alternative, just keeps the original
+    pick rather than blocking the upload on this."""
+    index = random.randrange(pool_size)
+    if pool_size <= 1 or _last_track_title is None:
+        return index
+    try:
+        title = (rows.nth(index).locator(SOUND_TRACK_TITLE_SELECTOR).text_content() or "").strip()
+    except Exception:
+        return index
+    if title and title == _last_track_title:
+        index = random.choice([i for i in range(pool_size) if i != index])
+    return index
 
 
 def upload_video(
@@ -722,6 +772,7 @@ def upload_video(
             page.keyboard.press("Control+A")
             page.keyboard.press("Delete")
             caption_box.type(description.strip(), delay=15)
+            _dismiss_mention_suggestions(page)
 
             tokenized = sum(1 for tag in tag_list if _tokenize_hashtag(page, caption_box, tag))
             logger.info("Tokenized %d/%d hashtag(s) as real TikTok tags", tokenized, len(tag_list))

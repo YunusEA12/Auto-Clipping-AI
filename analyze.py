@@ -303,6 +303,33 @@ def build_streamer_mention_section(streamer_name: Optional[str] = None) -> str:
     )
 
 
+# faster-whisper's info.language codes (see transcribe.py) for the streamers this pipeline
+# actually clips from — falls back to the raw code for anything not listed rather than
+# failing, since the instruction still reads fine as "written in the transcript's own
+# language ('xx')" for an unlisted code.
+_LANGUAGE_NAMES = {"de": "German", "en": "English"}
+
+
+def build_language_section(language: Optional[str] = None) -> str:
+    """Whisper's own detected language (transcript["language"], written by transcribe.py) —
+    threaded through so the title/hook/caption actually match what's spoken in the clip
+    instead of defaulting to whatever language the LLM's own training happens to favor.
+    Found live, 2026-08-19: a German clip got an English on-screen title and caption.
+    Hashtags are deliberately exempted — #fyp/#viral-style broad-reach tags are conventionally
+    English regardless of spoken language, and mixing them in doesn't read as wrong the way a
+    mismatched title/caption does."""
+    if not language:
+        return ""
+    name = _LANGUAGE_NAMES.get(language, language)
+    return (
+        f"\n\nLANGUAGE (required): this transcript is spoken in {name} ('{language}'). Every "
+        f"clip's title, hook_explanation, and description/caption MUST be written in {name} "
+        f"too — never translate them into a different language. Hashtags are exempt from this "
+        f"rule and may freely mix {name} and English (e.g. a mostly-English hashtag set like "
+        f"#fyp/#viral alongside a content-specific tag in {name}) to maximize reach."
+    )
+
+
 def load_ai_guidelines_section() -> str:
     """Learned guidelines from train_loop.py's critic pass over past clips — a running,
     self-updating rulebook of what to repeat and what to never do again."""
@@ -331,13 +358,16 @@ def load_ai_guidelines_section() -> str:
     )
 
 
-def build_system_prompt(profile: Optional[dict] = None, streamer_name: Optional[str] = None) -> str:
+def build_system_prompt(
+    profile: Optional[dict] = None, streamer_name: Optional[str] = None, language: Optional[str] = None,
+) -> str:
     return (
         BASE_SYSTEM_PROMPT
         + load_top_performers_section()
         + load_feedback_section()
         + build_profile_section(profile)
         + build_streamer_mention_section(streamer_name)
+        + build_language_section(language)
         + load_ai_guidelines_section()
     )
 
@@ -502,9 +532,10 @@ def select_clips(
     model: str = MODEL,
     profile: Optional[dict] = None,
     streamer_name: Optional[str] = None,
+    language: Optional[str] = None,
 ) -> ClipSelection:
     client = OpenAI()
-    system_prompt = build_system_prompt(profile, streamer_name)
+    system_prompt = build_system_prompt(profile, streamer_name, language)
     energy_section = build_energy_prompt_section(energy_spikes or [])
 
     logger.info("Sending transcript to %s for scene selection", model)
@@ -689,8 +720,9 @@ def analyze(
     else:
         logger.info("No audio file available; skipping emotional-energy scoring")
 
+    language = transcript.get("language")
     try:
-        selection = select_clips(transcript_text, energy_spikes, window_scores, model, profile, streamer_name)
+        selection = select_clips(transcript_text, energy_spikes, window_scores, model, profile, streamer_name, language)
     except LLMResponseIncomplete as e:
         logger.warning("%s; falling back to the longest available segment instead of failing.", e)
         selection = find_longest_segment_fallback(transcript, streamer_name)
