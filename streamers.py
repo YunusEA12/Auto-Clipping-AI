@@ -44,7 +44,14 @@ AGENT_STATE_GLOB = "agent_state*.json"
 AGENT_STATE_MAX_AGE_HOURS = 24
 # For a streamer orchestrator_state.json currently reports as simply not live — routine, no
 # action needed, so its dashboard card should clear promptly rather than sit there for a day.
-AGENT_STATE_OFFLINE_GRACE_HOURS = 1
+# 2026-08-19: 1 hour was still far too slow for what "promptly" actually means here — an
+# offline streamer's card was sitting in Agent Status for up to an hour after going offline
+# (explicit account-owner report: "wenn jmd offline ist dann muss dieser raus"). Dropped to
+# 6 minutes — comfortably past a single missed orchestrator.py poll cycle (default 90s, see
+# orchestrator.py's own DEFAULT_POLL_INTERVAL) so one slow cycle doesn't cause a card to
+# flicker away and back, but short enough that "offline" and "gone from the dashboard" now
+# read as basically the same moment to a human watching it.
+AGENT_STATE_OFFLINE_GRACE_HOURS = 0.1
 
 
 def _slugify(text: str) -> str:

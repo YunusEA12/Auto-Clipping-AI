@@ -198,6 +198,13 @@ def test_purge_removes_stale_state_for_a_still_configured_streamer(tmp_path):
 # just stopped updating (a real crash/hang) should stay visible as an actionable problem for
 # the full max_age_hours) --------------------------------------------------------------
 
+def test_default_offline_grace_period_is_short_not_an_hour():
+    # 2026-08-19: the original 1-hour default was itself the bug the account owner reported —
+    # a card stayed in Agent Status for up to an hour after actually going offline. Pin the
+    # default well under an hour so this can't silently regress back to that.
+    assert streamers.AGENT_STATE_OFFLINE_GRACE_HOURS <= 0.25
+
+
 def test_purge_uses_short_grace_period_for_a_streamer_currently_offline(tmp_path):
     streamers_path = tmp_path / "streamers.json"
     streamers.save_streamers([{"name": "eliasn97", "url": "https://twitch.tv/eliasn97"}], path=streamers_path)
