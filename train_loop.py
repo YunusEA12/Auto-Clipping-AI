@@ -25,23 +25,23 @@ Usage:
 """
 
 import argparse
-import base64
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from google import genai
+from google.genai import types as genai_types
 from pydantic import BaseModel, Field
 
 from fractions import Fraction
 
 import analyze
 import atomic_io
-import openai_utils
+import llm_utils
 import process as process_module
 
 import logging_setup
@@ -56,10 +56,15 @@ VIRAL_MEMORY_PATH = Path("viral_memory.json")
 # a circular import.
 UPLOADED_CLIPS_DIR = Path("uploaded_clips")
 
-# Text-only fallback model (cheap/fast) vs. the vision-capable model used when preview
-# frames are available. Falls back to MODEL automatically if the vision path fails.
-MODEL = "gpt-4o-mini"
-VISION_MODEL = "gpt-4o"
+# 2026-08-19: migrated from OpenAI to Gemini — gemini-3.5-flash-lite is multimodal (confirmed
+# live), so the same model now handles both the text-only fallback pass and the vision
+# (preview-frame) pass; MODEL/VISION_MODEL stay as two separate constants (rather than
+# collapsing to one) because the code path that picks between them is really about whether
+# preview frames extracted successfully, not about which model to call — see run_critic()'s
+# try/except structure. See analyze.MODEL's own comment for why this specific model (several
+# originally-tried ones, including gemini-1.5-flash and gemini-2.5-flash/-lite, are retired).
+MODEL = "gemini-3.5-flash-lite"
+VISION_MODEL = "gemini-3.5-flash-lite"
 MAX_COMPLETION_TOKENS = 4096
 
 # reward_score >= this threshold is eligible to contribute a "DO" rule (not every positive
@@ -333,13 +338,15 @@ def extract_clip_transcript_text(transcript: Optional[dict], start: float, end: 
     return text or "(kein Transkripttext in diesem Zeitbereich gefunden)"
 
 
-def _encode_image_data_uri(path: Path) -> Optional[str]:
+def _read_image_bytes(path: Path) -> Optional[bytes]:
+    """Raw JPEG bytes for genai_types.Part.from_bytes() — Gemini's contents list takes
+    Part objects directly, no base64 data-URI wrapping needed (that was an OpenAI
+    image_url-specific requirement)."""
     try:
-        raw = path.read_bytes()
+        return path.read_bytes()
     except OSError as e:
         logger.warning("Could not read frame %s for vision critic: %s", path, e)
         return None
-    return f"data:image/jpeg;base64,{base64.b64encode(raw).decode('utf-8')}"
 
 
 def extract_frames_for_clips(clips: List[dict], rendered: Optional[Dict[str, Path]]) -> Dict[str, List[Path]]:
@@ -389,11 +396,11 @@ def build_critic_user_content(
     transcript: Optional[dict],
     feedback_by_title: Dict[str, List[str]],
     frames_by_title: Dict[str, List[Path]],
-) -> List[dict]:
-    """Builds the multimodal message content: a list of {"type": "text"|"image_url", ...}
-    blocks, interleaving each clip's text context with its preview frames (if any) so the
-    model can visually attribute images to the right clip."""
-    content: List[dict] = [{"type": "text", "text": "Bewerte die folgenden Clips:"}]
+) -> List[Union[str, "genai_types.Part"]]:
+    """Builds the multimodal contents list: plain strings interleaved with
+    genai_types.Part image parts (Gemini's contents list accepts a flat mix of both
+    directly), so the model can visually attribute images to the right clip."""
+    content: List[Union[str, genai_types.Part]] = ["Bewerte die folgenden Clips:"]
 
     for idx, clip in enumerate(clips, start=1):
         title = clip.get("title", "Untitled")
@@ -406,43 +413,45 @@ def build_critic_user_content(
         )
         if feedback:
             block += "\nMenschliches Feedback zu diesem Clip: " + " | ".join(feedback)
-        content.append({"type": "text", "text": block})
+        content.append(block)
 
         for frame_path in frames_by_title.get(title, []):
-            data_uri = _encode_image_data_uri(frame_path)
-            if data_uri:
-                content.append({"type": "image_url", "image_url": {"url": data_uri}})
+            image_bytes = _read_image_bytes(frame_path)
+            if image_bytes:
+                content.append(genai_types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
 
     return content
 
 
-def _call_critic(content: List[dict], model: str) -> CriticBatch:
-    client = OpenAI()
+def _call_critic(content: List[Union[str, "genai_types.Part"]], model: str) -> CriticBatch:
+    client = genai.Client()
     # Accepted-clips data is only ever a fallback (2026-08-19) — real performance data is
     # always the stronger, preferred signal when it exists.
     viral_section = load_viral_memory_section() or load_accepted_clips_section()
     if viral_section:
-        content = content + [{"type": "text", "text": viral_section}]
+        content = content + [viral_section]
 
-    completion = openai_utils.call_with_retry(
-        lambda: client.chat.completions.parse(
+    response = llm_utils.call_with_retry(
+        lambda: client.models.generate_content(
             model=model,
-            messages=[
-                {"role": "system", "content": CRITIC_SYSTEM_PROMPT},
-                {"role": "user", "content": content},
-            ],
-            response_format=CriticBatch,
-            max_completion_tokens=MAX_COMPLETION_TOKENS,
+            contents=content,
+            config=genai_types.GenerateContentConfig(
+                system_instruction=CRITIC_SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                response_schema=CriticBatch,
+                max_output_tokens=MAX_COMPLETION_TOKENS,
+            ),
         ),
         description=f"train_loop._call_critic({model})",
     )
 
-    choice = completion.choices[0]
-    parsed = choice.message.parsed
+    candidate = response.candidates[0] if response.candidates else None
+    finish_reason = candidate.finish_reason if candidate else None
+    parsed = response.parsed
     if parsed is None:
         logger.warning(
             "Critic response could not be parsed (finish_reason=%s) — no guidelines will be "
-            "derived from this run.", choice.finish_reason,
+            "derived from this run.", finish_reason,
         )
         return CriticBatch(verdicts=[])
 
@@ -473,7 +482,7 @@ def run_critic(
     except Exception as e:
         logger.warning(
             "Vision critic failed (%s) — falling back to text-only evaluation",
-            openai_utils.redact_secrets(str(e)),
+            llm_utils.redact_secrets(str(e)),
         )
 
     content = build_critic_user_content(clips, transcript, feedback_by_title, {})
@@ -481,7 +490,7 @@ def run_critic(
     try:
         return _call_critic(content, text_model)
     except Exception as e:
-        logger.error("Critic LLM call failed (text-only fallback): %s", openai_utils.redact_secrets(str(e)))
+        logger.error("Critic LLM call failed (text-only fallback): %s", llm_utils.redact_secrets(str(e)))
         raise
 
 

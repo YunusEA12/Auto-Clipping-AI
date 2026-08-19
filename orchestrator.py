@@ -52,7 +52,7 @@ STOP_GRACE_PERIOD_SECONDS = 15
 # --- Crash-loop backoff -----------------------------------------------------------------
 # A subprocess that exits within this many seconds of starting is considered a "crash", not
 # a normal end-of-stream stop — restarting it immediately, forever, is exactly the failure
-# mode that let a single malformed profiles/<name>.json burn OpenAI calls in an unbounded
+# mode that let a single malformed profiles/<name>.json burn LLM API calls in an unbounded
 # hot loop. A process that ran longer than this is considered healthy and resets the count.
 CRASH_LOOP_WINDOW_SECONDS = 60
 CRASH_BACKOFF_BASE_SECONDS = 30

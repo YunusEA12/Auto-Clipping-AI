@@ -3,7 +3,7 @@ ffmpeg-python
 faster-whisper
 python-dotenv
 pydantic
-openai
+google-genai
 opencv-python-headless
 mediapipe
 google-api-python-client

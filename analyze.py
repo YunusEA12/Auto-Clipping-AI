@@ -9,11 +9,12 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 from dotenv import load_dotenv
-from openai import OpenAI
+from google import genai
+from google.genai import types as genai_types
 from pydantic import BaseModel, Field, field_validator
 
 import atomic_io
-import openai_utils
+import llm_utils
 
 import logging_setup
 
@@ -26,7 +27,17 @@ OUTPUT_PATH = TEMP_DIR / "clips.json"
 FEEDBACK_PATH = Path("feedback.json")
 TOP_PERFORMERS_PATH = Path("top_performers.json")
 AI_GUIDELINES_PATH = Path("ai_guidelines.txt")
-MODEL = "gpt-4o-mini"
+# 2026-08-19: migrated from OpenAI (gpt-4o-mini) to Gemini — one model for every LLM task in
+# this codebase (this text-only selector AND train_loop.py's vision critic), per the explicit
+# cost-reduction call ahead of the VPS move. gemini-1.5-flash (the originally requested model)
+# and gemini-2.5-flash/-lite (the next two tried) are all retired/inaccessible for this API
+# key -- confirmed live via 404s from the real API, the last of which explicitly named
+# gemini-3.5-flash-lite as its replacement. Confirmed live: the lite tier still supports both
+# structured JSON output (response_schema) and multimodal image input, so it covers the
+# vision critic too -- and "lite" is the cheapest tier, matching the actual cost goal here
+# far better than the plain (non-lite) flash tier Google's OTHER 404 (for gemini-2.5-flash)
+# pointed at instead (gemini-3.6-flash, priced roughly 7-9x higher per token).
+MODEL = "gemini-3.5-flash-lite"
 
 MIN_CLIP_DURATION = 30
 MAX_CLIP_DURATION = 90
@@ -35,8 +46,9 @@ MIN_CLIPS_TARGET = 15
 MAX_CLIPS_TARGET = 20
 
 # Generous headroom for ~20 detailed clips (title + hook_explanation + scores) as structured
-# JSON, well within gpt-4o-mini's 16384-token output cap — without this, an unbounded
-# response risks getting cut off mid-JSON exactly when MAX_CLIPS_TARGET is raised.
+# JSON, well within gemini-2.5-flash's 65536-token output cap (confirmed live via
+# client.models.get()) — without this, an unbounded response risks getting cut off mid-JSON
+# exactly when MAX_CLIPS_TARGET is raised.
 MAX_COMPLETION_TOKENS = 8192
 
 ENERGY_WINDOW_SECONDS = 2.0
@@ -534,48 +546,50 @@ def select_clips(
     streamer_name: Optional[str] = None,
     language: Optional[str] = None,
 ) -> ClipSelection:
-    client = OpenAI()
+    client = genai.Client()
     system_prompt = build_system_prompt(profile, streamer_name, language)
     energy_section = build_energy_prompt_section(energy_spikes or [])
 
     logger.info("Sending transcript to %s for scene selection", model)
     try:
-        completion = openai_utils.call_with_retry(
-            lambda: client.chat.completions.parse(
+        response = llm_utils.call_with_retry(
+            lambda: client.models.generate_content(
                 model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Transcript:\n{transcript_text}{energy_section}"},
-                ],
-                response_format=ClipSelection,
-                max_completion_tokens=MAX_COMPLETION_TOKENS,
+                contents=[f"Transcript:\n{transcript_text}{energy_section}"],
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json",
+                    response_schema=ClipSelection,
+                    max_output_tokens=MAX_COMPLETION_TOKENS,
+                ),
             ),
             description="analyze.select_clips",
         )
     except Exception as e:
-        logger.error("LLM API call failed: %s", openai_utils.redact_secrets(str(e)))
+        logger.error("LLM API call failed: %s", llm_utils.redact_secrets(str(e)))
         raise
 
-    choice = completion.choices[0]
-    parsed = choice.message.parsed
+    candidate = response.candidates[0] if response.candidates else None
+    finish_reason = candidate.finish_reason if candidate else None
+    parsed = response.parsed
 
-    # A technically-unusable response (truncated mid-JSON, or unparseable) is a genuine
-    # failure and raises LLMResponseIncomplete so analyze() knows to fall back to
+    # A technically-unusable response (truncated mid-JSON, blocked, or unparseable) is a
+    # genuine failure and raises LLMResponseIncomplete so analyze() knows to fall back to
     # find_longest_segment_fallback(). This is distinct from the model validly parsing but
     # deliberately choosing zero clips (handled below) — that's an intentional quality-gate
     # decision, not a failure, and must NOT trigger the fallback.
-    if choice.finish_reason == "length":
+    if finish_reason == genai_types.FinishReason.MAX_TOKENS:
         # Checked before the generic parsed-is-None case below: a truncated response almost
         # always fails to parse too, so this more specific/actionable message would otherwise
         # never be reached.
         raise LLMResponseIncomplete(
-            f"LLM response for {model} was truncated (finish_reason=length, "
-            f"max_completion_tokens={MAX_COMPLETION_TOKENS}) — the JSON likely broke mid-clip"
+            f"LLM response for {model} was truncated (finish_reason=MAX_TOKENS, "
+            f"max_output_tokens={MAX_COMPLETION_TOKENS}) — the JSON likely broke mid-clip"
         )
     if parsed is None:
         raise LLMResponseIncomplete(
             f"LLM response for {model} could not be parsed into ClipSelection "
-            f"(finish_reason={choice.finish_reason}, refusal={getattr(choice.message, 'refusal', None)!r})"
+            f"(finish_reason={finish_reason!r})"
         )
 
     if not parsed.clips:

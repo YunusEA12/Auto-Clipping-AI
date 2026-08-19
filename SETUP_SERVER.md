@@ -59,7 +59,7 @@ venv/bin/playwright install --with-deps chromium
 
 ## 3. `.env` (API-Keys)
 
-Lokal auf deinem PC steht bereits eine funktionierende `.env` (OpenAI-Key usw.) — die
+Lokal auf deinem PC steht bereits eine funktionierende `.env` (Gemini-Key usw.) — die
 einfach rüberkopieren, nicht neu anlegen:
 
 ```bash
