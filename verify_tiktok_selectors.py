@@ -76,6 +76,13 @@ UPLOAD_PAGE_SELECTORS = [
     ("upload progress %% text (legacy/secondary signal)", "text=/\\d{1,3}\\s*%/"),
     ("Post/Veröffentlichen button", "[data-e2e='post_video_button']"),
     ("Discard/Verwerfen button (not used by the safe/draft path)", "[data-e2e='discard_post_button']"),
+    # Background-music selectors (2026-08-19) — only match once a video is uploaded AND the
+    # Sounds panel has actually been opened; use --pause-before-check and click "Sounds"
+    # yourself for real coverage of these, same caveat as the four selectors above.
+    ("Sounds panel button", tiktok_uploader.SOUND_PANEL_BUTTON_SELECTOR),
+    ("Sound track row (Sounds panel open)", tiktok_uploader.SOUND_TRACK_ROW_SELECTOR),
+    ("Sound track add button (Sounds panel open)", tiktok_uploader.SOUND_TRACK_ADD_BUTTON_SELECTOR),
+    ("Sound panel close button (Sounds panel open)", tiktok_uploader.SOUND_PANEL_CLOSE_BUTTON_SELECTOR),
 ]
 
 # (label, selector) pairs used only by metrics_tracker.py's DOM-scraping *fallback* path —

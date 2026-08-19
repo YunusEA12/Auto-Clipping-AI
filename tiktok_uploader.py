@@ -46,6 +46,7 @@ Usage:
 import argparse
 import json
 import logging
+import random
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, NamedTuple, Optional, Tuple
@@ -73,6 +74,53 @@ POST_CONFIRM_TIMEOUT_MS = 15000
 POST_CONFIRM_POLL_MS = 500
 HASHTAG_SUGGESTION_TIMEOUT_MS = 4000
 DEFAULT_HASHTAGS = ["#fyp", "#viral", "#shorts", "#gaming"]
+
+# 2026-08-19: adding background music was previously left as a manual step (the account
+# owner's own deliberate call — see build_caption_text's neighboring history — to avoid the
+# copyright-strike/shadowban risk of the pipeline picking real, non-cleared music). TikTok's
+# own upload editor has a separate "Unlimited" sound-library tab — TikTok's Commercial Music
+# Library, licensed for creator use with no copyright risk — distinct from the "For You" tab,
+# which surfaces real (often not commercially-cleared) trending tracks. Verified live
+# 2026-08-19 by actually uploading a real test clip (never published) and opening this tab:
+# every track title/artist is plainly stock/library content (e.g. "Tenfold Love" by "Twin
+# Dance Echo"), not chart music — automating THIS tab specifically is what keeps this feature
+# inside the account owner's original constraint instead of reintroducing the exact risk they
+# were avoiding.
+SOUND_LIBRARY_TAB_LABEL = "Unlimited"
+# All selectors below verified live 2026-08-19 against the real TikTok Studio upload editor
+# (same authenticated-session methodology as every other selector in this file — see the
+# module docstring) by uploading a real (never-published) test clip, opening the Sounds
+# panel, and inspecting the resulting DOM. `data-button-name='sounds'` (found on the editor's
+# left-nav tool button) is used instead of a text-based role lookup because "Sounds" as plain
+# text risks matching more than one element on this densely-labeled editor page.
+SOUND_PANEL_BUTTON_SELECTOR = "[data-button-name='sounds']"
+SOUND_TRACK_ROW_SELECTOR = ".MusicPanelMusicItem__wrap"
+SOUND_TRACK_TITLE_SELECTOR = ".MusicPanelMusicItem__infoBasicTitle"
+SOUND_TRACK_ADD_BUTTON_SELECTOR = ".MusicPanelMusicItem__operation button"
+SOUND_TRACK_ADD_ICON_SELECTOR = ".MusicPanelMusicItem__operation [data-icon]"
+# The Volume slider's paired number-input (confirmed live: Volume renders before the Fade-
+# in/Fade-out sliders that reuse the same component, so .first reliably targets Volume, not a
+# fade duration) — this panel only exists once a track has actually been added, so this
+# selector is scoped to right after that click, never queried standalone.
+SOUND_VOLUME_INPUT_SELECTOR = ".PropSettingSliderInput__numberInput input"
+SOUND_PANEL_CLOSE_BUTTON_SELECTOR = ".SideModuleRenderBox__header button"
+# Randomizing among the first few tracks (rather than always the very first) keeps consecutive
+# uploads from all carrying identical background audio — the same "don't make every render
+# trivially identical to the last" spirit as the "hidden gem" clip-selection guidance, just
+# applied to music instead of content choice.
+SOUND_CANDIDATE_POOL = 8
+# Confirmed live: newly-added tracks show a transient "Loading" data-icon while TikTok
+# fetches/prepares the audio before settling into a different icon. Best-effort — if this
+# never resolves, the track was still added (confirmed by the timeline in the live test), so
+# proceeding either way never loses the music, only the (non-critical) volume-adjustment step
+# below might run slightly early against a still-loading track.
+SOUND_LOAD_TIMEOUT_MS = 8000
+SOUND_LOAD_POLL_MS = 500
+# Background music sits under the streamer's own spoken commentary, not at the track's full
+# mastered level — empirical starting point (same "verify by listening to a real render and
+# adjusting" caveat as every other empirical constant in this codebase), not derived from a
+# spec. TikTok's own slider ranges -60..20 dB; this is a moderate attenuation, not a mute.
+SOUND_VOLUME_DB = "-14"
 
 # Diagnostic-only, gated on headless=False (see upload_video()): the URL-change/form-gone
 # signal _wait_for_post_confirmation() checks for is itself unverified against what TikTok
@@ -407,12 +455,122 @@ def _wait_for_post_confirmation(page) -> bool:
     return False
 
 
+def _close_sound_panel(page) -> None:
+    """Best-effort: closing the Sounds side panel isn't required for the rest of the upload
+    flow to work (caption_container/post_video_button coexist in the DOM regardless of panel
+    state, confirmed live 2026-08-19), but leaving it open is untidy and a needless extra
+    element that could intercept an unrelated click later. Never raises."""
+    try:
+        page.locator(SOUND_PANEL_CLOSE_BUTTON_SELECTOR).first.click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
+    except PlaywrightTimeoutError:
+        pass
+
+
+def _wait_for_sound_loaded(row) -> None:
+    """Polls the just-added track's icon until it's done showing 'Loading', or gives up after
+    a bounded timeout — best-effort, same pattern as _wait_for_caption_filled: proceeding
+    without confirmation never loses the added track (it was already applied by the click
+    that triggered this wait), it just means the volume-adjustment step right after might run
+    a little early."""
+    elapsed_ms = 0
+    icon_locator = row.locator(SOUND_TRACK_ADD_ICON_SELECTOR).first
+    while elapsed_ms < SOUND_LOAD_TIMEOUT_MS:
+        try:
+            if icon_locator.get_attribute("data-icon") != "Loading":
+                return
+        except Exception:
+            return
+        row.page.wait_for_timeout(SOUND_LOAD_POLL_MS)
+        elapsed_ms += SOUND_LOAD_POLL_MS
+
+
+def _set_sound_volume(page) -> None:
+    """Best-effort: dials the just-added track down to SOUND_VOLUME_DB so it sits under the
+    streamer's own spoken commentary instead of competing with it. Never fails the upload —
+    a track added at TikTok's own default (0 dB, full level) is still a working upload, just
+    a louder mix than intended."""
+    try:
+        volume_input = page.locator(SOUND_VOLUME_INPUT_SELECTOR).first
+        volume_input.fill(SOUND_VOLUME_DB, timeout=OVERLAY_DISMISS_TIMEOUT_MS)
+        page.keyboard.press("Tab")  # commits the typed value, same as a human tabbing away
+    except PlaywrightTimeoutError:
+        logger.warning("Could not adjust background sound volume — left at the track's default level")
+
+
+def _add_background_sound(page) -> Optional[str]:
+    """Adds one track from TikTok's own Commercial/royalty-free Music Library (the
+    SOUND_LIBRARY_TAB_LABEL tab — see its own comment above for why this specific tab, not
+    "For You", is what keeps this feature inside the original no-copyright-risk constraint)
+    as a background layer under the clip's own audio.
+
+    Confirmed live 2026-08-19 that clicking a track's add button layers it as a SECOND
+    waveform in the render timeline alongside the clip's original audio track — it does not
+    replace or mute the streamer's own voice.
+
+    Best-effort throughout, same pattern as _dismiss_blocking_overlays/_tokenize_hashtag:
+    every step degrades gracefully (logs a warning, returns None) rather than failing the
+    whole upload — a clip that uploads without background music is still a successful
+    upload, exactly as it was before this feature existed. Returns the track title actually
+    added, or None if nothing was added."""
+    try:
+        page.locator(SOUND_PANEL_BUTTON_SELECTOR).first.click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
+    except PlaywrightTimeoutError:
+        logger.warning("Could not open the Sounds panel — uploading without background music")
+        return None
+
+    try:
+        page.get_by_role("button", name="Got it").first.click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
+        logger.info("Dismissed 'Phone mode' onboarding tooltip in the Sounds panel")
+    except PlaywrightTimeoutError:
+        pass
+
+    try:
+        page.get_by_role("tab", name=SOUND_LIBRARY_TAB_LABEL).click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
+    except PlaywrightTimeoutError:
+        logger.warning(
+            "Could not switch to the '%s' sound library tab — uploading without background music",
+            SOUND_LIBRARY_TAB_LABEL,
+        )
+        _close_sound_panel(page)
+        return None
+
+    rows = page.locator(SOUND_TRACK_ROW_SELECTOR)
+    try:
+        rows.first.wait_for(state="visible", timeout=SOUND_LOAD_TIMEOUT_MS)
+    except PlaywrightTimeoutError:
+        logger.warning(
+            "No tracks found in the '%s' sound library tab — uploading without background music",
+            SOUND_LIBRARY_TAB_LABEL,
+        )
+        _close_sound_panel(page)
+        return None
+
+    pool_size = min(rows.count(), SOUND_CANDIDATE_POOL)
+    chosen_row = rows.nth(random.randrange(pool_size))
+
+    try:
+        title = (chosen_row.locator(SOUND_TRACK_TITLE_SELECTOR).text_content() or "").strip()
+        chosen_row.locator(SOUND_TRACK_ADD_BUTTON_SELECTOR).click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
+    except PlaywrightTimeoutError:
+        logger.warning("Could not add a track from the sound library — uploading without background music")
+        _close_sound_panel(page)
+        return None
+
+    _wait_for_sound_loaded(chosen_row)
+    _set_sound_volume(page)
+    _close_sound_panel(page)
+
+    logger.info("Added background sound: %s", title or "(untitled track)")
+    return title or None
+
+
 def upload_video(
     video_path: Path,
     description: str,
     hashtags: Optional[List[str]] = None,
     publish: bool = False,
     headless: bool = True,
+    add_background_sound: bool = True,
 ) -> UploadOutcome:
     """Upload one clip through the TikTok creator upload page, authenticating via cookies
     from cookies.json instead of an interactive login.
@@ -426,6 +584,12 @@ def upload_video(
     publish=False no-op) so one failed browser upload never crashes an unattended pipeline;
     `confirmed` distinguishes an actually-observed success signal from "we hoped" (see M-03
     in the audit).
+
+    `add_background_sound=True` (default) adds one track from TikTok's own royalty-free
+    Commercial Music Library as background audio under the clip — see
+    SOUND_LIBRARY_TAB_LABEL's comment for why that specific library, not real trending music,
+    is what this defaults to. Best-effort: any failure here just uploads without music rather
+    than failing the whole upload; set False to skip the step entirely.
     """
     video_path = Path(video_path)
 
@@ -493,6 +657,10 @@ def upload_video(
             # the caption box needs a real click, not just after page load.
             _dismiss_blocking_overlays(page)
 
+            if add_background_sound:
+                logger.info("Adding background sound from the royalty-free library...")
+                _add_background_sound(page)
+
             logger.info("Filling in caption...")
             caption_box = page.locator("[data-e2e='caption_container'] div[contenteditable='true']").first
             caption_box.click()
@@ -559,6 +727,7 @@ def try_upload_clip(
     description: str,
     hashtags: Optional[List[str]] = None,
     publish: bool = False,
+    add_background_sound: bool = True,
 ) -> UploadOutcome:
     """Non-raising wrapper for automated pipelines (app.py, stream_watcher.py, auto_pilot.py)
     — always headless, catches every failure mode and returns UploadOutcome(success=False, ...)
@@ -566,7 +735,10 @@ def try_upload_clip(
     upload_video(), publish=False is a no-op that never touches the browser — see SAFETY
     MODEL in this module's docstring. Callers must not treat that False as "it failed";
     check the log for why (either a real failure, or the deliberate no-op)."""
-    return upload_video(video_path, description, hashtags, publish=publish, headless=True)
+    return upload_video(
+        video_path, description, hashtags, publish=publish, headless=True,
+        add_background_sound=add_background_sound,
+    )
 
 
 def main():
@@ -580,6 +752,10 @@ def main():
         "mode exists anymore; see SAFETY MODEL in this module's docstring)",
     )
     parser.add_argument("--headed", action="store_true", help="Show the browser window instead of running headless")
+    parser.add_argument(
+        "--no-music", action="store_true",
+        help="Skip adding a track from TikTok's royalty-free Commercial Music Library (added by default)",
+    )
     args = parser.parse_args()
 
     if not args.publish:
@@ -591,7 +767,8 @@ def main():
         raise SystemExit(0)
 
     outcome = upload_video(
-        args.video, args.description, args.hashtags, publish=args.publish, headless=not args.headed
+        args.video, args.description, args.hashtags, publish=args.publish, headless=not args.headed,
+        add_background_sound=not args.no_music,
     )
     if outcome.success and not outcome.confirmed:
         print("Upload clicked, but could not be confirmed (no redirect/form-teardown observed) — check manually.")
