@@ -169,6 +169,17 @@ def face_area_ratio(face_box: tuple[int, int, int, int], frame_w: int, frame_h: 
     return (w * h) / frame_area
 
 
+def face_center_x_ratio(face_box: tuple[int, int, int, int], frame_w: int) -> float:
+    """Horizontal center of the face box as a fraction of frame width (0 = left edge, 1 =
+    right edge) — the position signal used alongside face_area_ratio() to tell a genuine
+    corner gameplay facecam (pushed to an edge) apart from a wide/distant Just-Chatting shot
+    (small on-screen, but still horizontally centered)."""
+    x, _, w, _ = face_box
+    if frame_w <= 0:
+        return 0.5
+    return (x + w / 2) / frame_w
+
+
 def get_facecam_coordinates(
     video_path: str, timestamp: float, padding_factor: float = PADDING_FACTOR
 ) -> tuple[int, int, int, int]:

@@ -127,7 +127,7 @@ SOUND_LOAD_POLL_MS = 500
 # mastered level — empirical starting point (same "verify by listening to a real render and
 # adjusting" caveat as every other empirical constant in this codebase), not derived from a
 # spec. TikTok's own slider ranges -60..20 dB; this is a moderate attenuation, not a mute.
-SOUND_VOLUME_DB = "-14"
+SOUND_VOLUME_DB = "-24"
 
 # Diagnostic-only, gated on headless=False (see upload_video()): the URL-change/form-gone
 # signal _wait_for_post_confirmation() checks for is itself unverified against what TikTok

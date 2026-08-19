@@ -52,6 +52,23 @@ def test_resolve_layout_ratio_exactly_at_threshold_is_full_cam(monkeypatch):
     assert process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0) == process.LAYOUT_FULL_CAM
 
 
+def test_resolve_layout_small_but_centered_face_is_full_cam(monkeypatch):
+    # A wide/distant Just-Chatting shot: face reads small (well below the area threshold) but
+    # sits horizontally centered, not pushed to a corner -- must NOT be mistaken for a
+    # gameplay-corner facecam (found live, 2026-08-19).
+    box = (450, 400, 100, 100)  # 0.01 of a 1000x1000 frame, centered (center_x_ratio == 0.5)
+    assert process.vision.face_area_ratio(box, 1000, 1000) < process.FULL_CAM_MIN_FACE_AREA_RATIO
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", lambda *a, **k: (1, box, 1000, 1000))
+    assert process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0) == process.LAYOUT_FULL_CAM
+
+
+def test_resolve_layout_small_and_off_center_face_is_split_screen(monkeypatch):
+    # A genuine corner gameplay facecam: small AND pushed to the edge -- still split_screen.
+    box = (0, 0, 100, 100)  # 0.01 of a 1000x1000 frame, center_x_ratio == 0.05 (corner)
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", lambda *a, **k: (1, box, 1000, 1000))
+    assert process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0) == process.LAYOUT_SPLIT_SCREEN
+
+
 def test_resolve_layout_retries_on_ambiguous_first_frame_when_clip_end_given(monkeypatch):
     # First sampled frame looks like 0 faces (a blink, a HUD flicker); the second retry
     # timestamp (clip_start + 1/3 of the duration) finds the real single webcam.

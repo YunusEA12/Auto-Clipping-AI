@@ -27,6 +27,26 @@ def test_face_area_ratio_zero_frame_area_does_not_crash():
     assert vision.face_area_ratio((0, 0, 100, 100), 0, 0) == 0.0
 
 
+# --- face_center_x_ratio (pure function, no MediaPipe involved) ---------------------------
+
+def test_face_center_x_ratio_centered_face():
+    assert vision.face_center_x_ratio((400, 0, 200, 200), 1000) == 0.5
+
+
+def test_face_center_x_ratio_left_corner_face():
+    ratio = vision.face_center_x_ratio((0, 0, 100, 100), 1000)
+    assert ratio == 0.05
+
+
+def test_face_center_x_ratio_right_corner_face():
+    ratio = vision.face_center_x_ratio((900, 0, 100, 100), 1000)
+    assert ratio == 0.95
+
+
+def test_face_center_x_ratio_zero_frame_width_does_not_crash():
+    assert vision.face_center_x_ratio((0, 0, 100, 100), 0) == 0.5
+
+
 # --- detect_faces_for_layout ---------------------------------------------------------------
 
 def test_detect_faces_for_layout_no_faces(monkeypatch):

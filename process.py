@@ -50,6 +50,16 @@ SPLIT_SCREEN_FACE_RATIO = 1 / 3
 # source content and check which side of this threshold they land on before trusting it.
 FULL_CAM_MIN_FACE_AREA_RATIO = 0.28
 
+# Area alone misfires on a Just-Chatting streamer sitting far back from the camera: the face
+# reads small (below FULL_CAM_MIN_FACE_AREA_RATIO) even though the whole frame IS the person,
+# no separate gameplay feed anywhere (found live, 2026-08-19 — a wide-angle "just chatting"
+# clip got wrongly split_screen'd). Position is the second signal: a real gameplay-corner
+# facecam sits pushed to an edge, while a wide/distant Just-Chatting shot still centers the
+# face horizontally. A centrally-located face forces full_cam even under the area threshold;
+# only a face that's BOTH small AND off-center reads as a genuine corner facecam box.
+CENTRAL_FACE_X_MIN_RATIO = 0.25
+CENTRAL_FACE_X_MAX_RATIO = 0.75
+
 # get_facecam_coordinates()'s default PADDING_FACTOR (2.5) is tuned for split_screen's top-
 # third zone — cover-fitting that same padded box into full_cam's much taller full-canvas
 # target crops far tighter than intended (more of the padding gets consumed matching the 9:16
@@ -659,10 +669,16 @@ def resolve_layout(layout: str, video_path: Path, clip_start: float, clip_end: f
 
     if face_count == 1:
         ratio = vision.face_area_ratio(raw_box, frame_w, frame_h)
-        resolved = LAYOUT_FULL_CAM if ratio >= FULL_CAM_MIN_FACE_AREA_RATIO else LAYOUT_SPLIT_SCREEN
+        center_x_ratio = vision.face_center_x_ratio(raw_box, frame_w)
+        is_centered = CENTRAL_FACE_X_MIN_RATIO <= center_x_ratio <= CENTRAL_FACE_X_MAX_RATIO
+        resolved = (
+            LAYOUT_FULL_CAM if ratio >= FULL_CAM_MIN_FACE_AREA_RATIO or is_centered
+            else LAYOUT_SPLIT_SCREEN
+        )
         logger.info(
-            "Auto-layout at %.2fs: face_count=1, face_area_ratio=%.3f (threshold %.2f) -> %s",
-            clip_start, ratio, FULL_CAM_MIN_FACE_AREA_RATIO, resolved,
+            "Auto-layout at %.2fs: face_count=1, face_area_ratio=%.3f (threshold %.2f), "
+            "face_center_x_ratio=%.3f (centered=%s) -> %s",
+            clip_start, ratio, FULL_CAM_MIN_FACE_AREA_RATIO, center_x_ratio, is_centered, resolved,
         )
     else:
         resolved = LAYOUT_BLUR_BACKGROUND
