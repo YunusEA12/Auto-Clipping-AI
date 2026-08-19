@@ -116,6 +116,18 @@ Rules:
   narration — prefer clips that contain one or more of them when otherwise similar, but their
   absence is not a reason to reject an otherwise good clip:
   {', '.join(TRIGGER_WORDS)}
+- Avoid the "everyone clips this" trap: this streamer's single biggest, most obvious spectacle
+  moment (the loudest scream, the one huge kill, the most extreme jump-scare) is exactly what
+  dozens of other clipping channels are also cutting from the same stream, often at nearly the
+  same timestamp — that overlap is a real content-originality problem on platforms that
+  penalize duplicate/unoriginal content, not something to solve by disguising the footage. When
+  multiple candidate moments are comparably strong, prefer the one whose appeal comes from this
+  streamer's specific phrasing, reaction, or the flow of conversation around it — something a
+  clip of a DIFFERENT streamer's playthrough couldn't produce — over pure spectacle that would
+  read the same regardless of who's playing. This does not mean avoiding strong spectacle
+  moments entirely (a genuinely huge play is still a good clip); it means raw energy/action
+  alone should not be the deciding factor when a more idiosyncratic, personality-driven moment
+  is comparably strong.
 - Description/caption: Every clip also needs a ready-to-post TikTok/Shorts caption — a short,
   punchy hook written for social media (not a plain summary of the clip), copy-paste ready for
   the creator to post as-is.
