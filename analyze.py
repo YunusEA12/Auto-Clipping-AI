@@ -116,18 +116,28 @@ Rules:
   narration — prefer clips that contain one or more of them when otherwise similar, but their
   absence is not a reason to reject an otherwise good clip:
   {', '.join(TRIGGER_WORDS)}
-- Avoid the "everyone clips this" trap: this streamer's single biggest, most obvious spectacle
-  moment (the loudest scream, the one huge kill, the most extreme jump-scare) is exactly what
-  dozens of other clipping channels are also cutting from the same stream, often at nearly the
-  same timestamp — that overlap is a real content-originality problem on platforms that
-  penalize duplicate/unoriginal content, not something to solve by disguising the footage. When
-  multiple candidate moments are comparably strong, prefer the one whose appeal comes from this
-  streamer's specific phrasing, reaction, or the flow of conversation around it — something a
-  clip of a DIFFERENT streamer's playthrough couldn't produce — over pure spectacle that would
-  read the same regardless of who's playing. This does not mean avoiding strong spectacle
-  moments entirely (a genuinely huge play is still a good clip); it means raw energy/action
-  alone should not be the deciding factor when a more idiosyncratic, personality-driven moment
-  is comparably strong.
+- Hunt for hidden gems, not the highlight-reel obvious pick: this streamer's single biggest,
+  loudest spectacle moment (the huge kill, the standard game win, the loudest scream) is exactly
+  what dozens of other clipping channels are also cutting from the same stream, often at nearly
+  the same timestamp — that overlap is a real content-originality problem on platforms that
+  penalize duplicate/unoriginal content, not something to fix by disguising the footage. Treat
+  the obvious spectacle pick as a fallback, not the default. Actively favor moments highlight
+  channels tend to skip past:
+  - Dry, sarcastic humor or a weird, absurd tangent the streamer goes off on — the appeal is in
+    the specific delivery and phrasing, not the subject matter.
+  - Relatable "real talk" moments, or a genuinely funny back-and-forth with chat — the kind of
+    moment that's highly engaging in the room but easy to overlook because nothing "big"
+    happens on screen.
+  - A quiet or awkward beat that visibly builds tension — silence, hesitation, an uncomfortable
+    pause — as long as it still resolves into something (a reaction, a joke, a comment that
+    breaks it): this is a real narrative arc, not just dead air, and the "no boring/flat with no
+    payoff" quality gate above still fully applies to it.
+  This is a genuine shift in what counts as a strong pick, not a tie-breaker: a quieter,
+  personality-driven moment should be picked OVER a bigger spectacle moment when the personality-
+  driven one has the stronger hook, not only when the two are already tied. It's still not a
+  license to force a clip out of genuinely weak material — every other rule above (quality gate,
+  narrative coherence, no mid-sentence cuts) applies just as strictly to a "hidden gem" pick as
+  to a spectacle one; a quiet moment that goes nowhere is still a bad clip.
 - Description/caption: Every clip also needs a ready-to-post TikTok/Shorts caption — a short,
   punchy hook written for social media (not a plain summary of the clip), copy-paste ready for
   the creator to post as-is.
