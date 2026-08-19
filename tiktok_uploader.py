@@ -127,7 +127,8 @@ SOUND_LOAD_POLL_MS = 500
 # mastered level — empirical starting point (same "verify by listening to a real render and
 # adjusting" caveat as every other empirical constant in this codebase), not derived from a
 # spec. TikTok's own slider ranges -60..20 dB; this is a moderate attenuation, not a mute.
-SOUND_VOLUME_DB = "-24"
+SOUND_VOLUME_DB = "-35"  # slider range is -60..20 (verified live via the widget's own
+# aria-valuemin/max) -- -14 and -24 both still read as competing with the streamer's voice
 
 # Diagnostic-only, gated on headless=False (see upload_video()): the URL-change/form-gone
 # signal _wait_for_post_confirmation() checks for is itself unverified against what TikTok
@@ -495,7 +496,14 @@ def _set_sound_volume(page) -> None:
     """Best-effort: dials the just-added track down to SOUND_VOLUME_DB so it sits under the
     streamer's own spoken commentary instead of competing with it. Never fails the upload —
     a track added at TikTok's own default (0 dB, full level) is still a working upload, just
-    a louder mix than intended."""
+    a louder mix than intended.
+
+    fill()+Tab genuinely commits here (verified live, 2026-08-19, by dumping the slider
+    widget's full DOM before/after): the thumb position, aria-valuenow, progress-bar width,
+    and paired hidden range input all move together with the typed value, unlike the
+    contenteditable caption box this project deliberately avoids JS-injecting into. If music
+    still reads too loud, it's a genuine calibration question (adjust SOUND_VOLUME_DB, range
+    is -60..20), not a stuck/uncommitted UI value."""
     try:
         volume_input = page.locator(SOUND_VOLUME_INPUT_SELECTOR).first
         volume_input.fill(SOUND_VOLUME_DB, timeout=OVERLAY_DISMISS_TIMEOUT_MS)
