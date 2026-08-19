@@ -86,6 +86,24 @@ st.markdown(
     .st-key-setup_card, [class*="st-key-clip_card_"] {
         box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
     }
+    .st-key-fleet_start_btn button {
+        background: #16a34a;
+        border: none;
+        color: white;
+        font-weight: 600;
+    }
+    .st-key-fleet_start_btn button:hover:not(:disabled) {
+        background: #15803d;
+    }
+    .st-key-fleet_stop_btn button {
+        background: #dc2626;
+        border: none;
+        color: white;
+        font-weight: 600;
+    }
+    .st-key-fleet_stop_btn button:hover:not(:disabled) {
+        background: #b91c1c;
+    }
     h1 {
         font-weight: 700;
         letter-spacing: -0.5px;
@@ -156,16 +174,55 @@ with st.sidebar:
                 st.success(state.get("current_action", "Aktiv"))
 
     st.header("🛰️ Fleet Status")
+    orch_status = orchestrator_state.get("status")
+    orch_age = state_age_seconds(orchestrator_state, "last_check")
+    # "stopped" is orchestrator.py's own deliberate-shutdown status (written in its finally
+    # block — see orchestrator.write_orchestrator_state calls), distinct from just going
+    # stale, which instead means it died without a chance to report that itself. A missing
+    # orchestrator_state.json (never started, or a fresh checkout) counts as offline too, for
+    # the Start/Stop Fleet caption below.
+    orch_offline = (
+        not orchestrator_state or orch_status == "stopped"
+        or (orch_age is not None and orch_age > STALE_THRESHOLD_SECONDS)
+    )
     if not orchestrator_state:
         st.caption("Orchestrator läuft nicht (orchestrator_state.json nicht gefunden).")
+    elif orch_offline:
+        detail = "planmäßig gestoppt" if orch_status == "stopped" else f"seit {int(orch_age)}s"
+        st.warning(f"⚠️ Offline ({detail})")
     else:
-        orch_age = state_age_seconds(orchestrator_state, "last_check")
-        orch_offline = orch_age is not None and orch_age > STALE_THRESHOLD_SECONDS
         live_count = sum(1 for s in orchestrator_state.get("streamers", {}).values() if s.get("recording"))
-        if orch_offline:
-            st.warning(f"⚠️ Offline (seit {int(orch_age)}s)")
-        else:
-            st.success(f"🟢 Aktiv — {live_count} Aufnahme(n) laufen")
+        st.success(f"🟢 Aktiv — {live_count} Aufnahme(n) laufen")
+
+    # Start/Stop Fleet (2026-08-19): lets the fleet be paused/resumed from the dashboard
+    # instead of Ctrl+C-ing process_supervisor.py in a terminal. process_supervisor.py itself
+    # keeps running and polling either way — this only stops/starts orchestrator.py and
+    # metrics_tracker.py (and, transitively, everything they spawn), via the same robust
+    # two-phase shutdown built for Ctrl+C/SIGTERM, so no orphaned ffmpeg/streamlink processes
+    # either way. See process_supervisor.read_fleet_target_state's docstring for the file and
+    # its fail-safe-to-running default.
+    fleet_target = dashboard_api.read_fleet_target_state()
+    fleet_paused_target = fleet_target == dashboard_api.FLEET_STATE_PAUSED
+    if fleet_paused_target:
+        st.caption("⏸️ Fleet pausiert" if orch_offline else "🟡 Fleet wird gestoppt... (bis zu 30s)")
+    else:
+        st.caption("🟡 Fleet startet..." if orch_offline else "▶️ Fleet läuft")
+
+    col_start, col_stop = st.columns(2)
+    with col_start:
+        if st.button(
+            "▶ Start Fleet", key="fleet_start_btn", width="stretch",
+            disabled=not fleet_paused_target,
+        ):
+            dashboard_api.set_fleet_target_state(dashboard_api.FLEET_STATE_RUNNING)
+            st.rerun()
+    with col_stop:
+        if st.button(
+            "⏹ Stop Fleet", key="fleet_stop_btn", width="stretch",
+            disabled=fleet_paused_target,
+        ):
+            dashboard_api.set_fleet_target_state(dashboard_api.FLEET_STATE_PAUSED)
+            st.rerun()
 
     st.divider()
 

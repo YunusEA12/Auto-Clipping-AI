@@ -255,6 +255,174 @@ def test_run_supervisor_registers_a_sigterm_handler(monkeypatch):
     assert registered == [(process_supervisor.signal.SIGTERM, process_supervisor._raise_keyboard_interrupt)]
 
 
+# --- Fleet Start/Stop via app.py's dashboard button (2026-08-19: terminal-based start/stop
+# was frustrating for iterative testing — fleet_control.json lets app.py request a pause/
+# resume without process_supervisor.py itself ever exiting) --------------------------------
+
+def test_read_fleet_target_state_defaults_to_running_when_file_missing(tmp_path):
+    assert process_supervisor.read_fleet_target_state(tmp_path / "missing.json") == process_supervisor.FLEET_STATE_RUNNING
+
+
+def test_read_fleet_target_state_defaults_to_running_on_corrupt_file(tmp_path):
+    path = tmp_path / "fleet_control.json"
+    path.write_text("{not valid json", encoding="utf-8")
+    assert process_supervisor.read_fleet_target_state(path) == process_supervisor.FLEET_STATE_RUNNING
+
+
+def test_read_fleet_target_state_defaults_to_running_on_unrecognized_value(tmp_path):
+    path = tmp_path / "fleet_control.json"
+    path.write_text('{"target_state": "sleeping"}', encoding="utf-8")
+    assert process_supervisor.read_fleet_target_state(path) == process_supervisor.FLEET_STATE_RUNNING
+
+
+def test_write_then_read_fleet_target_state_roundtrips(tmp_path):
+    path = tmp_path / "fleet_control.json"
+    process_supervisor.write_fleet_target_state(process_supervisor.FLEET_STATE_PAUSED, path)
+    assert process_supervisor.read_fleet_target_state(path) == process_supervisor.FLEET_STATE_PAUSED
+
+    process_supervisor.write_fleet_target_state(process_supervisor.FLEET_STATE_RUNNING, path)
+    assert process_supervisor.read_fleet_target_state(path) == process_supervisor.FLEET_STATE_RUNNING
+
+
+def test_write_fleet_target_state_rejects_unknown_value(tmp_path):
+    with pytest.raises(ValueError):
+        process_supervisor.write_fleet_target_state("sleeping", tmp_path / "fleet_control.json")
+
+
+class _CountingSupervisedProcess:
+    """Stands in for SupervisedProcess in run_supervisor()'s loop without touching real OS
+    processes — tracks start()/stop() call counts and reports is_running() based on whether
+    it's currently "started", so the pause-guard's crash-loop-restart skip can be verified."""
+
+    def __init__(self, name, cmd):
+        self.name = name
+        self.cmd = cmd
+        self.started = False
+        self.start_calls = 0
+        self.stop_calls = 0
+        self.crash_streak = 0
+        self.retry_after = None
+        self.process = None
+
+    def start(self):
+        self.started = True
+        self.process = object()
+        self.start_calls += 1
+
+    def stop(self):
+        # Idempotent, same as the real SupervisedProcess.stop() (a no-op once self.process is
+        # already None) — run_supervisor()'s own `finally` block unconditionally calls stop()
+        # on every supervised process regardless of whether it was already stopped, so a fake
+        # that isn't idempotent would over-count calls made after an already-paused shutdown.
+        if not self.started:
+            return
+        self.started = False
+        self.process = None
+        self.stop_calls += 1
+
+    def is_running(self):
+        return self.started
+
+    def handle_exit(self):
+        pass
+
+    def in_backoff(self):
+        return False
+
+
+def test_run_supervisor_stops_everything_when_paused_via_dashboard(tmp_path, monkeypatch):
+    control_path = tmp_path / "fleet_control.json"
+    monkeypatch.setattr(process_supervisor, "FLEET_CONTROL_PATH", control_path)
+
+    instances = []
+
+    def factory(name, cmd):
+        p = _CountingSupervisedProcess(name, cmd)
+        instances.append(p)
+        return p
+
+    monkeypatch.setattr(process_supervisor, "SupervisedProcess", factory)
+    monkeypatch.setattr(process_supervisor.streamers_module, "purge_stale_agent_states", lambda: None)
+
+    # Pause is requested only once the loop is already running (not before start), so the
+    # test can assert the sequence: start -> (pause requested) -> stop, without racing sleep(0).
+    calls = {"n": 0}
+
+    def fake_sleep(seconds):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            process_supervisor.write_fleet_target_state(process_supervisor.FLEET_STATE_PAUSED, control_path)
+
+    monkeypatch.setattr(process_supervisor.time, "sleep", fake_sleep)
+
+    process_supervisor.run_supervisor(poll_interval=0, max_iterations=3, include_metrics_tracker=False)
+
+    orchestrator = instances[0]
+    # Started once at launch, then explicitly stopped once the pause was observed, and never
+    # restarted afterward despite is_running() now reporting False every remaining cycle (the
+    # crash-loop guard skipping restart entirely while paused is exactly what this asserts).
+    assert orchestrator.start_calls == 1
+    assert orchestrator.stop_calls == 1
+    assert orchestrator.started is False
+
+
+def test_run_supervisor_resumes_after_pause_is_lifted(tmp_path, monkeypatch):
+    control_path = tmp_path / "fleet_control.json"
+    monkeypatch.setattr(process_supervisor, "FLEET_CONTROL_PATH", control_path)
+    process_supervisor.write_fleet_target_state(process_supervisor.FLEET_STATE_PAUSED, control_path)
+
+    instances = []
+
+    def factory(name, cmd):
+        p = _CountingSupervisedProcess(name, cmd)
+        instances.append(p)
+        return p
+
+    monkeypatch.setattr(process_supervisor, "SupervisedProcess", factory)
+    monkeypatch.setattr(process_supervisor.streamers_module, "purge_stale_agent_states", lambda: None)
+
+    calls = {"n": 0}
+
+    def fake_sleep(seconds):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            process_supervisor.write_fleet_target_state(process_supervisor.FLEET_STATE_RUNNING, control_path)
+
+    monkeypatch.setattr(process_supervisor.time, "sleep", fake_sleep)
+
+    process_supervisor.run_supervisor(poll_interval=0, max_iterations=2, include_metrics_tracker=False)
+
+    orchestrator = instances[0]
+    # Started paused (0 calls at launch, per the "respect an already-paused target state on
+    # startup" behavior), then started exactly once after the resume was observed. stop_calls
+    # is 1 too: run_supervisor()'s own final `finally` block always tears everything down when
+    # the function itself returns, independent of the pause feature.
+    assert orchestrator.start_calls == 1
+    assert orchestrator.stop_calls == 1
+
+
+def test_run_supervisor_starts_paused_when_already_requested_before_launch(tmp_path, monkeypatch):
+    control_path = tmp_path / "fleet_control.json"
+    monkeypatch.setattr(process_supervisor, "FLEET_CONTROL_PATH", control_path)
+    process_supervisor.write_fleet_target_state(process_supervisor.FLEET_STATE_PAUSED, control_path)
+
+    instances = []
+
+    def factory(name, cmd):
+        p = _CountingSupervisedProcess(name, cmd)
+        instances.append(p)
+        return p
+
+    monkeypatch.setattr(process_supervisor, "SupervisedProcess", factory)
+    monkeypatch.setattr(process_supervisor.streamers_module, "purge_stale_agent_states", lambda: None)
+    monkeypatch.setattr(process_supervisor.time, "sleep", lambda seconds: None)
+
+    process_supervisor.run_supervisor(poll_interval=0, max_iterations=1, include_metrics_tracker=False)
+
+    orchestrator = instances[0]
+    assert orchestrator.start_calls == 0  # never started at all — target was already "paused"
+
+
 def test_streamlit_actually_imports_its_own_file_watcher_dependency():
     from pathlib import Path
 

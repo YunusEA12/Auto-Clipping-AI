@@ -68,6 +68,32 @@ def test_streamer_crud_roundtrip_through_the_facade(tmp_path, monkeypatch):
     assert dashboard_api.load_streamers() == []
 
 
+# --- Fleet Start/Stop (2026-08-19) — app.py's Start/Stop Fleet button, thinly delegating to
+# process_supervisor.py's own fleet_control.json read/write ---------------------------------
+
+def test_fleet_state_constants_match_process_supervisor():
+    import process_supervisor
+    assert dashboard_api.FLEET_STATE_RUNNING == process_supervisor.FLEET_STATE_RUNNING
+    assert dashboard_api.FLEET_STATE_PAUSED == process_supervisor.FLEET_STATE_PAUSED
+
+
+def test_set_then_read_fleet_target_state_roundtrips(tmp_path, monkeypatch):
+    import process_supervisor
+    monkeypatch.setattr(process_supervisor, "FLEET_CONTROL_PATH", tmp_path / "fleet_control.json")
+
+    dashboard_api.set_fleet_target_state(dashboard_api.FLEET_STATE_PAUSED)
+    assert dashboard_api.read_fleet_target_state() == dashboard_api.FLEET_STATE_PAUSED
+
+    dashboard_api.set_fleet_target_state(dashboard_api.FLEET_STATE_RUNNING)
+    assert dashboard_api.read_fleet_target_state() == dashboard_api.FLEET_STATE_RUNNING
+
+
+def test_read_fleet_target_state_defaults_to_running_without_touching_real_project_state(tmp_path, monkeypatch):
+    import process_supervisor
+    monkeypatch.setattr(process_supervisor, "FLEET_CONTROL_PATH", tmp_path / "never_written.json")
+    assert dashboard_api.read_fleet_target_state() == dashboard_api.FLEET_STATE_RUNNING
+
+
 def test_load_profile_returns_a_plain_dict_not_a_pydantic_model(tmp_path, monkeypatch):
     monkeypatch.setattr(profiles, "PROFILES_DIR", tmp_path)
     (tmp_path / "test_profile.json").write_text('{"name": "test_profile"}', encoding="utf-8")

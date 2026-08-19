@@ -25,6 +25,7 @@ import ingest
 import notify
 import orchestrator
 import process as process_module
+import process_supervisor
 import profiles
 import streamers as streamers_module
 import tiktok_uploader
@@ -59,6 +60,23 @@ def purge_stale_agent_states() -> List[str]:
     reload fixes the display even before process_supervisor.py's own periodic purge gets to
     it. Returns the filenames actually deleted."""
     return streamers_module.purge_stale_agent_states()
+
+
+# --- Fleet Start/Stop (2026-08-19) ----------------------------------------------------------
+# app.py's "Start/Stop Fleet" button and process_supervisor.py's poll loop, decoupled through
+# fleet_control.json (see process_supervisor.py's own read_fleet_target_state/
+# write_fleet_target_state docstrings for the file's shape and fail-safe-to-running default).
+# app.py is the only writer, process_supervisor.py the only reader — no lock needed.
+FLEET_STATE_RUNNING = process_supervisor.FLEET_STATE_RUNNING
+FLEET_STATE_PAUSED = process_supervisor.FLEET_STATE_PAUSED
+
+
+def read_fleet_target_state() -> str:
+    return process_supervisor.read_fleet_target_state()
+
+
+def set_fleet_target_state(target_state: str) -> None:
+    process_supervisor.write_fleet_target_state(target_state)
 
 
 # --- Rendering constants ---------------------------------------------------------------

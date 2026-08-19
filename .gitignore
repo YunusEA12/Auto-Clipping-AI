@@ -16,6 +16,7 @@ agent_state_*.json
 streamers.json
 streamers.json.lock
 orchestrator_state.json
+fleet_control.json
 viral_memory.json
 tiktok_client_secret.json
 tiktok_token.json

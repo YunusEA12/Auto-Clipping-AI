@@ -35,16 +35,19 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import signal
 import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import psutil
 
+import atomic_io
 import streamers as streamers_module
 
 import logging_setup
@@ -79,6 +82,46 @@ CRASH_BACKOFF_MAX_STREAK = 20
 #      isn't delivered, nothing from the original snapshot survives this function.
 GRACEFUL_STOP_TIMEOUT_SECONDS = 30
 FORCE_KILL_WAIT_SECONDS = 5
+
+# 2026-08-19: terminal-based start/stop (Ctrl+C the supervisor, re-run it by hand) was
+# frustrating for iterative testing — a simple IPC file lets app.py's dashboard request a
+# pause/resume without touching the terminal. app.py is the only writer, this module the only
+# reader — a single-writer file needs no lock (contrast streamers.json, which both app.py and
+# orchestrator.py write and DOES need one — see streamers._streamers_lock).
+FLEET_CONTROL_PATH = Path("fleet_control.json")
+FLEET_STATE_RUNNING = "running"
+FLEET_STATE_PAUSED = "paused"
+
+
+def read_fleet_target_state(path: Path = None) -> str:
+    """Best-effort, fails safe toward FLEET_STATE_RUNNING: a fleet_control.json that's
+    missing (dashboard never opened, or a fresh checkout), corrupt, or holds an unrecognized
+    value must never accidentally pause a fleet nobody asked to pause — same
+    never-guess-when-ambiguous principle as streamers.purge_stale_agent_states()."""
+    if path is None:
+        path = FLEET_CONTROL_PATH
+    if not path.exists():
+        return FLEET_STATE_RUNNING
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return FLEET_STATE_RUNNING
+    target = data.get("target_state")
+    return target if target in (FLEET_STATE_RUNNING, FLEET_STATE_PAUSED) else FLEET_STATE_RUNNING
+
+
+def write_fleet_target_state(target_state: str, path: Path = None) -> None:
+    """Called from app.py (via dashboard_api.set_fleet_target_state) when the Start/Stop
+    Fleet button is clicked. Raises on an invalid value rather than silently writing garbage
+    a future read would have to guess about."""
+    if target_state not in (FLEET_STATE_RUNNING, FLEET_STATE_PAUSED):
+        raise ValueError(f"Unknown fleet target state: {target_state!r}")
+    if path is None:
+        path = FLEET_CONTROL_PATH
+    atomic_io.atomic_write_json(path, {
+        "target_state": target_state,
+        "requested_at": datetime.now(timezone.utc).isoformat(),
+    })
 
 
 def _crash_backoff_seconds(streak: int) -> float:
@@ -229,8 +272,16 @@ def run_supervisor(
 
     logger.info("🛡️ Supervisor gestartet, überwacht: %s", ", ".join(supervised))
 
-    for proc in supervised.values():
-        proc.start()
+    # Respect a pause already requested before this run started (e.g. the supervisor itself
+    # was restarted — by process_supervisor's own OS-level service manager, or by hand — while
+    # the dashboard's target state was still "paused") instead of starting everything just to
+    # stop it again on the very next poll cycle.
+    paused = read_fleet_target_state() == FLEET_STATE_PAUSED
+    if paused:
+        logger.info("⏸️ Fleet startet pausiert (laut %s) — keine Kindprozesse werden gestartet.", FLEET_CONTROL_PATH)
+    else:
+        for proc in supervised.values():
+            proc.start()
 
     iteration = 0
     try:
@@ -238,13 +289,40 @@ def run_supervisor(
             iteration += 1
             time.sleep(poll_interval)
 
-            for proc in supervised.values():
-                if proc.is_running():
-                    continue
-                if proc.process is not None:
-                    proc.handle_exit()
-                if not proc.in_backoff():
+            # Fleet pause/resume, requested via app.py's Start/Stop Fleet button (2026-08-19):
+            # this supervisor process itself stays alive and keeps polling either way — only
+            # the supervised orchestrator.py/metrics_tracker.py (and, transitively, everything
+            # THEY spawn) are stopped/started. Reuses the exact same robust two-phase stop()
+            # built for Ctrl+C/SIGTERM shutdown, so a "Stop Fleet" click gets the same
+            # no-orphaned-ffmpeg guarantee as killing the supervisor outright.
+            target_state = read_fleet_target_state()
+            if target_state == FLEET_STATE_PAUSED and not paused:
+                logger.info("⏸️ Fleet-Pause über Dashboard angefordert — stoppe alle überwachten Prozesse (Supervisor bleibt aktiv)...")
+                for proc in supervised.values():
+                    proc.stop()
+                paused = True
+            elif target_state == FLEET_STATE_RUNNING and paused:
+                logger.info("▶️ Fleet-Start über Dashboard angefordert — starte alle überwachten Prozesse neu...")
+                for proc in supervised.values():
+                    # A pause is a deliberate stop, not a crash — don't carry over crash-loop
+                    # backoff state from before it, or a fleet paused during an active backoff
+                    # window would silently stay down past the resume click.
+                    proc.crash_streak = 0
+                    proc.retry_after = None
                     proc.start()
+                paused = False
+
+            # While paused, every supervised process is deliberately not running — skip the
+            # crash-loop restart check entirely, or it would immediately treat the pause
+            # itself as a crash and fight the button click by restarting everything.
+            if not paused:
+                for proc in supervised.values():
+                    if proc.is_running():
+                        continue
+                    if proc.process is not None:
+                        proc.handle_exit()
+                    if not proc.in_backoff():
+                        proc.start()
 
             # Ghost-state cleanup (2026-08-19): orchestrator.py's per-streamer auto_pilot.py
             # subprocesses write agent_state_<slug>.json files that nothing ever removes on
