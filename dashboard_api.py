@@ -51,6 +51,16 @@ def list_agent_state_paths(root: Path = None) -> List[Path]:
         root = Path(".")
     return sorted(root.glob("agent_state*.json"))
 
+
+def purge_stale_agent_states() -> List[str]:
+    """Self-heal on dashboard load (2026-08-19): removes orphaned/stale agent_state*.json
+    files (see streamers.purge_stale_agent_states()'s own docstring for the full story —
+    found live as a "papaplatte" entry showing twice, one copy 9+ hours stale) so a page
+    reload fixes the display even before process_supervisor.py's own periodic purge gets to
+    it. Returns the filenames actually deleted."""
+    return streamers_module.purge_stale_agent_states()
+
+
 # --- Rendering constants ---------------------------------------------------------------
 LAYOUT_AUTO = process_module.LAYOUT_AUTO
 LAYOUT_SPLIT_SCREEN = process_module.LAYOUT_SPLIT_SCREEN

@@ -47,6 +47,14 @@ def test_list_agent_state_paths_empty_when_none_exist(tmp_path):
     assert dashboard_api.list_agent_state_paths(root=tmp_path) == []
 
 
+def test_purge_stale_agent_states_delegates_to_streamers_module(monkeypatch):
+    calls = []
+    monkeypatch.setattr(streamers_module, "purge_stale_agent_states", lambda: calls.append(1) or ["x.json"])
+    result = dashboard_api.purge_stale_agent_states()
+    assert calls == [1]
+    assert result == ["x.json"]
+
+
 def test_streamer_crud_roundtrip_through_the_facade(tmp_path, monkeypatch):
     path = tmp_path / "streamers.json"
     monkeypatch.setattr(streamers_module, "STREAMERS_PATH", path)

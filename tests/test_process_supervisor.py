@@ -29,6 +29,39 @@ def test_crash_backoff_still_works_under_the_new_name():
     assert delays == sorted(delays)
 
 
+# --- Ghost-state cleanup wired into the poll loop (2026-08-19: found live — a leftover flat
+# agent_state.json sat alongside the real per-streamer file, both showing "papaplatte" in the
+# dashboard, one of them 9+ hours stale — process_supervisor.py now purges these every poll
+# cycle, not just on startup, so a long-running supervisor stays self-healing) -------------
+
+def test_purge_runs_every_poll_cycle(monkeypatch):
+    # Real subprocess spawning is stubbed out — this test only cares that the ghost-state
+    # purge gets called from the loop, not that orchestrator.py/metrics_tracker.py actually run.
+    monkeypatch.setattr(process_supervisor.SupervisedProcess, "start", lambda self: None)
+    monkeypatch.setattr(process_supervisor.SupervisedProcess, "is_running", lambda self: True)
+    monkeypatch.setattr(process_supervisor.SupervisedProcess, "stop", lambda self: None)
+
+    calls = []
+    monkeypatch.setattr(process_supervisor.streamers_module, "purge_stale_agent_states", lambda: calls.append(1))
+
+    process_supervisor.run_supervisor(poll_interval=0, max_iterations=3, include_metrics_tracker=False)
+
+    assert len(calls) == 3
+
+
+def test_purge_failure_does_not_crash_the_supervisor(monkeypatch):
+    monkeypatch.setattr(process_supervisor.SupervisedProcess, "start", lambda self: None)
+    monkeypatch.setattr(process_supervisor.SupervisedProcess, "is_running", lambda self: True)
+    monkeypatch.setattr(process_supervisor.SupervisedProcess, "stop", lambda self: None)
+
+    def boom():
+        raise RuntimeError("streamers.json transiently unreadable")
+    monkeypatch.setattr(process_supervisor.streamers_module, "purge_stale_agent_states", boom)
+
+    # Must not raise.
+    process_supervisor.run_supervisor(poll_interval=0, max_iterations=2, include_metrics_tracker=False)
+
+
 def test_streamlit_actually_imports_its_own_file_watcher_dependency():
     from pathlib import Path
 

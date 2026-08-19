@@ -130,8 +130,16 @@ def record_stream_chunk(url: str, duration: int = DEFAULT_CHUNK_DURATION, stream
             streamlink_proc.kill()
 
     if ffmpeg_result.returncode != 0:
-        stderr_tail = ffmpeg_result.stderr[-2000:] if ffmpeg_result.stderr else ""
-        raise RuntimeError(f"ffmpeg failed while recording chunk: {stderr_tail}")
+        # The RAISED message here (not just a log line) is what auto_pilot.py embeds
+        # verbatim into agent_state.json's current_action on a failed cycle — a raw
+        # stderr[-2000:] tail used to dump ffmpeg's own multi-thousand-character build-config
+        # banner straight into the dashboard when the stream drops and ffmpeg fails fast
+        # (found live, 2026-08-19: the whole captured stderr was short enough that the
+        # banner alone filled the entire truncation window). extract_ffmpeg_error_summary()
+        # filters by content instead of position, so this now shows just the real error.
+        error_summary = process_module.extract_ffmpeg_error_summary(ffmpeg_result.stderr)
+        logger.error("ffmpeg failed while recording chunk (full stderr in this log line): %s", ffmpeg_result.stderr)
+        raise RuntimeError(f"ffmpeg failed while recording chunk: {error_summary}")
 
     if not output_path.exists() or output_path.stat().st_size == 0:
         raise RuntimeError(f"Recording produced empty output: {output_path}")

@@ -358,7 +358,7 @@ def extract_preview_frames(video_path: Path, frames_dir: Path = TEMP_DIR) -> Lis
         if result.returncode != 0 or not frame_path.exists():
             logger.warning(
                 "Could not extract preview frame at %.2fs from %s: %s",
-                timestamp, video_path, result.stderr[-500:] if result.stderr else "",
+                timestamp, video_path, extract_ffmpeg_error_summary(result.stderr),
             )
             return None
         return frame_path
@@ -506,6 +506,35 @@ def _run_ffmpeg(cmd: list, timeout: int = FFMPEG_RENDER_TIMEOUT_SECONDS) -> subp
     return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
+# ffmpeg always prints its own build-info banner to stderr before any real output: a version
+# line, a "built with" line, a "configuration:" line listing every --enable-lib... flag it
+# was compiled with (hundreds of them, confirmed live 2026-08-19 to run past 2000 characters
+# on a single line by itself), then several library-version lines. A plain stderr[-N:] tail
+# truncation does NOT reliably exclude this banner when ffmpeg fails fast (e.g. right at
+# "Invalid data found when processing input") — the whole captured stderr can be shorter
+# than the truncation window, banner included, which is exactly what ended up dumped into
+# agent_state.json's current_action and made the dashboard unreadable.
+_FFMPEG_BANNER_PREFIXES = (
+    "ffmpeg version", "built with", "configuration:",
+    "libavutil", "libavcodec", "libavformat", "libavdevice", "libavfilter", "libswscale", "libswresample",
+)
+
+
+def extract_ffmpeg_error_summary(stderr: Optional[str], max_lines: int = 3) -> str:
+    """The real error is reliably one of the LAST few non-empty lines of ffmpeg's stderr
+    regardless of total output length, so this filters by content (dropping known banner
+    line prefixes) instead of by position/character count, then keeps the last `max_lines`.
+    Shared by every ffmpeg-invoking module (process.py, stream_watcher.py) instead of each
+    re-truncating stderr by hand."""
+    if not stderr:
+        return ""
+    lines = [
+        stripped for line in stderr.splitlines()
+        if (stripped := line.strip()) and not stripped.startswith(_FFMPEG_BANNER_PREFIXES)
+    ]
+    return "\n".join(lines[-max_lines:])
+
+
 def render_clip(
     source_video: Path,
     clip: dict,
@@ -540,13 +569,13 @@ def render_clip(
         # losing the clip entirely.
         logger.warning(
             "h264_qsv failed for clip %d (exit code %d), falling back to libx264: %s",
-            index, result.returncode, result.stderr[-2000:],
+            index, result.returncode, extract_ffmpeg_error_summary(result.stderr),
         )
         cmd = _build_render_cmd(source_video, start, end, filter_complex, CPU_ENCODE_ARGS, output_path)
         result = _run_ffmpeg(cmd)
 
         if result.returncode != 0:
-            logger.error("FFmpeg failed for clip %d: %s", index, result.stderr[-4000:])
+            logger.error("FFmpeg failed for clip %d: %s", index, extract_ffmpeg_error_summary(result.stderr))
             raise RuntimeError(f"FFmpeg failed for clip {index} (exit code {result.returncode})")
 
     if not output_path.exists() or output_path.stat().st_size == 0:

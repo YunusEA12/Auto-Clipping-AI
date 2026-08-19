@@ -120,6 +120,16 @@ def state_age_seconds(state: dict, field: str = "last_updated") -> "float | None
     return (datetime.now(timezone.utc) - dt).total_seconds()
 
 
+# Self-heal on every page load (2026-08-19), on top of process_supervisor.py's own periodic
+# purge — fixes a stale/duplicate/orphaned entry (e.g. "papaplatte" showing twice, one 9+
+# hours stale) the moment the dashboard is opened, without waiting for the supervisor's next
+# cycle. Never let this block the page — a purge failure just means stale entries linger
+# until the next successful pass, not a broken dashboard.
+try:
+    dashboard_api.purge_stale_agent_states()
+except Exception as e:
+    logger.warning("Ghost-state cleanup failed: %s", e)
+
 # One entry per running auto_pilot.py instance — a manual/standalone run (no
 # --streamer-name) writes the legacy shared agent_state.json; orchestrator.py running
 # multiple streamers concurrently writes one agent_state_<slug>.json each, so two streamers

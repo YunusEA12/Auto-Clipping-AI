@@ -1,4 +1,6 @@
+import json
 import threading
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -112,3 +114,146 @@ def test_add_streamer_publish_defaults_false_even_with_auto_upload(tmp_path):
     entries = streamers.load_streamers(path)
     assert entries[0]["auto_upload"] is True
     assert entries[0]["publish"] is False
+
+
+# --- load_streamers duplicate-name hardening (2026-08-19: add_streamer()'s own uniqueness
+# check, plus the M-15 filelock, only guard the API path — a hand-edited streamers.json can
+# still contain a literal duplicate name, the same class of bug that produced the dashboard's
+# "papaplatte twice" symptom, even though in that specific case the real cause was a stale
+# agent_state.json, not a duplicate here) --------------------------------------------------
+
+def test_load_streamers_drops_duplicate_name_keeping_first(tmp_path):
+    path = tmp_path / "streamers.json"
+    path.write_text(json.dumps([
+        {"name": "papaplatte", "url": "https://twitch.tv/papaplatte", "auto_upload": True},
+        {"name": "papaplatte", "url": "https://twitch.tv/papaplatte-old-url", "auto_upload": False},
+    ]), encoding="utf-8")
+
+    entries = streamers.load_streamers(path)
+
+    assert len(entries) == 1
+    assert entries[0]["url"] == "https://twitch.tv/papaplatte"
+    assert entries[0]["auto_upload"] is True
+
+
+def test_load_streamers_keeps_distinct_names(tmp_path):
+    path = tmp_path / "streamers.json"
+    path.write_text(json.dumps([
+        {"name": "a", "url": "https://twitch.tv/a"},
+        {"name": "b", "url": "https://twitch.tv/b"},
+    ]), encoding="utf-8")
+
+    entries = streamers.load_streamers(path)
+    assert [e["name"] for e in entries] == ["a", "b"]
+
+
+# --- purge_stale_agent_states (2026-08-19: found live — a leftover flat agent_state.json
+# from before --streamer-name was threaded through everywhere sat next to the real
+# agent_state_papaplatte.json, both showing "papaplatte" in the dashboard at once, one of
+# them over 9 hours stale) -------------------------------------------------------------
+
+def _iso(hours_ago):
+    return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
+
+
+def _write_state(path, target_streamer, hours_ago):
+    path.write_text(json.dumps({
+        "target_streamer": target_streamer, "last_updated": _iso(hours_ago),
+    }), encoding="utf-8")
+
+
+def test_purge_removes_orphaned_state_not_in_streamers_json(tmp_path):
+    streamers_path = tmp_path / "streamers.json"
+    streamers.save_streamers([{"name": "eliasn97", "url": "https://twitch.tv/eliasn97"}], path=streamers_path)
+    orphan = tmp_path / "agent_state_removedstreamer.json"
+    _write_state(orphan, "https://twitch.tv/removedstreamer", hours_ago=1)
+
+    deleted = streamers.purge_stale_agent_states(streamers_path=streamers_path, root=tmp_path)
+
+    assert "agent_state_removedstreamer.json" in deleted
+    assert not orphan.exists()
+
+
+def test_purge_removes_stale_state_for_a_still_configured_streamer(tmp_path):
+    streamers_path = tmp_path / "streamers.json"
+    streamers.save_streamers([{"name": "eliasn97", "url": "https://twitch.tv/eliasn97"}], path=streamers_path)
+    stale = tmp_path / "agent_state_eliasn97.json"
+    _write_state(stale, "https://twitch.tv/eliasn97", hours_ago=30)
+
+    deleted = streamers.purge_stale_agent_states(streamers_path=streamers_path, root=tmp_path, max_age_hours=24)
+
+    assert "agent_state_eliasn97.json" in deleted
+    assert not stale.exists()
+
+
+def test_purge_keeps_fresh_state_for_a_still_configured_streamer(tmp_path):
+    streamers_path = tmp_path / "streamers.json"
+    streamers.save_streamers([{"name": "eliasn97", "url": "https://twitch.tv/eliasn97"}], path=streamers_path)
+    fresh = tmp_path / "agent_state_eliasn97.json"
+    _write_state(fresh, "https://twitch.tv/eliasn97", hours_ago=1)
+
+    deleted = streamers.purge_stale_agent_states(streamers_path=streamers_path, root=tmp_path, max_age_hours=24)
+
+    assert deleted == []
+    assert fresh.exists()
+
+
+def test_purge_keeps_legacy_flat_file_when_it_is_the_only_state_file(tmp_path):
+    # A genuinely standalone run (no --streamer-name, no orchestrator.py involved) — the
+    # legacy file has no per-streamer sibling to be superseded by, so it's judged purely on
+    # staleness like anything else.
+    streamers_path = tmp_path / "streamers.json"
+    streamers.save_streamers([{"name": "eliasn97", "url": "https://twitch.tv/eliasn97"}], path=streamers_path)
+    legacy_fresh = tmp_path / "agent_state.json"
+    _write_state(legacy_fresh, "https://www.twitch.tv/papaplatte", hours_ago=1)
+
+    deleted = streamers.purge_stale_agent_states(streamers_path=streamers_path, root=tmp_path, max_age_hours=24)
+
+    assert deleted == []
+    assert legacy_fresh.exists()
+
+
+def test_purge_removes_legacy_flat_file_the_instant_a_per_streamer_file_exists(tmp_path):
+    # The exact real bug found live, 2026-08-19: the legacy file's mere coexistence with a
+    # real per-streamer file is itself proof it's obsolete — a live system never writes both
+    # at once — so this must be caught immediately, not only after max_age_hours passes.
+    streamers_path = tmp_path / "streamers.json"
+    streamers.save_streamers([{"name": "papaplatte", "url": "https://twitch.tv/papaplatte"}], path=streamers_path)
+    legacy = tmp_path / "agent_state.json"
+    _write_state(legacy, "https://www.twitch.tv/papaplatte", hours_ago=1)  # fresh by age alone
+    per_streamer = tmp_path / "agent_state_papaplatte.json"
+    _write_state(per_streamer, "https://www.twitch.tv/papaplatte", hours_ago=1)  # also fresh
+
+    deleted = streamers.purge_stale_agent_states(streamers_path=streamers_path, root=tmp_path, max_age_hours=24)
+
+    assert deleted == ["agent_state.json"]
+    assert not legacy.exists()
+    assert per_streamer.exists()  # the real, current file is untouched
+
+
+def test_purge_leaves_unparseable_timestamp_alone(tmp_path):
+    # eliasn97 is a real, current streamer, so this file is never "orphaned" — isolates the
+    # ambiguous-timestamp case: never guess on ambiguity, same principle as
+    # metrics_tracker.prune_viral_memory.
+    streamers_path = tmp_path / "streamers.json"
+    streamers.save_streamers([{"name": "eliasn97", "url": "https://twitch.tv/eliasn97"}], path=streamers_path)
+    ambiguous = tmp_path / "agent_state_eliasn97.json"
+    ambiguous.write_text(json.dumps({"target_streamer": "x", "last_updated": "not-a-real-timestamp"}), encoding="utf-8")
+
+    deleted = streamers.purge_stale_agent_states(streamers_path=streamers_path, root=tmp_path)
+
+    assert deleted == []
+    assert ambiguous.exists()
+
+
+def test_purge_never_raises_on_corrupt_json(tmp_path):
+    streamers_path = tmp_path / "streamers.json"
+    streamers.save_streamers([], path=streamers_path)  # no streamers at all -> "broken" is orphaned
+    corrupt = tmp_path / "agent_state_broken.json"
+    corrupt.write_text("{not valid json", encoding="utf-8")
+
+    # Must not raise despite the corrupt JSON — and since "broken" matches no streamer in an
+    # empty streamers.json, it's orphaned by the slug check alone (independent of content).
+    deleted = streamers.purge_stale_agent_states(streamers_path=streamers_path, root=tmp_path)
+    assert "agent_state_broken.json" in deleted
+    assert not corrupt.exists()

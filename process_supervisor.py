@@ -42,6 +42,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
+import streamers as streamers_module
+
 import logging_setup
 
 logging_setup.configure_logging()
@@ -142,6 +144,20 @@ def run_supervisor(
                     proc.handle_exit()
                 if not proc.in_backoff():
                     proc.start()
+
+            # Ghost-state cleanup (2026-08-19): orchestrator.py's per-streamer auto_pilot.py
+            # subprocesses write agent_state_<slug>.json files that nothing ever removes on
+            # their own — a streamer taken out of streamers.json, or a subprocess that
+            # crashed hard enough to stop updating, leaves a file the dashboard keeps showing
+            # forever (found live as a duplicate, stale "papaplatte" entry). Run every poll
+            # cycle, not just on startup, so a long-running supervisor stays self-healing
+            # instead of only cleaning up right after a restart. Never let a purge failure
+            # take the supervisor down — streamers.json being transiently unreadable mid-write
+            # is exactly the kind of thing this must degrade past, not crash on.
+            try:
+                streamers_module.purge_stale_agent_states()
+            except Exception as e:
+                logger.warning("Ghost-state cleanup failed this cycle: %s", e)
     except KeyboardInterrupt:
         logger.info("Supervisor durch Nutzer gestoppt — beende alle überwachten Prozesse...")
     finally:
