@@ -71,10 +71,14 @@ def _fallback_box(frame_w: int, frame_h: int) -> tuple[int, int, int, int]:
     return x, 0, w, h
 
 
-def _detect_raw_box(
+def _detect_faces(
     video_path: str, timestamp: float
-) -> tuple[Optional[tuple[int, int, int, int]], int, int]:
-    """Read the frame at `timestamp` and return (raw_box_or_None, frame_w, frame_h)."""
+) -> tuple[list[tuple[int, int, int, int]], int, int]:
+    """Read the frame at `timestamp` and return (all_raw_boxes, frame_w, frame_h) — every
+    face MediaPipe found, not just the first. Previously this only ever kept
+    result.detections[0] and discarded the count entirely, so there was no way to tell "one
+    face" from "several faces" anywhere in this module (found in review, 2026-08-19, needed
+    for the full-cam/split-screen/blur-background layout decision below)."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
@@ -100,28 +104,60 @@ def _detect_raw_box(
     with mp_vision.FaceDetector.create_from_options(options) as detector:
         result = detector.detect(mp_image)
 
-    if not result.detections:
-        return None, frame_w, frame_h
-
-    box = result.detections[0].bounding_box
-    return (box.origin_x, box.origin_y, box.width, box.height), frame_w, frame_h
+    boxes = [
+        (d.bounding_box.origin_x, d.bounding_box.origin_y, d.bounding_box.width, d.bounding_box.height)
+        for d in result.detections
+    ]
+    return boxes, frame_w, frame_h
 
 
 def has_face(video_path: str, timestamp: float) -> bool:
-    """Cheap presence check used to decide between split-screen and blur-background layouts."""
-    raw_box, _, _ = _detect_raw_box(video_path, timestamp)
-    return raw_box is not None
+    """Cheap presence check."""
+    boxes, _, _ = _detect_faces(video_path, timestamp)
+    return len(boxes) > 0
 
 
-def get_facecam_coordinates(video_path: str, timestamp: float) -> tuple[int, int, int, int]:
+def detect_faces_for_layout(video_path: str, timestamp: float) -> tuple[int, Optional[tuple[int, int, int, int]], int, int]:
+    """One detection pass covering everything process.resolve_layout() needs to pick between
+    full_cam / split_screen / blur_background: (face_count, first_raw_box_or_None, frame_w,
+    frame_h). A single call instead of running detection twice (once for a presence/count
+    check, once for the box) — the raw (unpadded) box lets the caller measure how much of
+    the frame the face actually covers via face_area_ratio() below."""
+    boxes, frame_w, frame_h = _detect_faces(video_path, timestamp)
+    first_box = boxes[0] if boxes else None
+    return len(boxes), first_box, frame_w, frame_h
+
+
+def face_area_ratio(face_box: tuple[int, int, int, int], frame_w: int, frame_h: int) -> float:
+    """Fraction of the frame's area the RAW (unpadded) detected face bounding box covers —
+    used to tell a close-up/full-cam subject (large face-to-frame ratio: a Just-Chatting-
+    style stream where the whole source frame IS the person) apart from a small corner
+    webcam box over a separate gameplay feed (traditional split-screen streaming layout).
+    Both are "exactly one face" by count alone, so count can't distinguish them — this can."""
+    _, _, w, h = face_box
+    frame_area = frame_w * frame_h
+    if frame_area <= 0:
+        return 0.0
+    return (w * h) / frame_area
+
+
+def get_facecam_coordinates(
+    video_path: str, timestamp: float, padding_factor: float = PADDING_FACTOR
+) -> tuple[int, int, int, int]:
     """Detect a face at `timestamp` seconds into `video_path` and return a padded (x, y, w, h) box in pixels.
 
     Detection runs once, at the clip's start_time, and that single box is used as a
     static crop for the whole clip's render — so there is no per-frame jitter or
     flicker within a clip by construction (no frame-by-frame re-detection to disagree
     with itself).
+
+    `padding_factor` defaults to PADDING_FACTOR (tuned for split_screen's top-third zone);
+    process.py passes a larger value for full_cam, where the same box gets stretched to fill
+    the ENTIRE tall 9:16 canvas instead of a short-wide strip — cover-fitting a padded box
+    tuned for a short zone into a much taller one crops far tighter than intended.
     """
-    raw_box, frame_w, frame_h = _detect_raw_box(video_path, timestamp)
+    boxes, frame_w, frame_h = _detect_faces(video_path, timestamp)
+    raw_box = boxes[0] if boxes else None
 
     if raw_box is None:
         logger.warning("No face detected at %.2fs in %s, using fallback crop", timestamp, video_path)
@@ -129,8 +165,8 @@ def get_facecam_coordinates(video_path: str, timestamp: float) -> tuple[int, int
 
     x, y, w, h = raw_box
 
-    pad_w = w * (PADDING_FACTOR - 1) / 2
-    pad_h = h * (PADDING_FACTOR - 1) / 2
+    pad_w = w * (padding_factor - 1) / 2
+    pad_h = h * (padding_factor - 1) / 2
 
     x1 = max(0, int(x - pad_w))
     y1 = max(0, int(y - pad_h))

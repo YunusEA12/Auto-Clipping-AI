@@ -56,6 +56,7 @@ FORMAT_OPTIONS = {
 LAYOUT_OPTIONS = {
     "Auto (KI entscheidet)": dashboard_api.LAYOUT_AUTO,
     "Split-Screen": dashboard_api.LAYOUT_SPLIT_SCREEN,
+    "Full-Cam": dashboard_api.LAYOUT_FULL_CAM,
     "Blur-Background": dashboard_api.LAYOUT_BLUR_BACKGROUND,
 }
 HIGHLIGHT_OPTIONS = dashboard_api.HIGHLIGHT_COLORS

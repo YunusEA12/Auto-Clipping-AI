@@ -33,12 +33,30 @@ DEFAULT_FORMAT = "9:16"
 
 LAYOUT_SPLIT_SCREEN = "split_screen"
 LAYOUT_BLUR_BACKGROUND = "blur_background"
+LAYOUT_FULL_CAM = "full_cam"
 LAYOUT_AUTO = "auto"
-SELECTABLE_LAYOUTS = (LAYOUT_SPLIT_SCREEN, LAYOUT_BLUR_BACKGROUND, LAYOUT_AUTO)
+SELECTABLE_LAYOUTS = (LAYOUT_SPLIT_SCREEN, LAYOUT_BLUR_BACKGROUND, LAYOUT_FULL_CAM, LAYOUT_AUTO)
 
 # Facecam gets the top third of the canvas, gameplay the bottom two-thirds — TikTok's
 # standard "reaction on top, content below" reaction-cam layout.
 SPLIT_SCREEN_FACE_RATIO = 1 / 3
+
+# Auto-layout decision (2026-08-19): with exactly one face detected, which of full_cam vs
+# split_screen applies depends on how much of the SOURCE frame the face already covers, not
+# just its presence. A face filling a large share of the frame (a Just-Chatting-style stream
+# where the whole picture IS the person, no separate gameplay feed) reads as full_cam
+# content; a small corner webcam box over a much bigger gameplay area reads as split_screen.
+# Empirical starting point, not derived from a spec — render real clips from both kinds of
+# source content and check which side of this threshold they land on before trusting it.
+FULL_CAM_MIN_FACE_AREA_RATIO = 0.28
+
+# get_facecam_coordinates()'s default PADDING_FACTOR (2.5) is tuned for split_screen's top-
+# third zone — cover-fitting that same padded box into full_cam's much taller full-canvas
+# target crops far tighter than intended (more of the padding gets consumed matching the 9:16
+# aspect than filling it). A larger factor keeps more headroom/shoulders/background visible
+# instead of an overly tight face-only crop. Same "empirical, verify by rendering and
+# eyeballing" caveat as vision.PADDING_FACTOR itself.
+FULL_CAM_PADDING_FACTOR = 4.5
 
 HIGHLIGHT_COLORS = {
     "Gelb (Hormozi)": "00FFFF",
@@ -49,6 +67,12 @@ DEFAULT_HIGHLIGHT_COLOR = HIGHLIGHT_COLORS["Gelb (Hormozi)"]
 WORD_BASE_COLOR = "FFFFFF"
 WORDS_PER_BLOCK = 4
 
+# TitleBox style (2026-08-19): BorderStyle=3 ("opaque box") is documented as using BackColour
+# to fill the box behind the text — verified live by actually rendering a real clip and
+# looking at it (not just trusting the ASS spec), which showed the box filling with
+# OutlineColour instead, rendering solid black text-on-black when only BackColour was set to
+# white. Both OutlineColour and BackColour are now set to the same white, so the box renders
+# correctly regardless of which field this libass build actually consults.
 ASS_HEADER_TEMPLATE = """[Script Info]
 Title: Auto-generated subtitles
 ScriptType: v4.00+
@@ -60,21 +84,32 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,Arial Black,80,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,5,2,5,50,50,50,1
+Style: TitleBox,Arial Black,58,&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,-1,0,0,0,100,100,0,0,3,24,0,5,50,50,50,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+
+# Where the white title-box hook sits vertically, as a fraction of canvas height — the upper
+# half, but clear of TikTok's own top UI chrome (back arrow, search icon), which occupies
+# roughly the top 8-10% at typical zoom. Empirical/eyeballed against the reference posts this
+# feature was built from (2026-08-19), same "verify by rendering and looking" caveat as every
+# other *_Y_RATIO constant in this file.
+TITLE_BOX_Y_RATIO = 0.16
 
 # Where the subtitle block sits vertically, as a fraction of the canvas height — the TikTok
 # "lower third", clear of both the top facecam split and bottom platform UI icons. Empirical
 # (eyeballed against TikTok's own like/comment/share icon column and caption placement in
 # the app, not derived from a published spec), and only checked at the SPLIT_SCREEN_FACE_RATIO
 # = 1/3 default — if that ratio is ever retuned significantly, re-check this against the app
-# again rather than assuming it still clears the facecam split. 0.70 leaves roughly the
-# bottom 30% of the canvas for captions before running into TikTok's own UI chrome at
-# typical zoom; push it lower (toward 1.0) if captions overlap the platform's icon column,
-# higher (toward the facecam split) if they sit uncomfortably close to the bottom edge.
-SUBTITLE_Y_RATIO = 0.70
+# again rather than assuming it still clears the facecam split. Raised from 0.70 to 0.78
+# (2026-08-19) to clear both the new TITLE_BOX_Y_RATIO hook above and full_cam's full-frame
+# subject (a person's torso can extend further down a full-bleed face crop than gameplay or a
+# blurred background ever did, which the original 0.70 was tuned against); push it lower
+# (toward 1.0) if captions overlap the platform's icon column, higher if they sit
+# uncomfortably close to the bottom edge or start overlapping the title box / a full_cam
+# subject's face.
+SUBTITLE_Y_RATIO = 0.78
 
 
 def format_ass_timestamp(seconds: float) -> str:
@@ -199,6 +234,20 @@ def build_ass_for_clip(
         logger.warning(
             "No transcribed words found for clip %d (%.2fs-%.2fs); writing subtitle-free .ass",
             index, clip_start, clip_end,
+        )
+
+    # White title-box hook, upper half of the canvas, visible for the clip's whole duration —
+    # separate from the word-by-word subtitle events above (different style, different fixed
+    # position, TITLE_BOX_Y_RATIO instead of SUBTITLE_Y_RATIO so the two can never overlap).
+    # Reuses clip["title"] (already LLM-generated per clip, e.g. "Krasser Moment!") rather
+    # than asking the LLM for a second, separate hook string.
+    title_text = _escape_ass_text((clip.get("title") or "").strip())
+    if title_text:
+        title_pos_y = int(output_h * TITLE_BOX_Y_RATIO)
+        title_tag = f"{{\\an5\\pos({pos_x},{title_pos_y})}}"
+        clip_duration = clip_end - clip_start
+        events.append(
+            f"Dialogue: 0,{format_ass_timestamp(0)},{format_ass_timestamp(clip_duration)},TitleBox,,0,0,0,,{title_tag}{title_text}"
         )
 
     ass_path = TEMP_DIR / f"clip_{index}.ass"
@@ -380,6 +429,20 @@ def build_filter_complex(
             f"[stacked]subtitles='{subtitles}'[outv]"
         )
 
+    if layout == LAYOUT_FULL_CAM:
+        # Single-face content where the whole source frame IS the subject (no separate
+        # gameplay feed to show alongside it) — same "cover" crop technique as split_screen's
+        # face zone above, just filling the ENTIRE canvas instead of only the top third.
+        # facecam_box here was detected with FULL_CAM_PADDING_FACTOR, not the tighter default
+        # used for split_screen's short zone — see that constant's own docstring.
+        face_x, face_y, face_w, face_h = facecam_box
+        return (
+            f"[0:v]crop={face_w}:{face_h}:{face_x}:{face_y},"
+            f"scale={output_w}:{output_h}:force_original_aspect_ratio=increase,"
+            f"crop={output_w}:{output_h},setsar=1,format=yuv420p[cropped];"
+            f"[cropped]subtitles='{subtitles}'[outv]"
+        )
+
     if layout == LAYOUT_BLUR_BACKGROUND:
         # setsar=1 right at the source reference (not just on the outputs) so a source
         # with non-square sample-aspect-ratio metadata can never throw off the aspect math
@@ -515,12 +578,30 @@ def find_source_video(explicit: Path | None) -> Path:
 
 
 def resolve_layout(layout: str, video_path: Path, clip_start: float) -> str:
+    """Three-way auto-layout decision (2026-08-19, replacing a plain face-present/absent
+    binary): zero or multiple faces both fall back to blur_background — zero because there's
+    nothing to crop toward, multiple because a single static crop can't represent several
+    people (guests present) without arbitrarily picking one. Exactly one face still needs a
+    second signal to choose between full_cam and split_screen, since a face can be "one face"
+    whether it's a close-up filling the whole frame or a small corner webcam box over a much
+    bigger gameplay area — face_area_ratio (how much of the SOURCE frame the raw box covers)
+    is that second signal."""
     if layout != LAYOUT_AUTO:
         return layout
 
-    face_present = vision.has_face(str(video_path), clip_start)
-    resolved = LAYOUT_SPLIT_SCREEN if face_present else LAYOUT_BLUR_BACKGROUND
-    logger.info("Auto-layout at %.2fs: face_present=%s -> %s", clip_start, face_present, resolved)
+    face_count, raw_box, frame_w, frame_h = vision.detect_faces_for_layout(str(video_path), clip_start)
+
+    if face_count == 1:
+        ratio = vision.face_area_ratio(raw_box, frame_w, frame_h)
+        resolved = LAYOUT_FULL_CAM if ratio >= FULL_CAM_MIN_FACE_AREA_RATIO else LAYOUT_SPLIT_SCREEN
+        logger.info(
+            "Auto-layout at %.2fs: face_count=1, face_area_ratio=%.3f (threshold %.2f) -> %s",
+            clip_start, ratio, FULL_CAM_MIN_FACE_AREA_RATIO, resolved,
+        )
+    else:
+        resolved = LAYOUT_BLUR_BACKGROUND
+        logger.info("Auto-layout at %.2fs: face_count=%d -> %s", clip_start, face_count, resolved)
+
     return resolved
 
 
@@ -597,6 +678,10 @@ def process_clips_iter(
         facecam_box = None
         if effective_layout == LAYOUT_SPLIT_SCREEN:
             facecam_box = vision.get_facecam_coordinates(str(video_path), clip["start_time"])
+        elif effective_layout == LAYOUT_FULL_CAM:
+            facecam_box = vision.get_facecam_coordinates(
+                str(video_path), clip["start_time"], padding_factor=FULL_CAM_PADDING_FACTOR,
+            )
 
         ass_path = build_ass_for_clip(clip, transcript, i, highlight_color, output_w, output_h)
         output_path = render_clip(

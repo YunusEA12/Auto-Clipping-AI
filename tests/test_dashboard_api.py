@@ -22,6 +22,7 @@ def test_layout_constants_match_process_module():
     assert dashboard_api.LAYOUT_AUTO == process.LAYOUT_AUTO
     assert dashboard_api.LAYOUT_SPLIT_SCREEN == process.LAYOUT_SPLIT_SCREEN
     assert dashboard_api.LAYOUT_BLUR_BACKGROUND == process.LAYOUT_BLUR_BACKGROUND
+    assert dashboard_api.LAYOUT_FULL_CAM == process.LAYOUT_FULL_CAM
     assert dashboard_api.HIGHLIGHT_COLORS == process.HIGHLIGHT_COLORS
 
 

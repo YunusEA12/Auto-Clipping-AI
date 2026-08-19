@@ -55,6 +55,7 @@ def list_agent_state_paths(root: Path = None) -> List[Path]:
 LAYOUT_AUTO = process_module.LAYOUT_AUTO
 LAYOUT_SPLIT_SCREEN = process_module.LAYOUT_SPLIT_SCREEN
 LAYOUT_BLUR_BACKGROUND = process_module.LAYOUT_BLUR_BACKGROUND
+LAYOUT_FULL_CAM = process_module.LAYOUT_FULL_CAM
 HIGHLIGHT_COLORS = process_module.HIGHLIGHT_COLORS
 DEFAULT_HASHTAGS = tiktok_uploader.DEFAULT_HASHTAGS
 
