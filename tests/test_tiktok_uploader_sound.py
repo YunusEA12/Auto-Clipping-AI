@@ -99,7 +99,7 @@ class FakeSoundPage:
 
     def __init__(
         self, sounds_button_present=True, got_it_present=False, tab_present=True,
-        rows=None, close_button_present=True, volume_input_present=True,
+        rows=None, close_button_present=True, volume_input_present=True, save_button_present=True,
     ):
         self.sounds_button = FakeClickable(sounds_button_present)
         self.got_it_button = FakeClickable(got_it_present)
@@ -109,6 +109,7 @@ class FakeSoundPage:
             row.page = self
         self.close_button = FakeClickable(close_button_present)
         self.volume_input = FakeClickable(volume_input_present)
+        self.save_button = FakeClickable(save_button_present)
         self.wait_calls = 0
         self.keys_pressed = []
 
@@ -128,6 +129,8 @@ class FakeSoundPage:
             return self.got_it_button
         if role == "tab" and name == tiktok_uploader.SOUND_LIBRARY_TAB_LABEL:
             return self.tab
+        if role == "button" and name == "Save":
+            return self.save_button
         raise AssertionError(f"unexpected role lookup: {role!r} name={name!r}")
 
     def wait_for_timeout(self, ms):
@@ -234,6 +237,55 @@ def test_volume_adjustment_failure_does_not_lose_the_added_track(monkeypatch):
     title = tiktok_uploader._add_background_sound(page)
 
     assert title == "Morning Light Etude"
+
+
+# --- _exit_video_editor (2026-08-19: found live — the caption-fill step started failing with
+# a Playwright "intercepts pointer events" error after adding a sound, traced to the inline
+# video editor never being explicitly exited via its own Save button; closing the Sounds
+# side-panel only closes THAT sub-panel, not the whole editor overlay sitting on top of the
+# normal upload page underneath it) -----------------------------------------------------------
+
+def test_exit_video_editor_clicks_save():
+    page = FakeSoundPage(rows=[])
+    tiktok_uploader._exit_video_editor(page)
+    assert page.save_button.clicked is True
+
+
+def test_exit_video_editor_never_raises_when_save_missing():
+    page = FakeSoundPage(rows=[], save_button_present=False)
+    tiktok_uploader._exit_video_editor(page)  # must not raise
+
+
+def test_add_background_sound_always_exits_editor_on_success(monkeypatch):
+    monkeypatch.setattr(random, "randrange", lambda n: 0)
+    row = FakeRow("Tenfold Love")
+    page = FakeSoundPage(rows=[row])
+    tiktok_uploader._add_background_sound(page)
+    assert page.save_button.clicked is True
+
+
+def test_add_background_sound_exits_editor_even_when_sounds_panel_never_opened():
+    # The editor is opened as a side effect of clicking the Sounds button in the first place
+    # — even the earliest possible failure (the button itself missing) must still exit it.
+    page = FakeSoundPage(sounds_button_present=False)
+    tiktok_uploader._add_background_sound(page)
+    assert page.save_button.clicked is True
+
+
+def test_add_background_sound_exits_editor_even_when_library_tab_missing(monkeypatch):
+    monkeypatch.setattr(random, "randrange", lambda n: 0)
+    page = FakeSoundPage(tab_present=False)
+    tiktok_uploader._add_background_sound(page)
+    assert page.save_button.clicked is True
+
+
+def test_add_background_sound_exits_editor_even_when_add_click_fails(monkeypatch):
+    monkeypatch.setattr(random, "randrange", lambda n: 0)
+    row = FakeRow("Keys to the City")
+    row.add_button.present = False
+    page = FakeSoundPage(rows=[row])
+    tiktok_uploader._add_background_sound(page)
+    assert page.save_button.clicked is True
 
 
 # --- upload_video wiring ---------------------------------------------------------------------

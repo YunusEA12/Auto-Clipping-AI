@@ -104,6 +104,13 @@ SOUND_TRACK_ADD_ICON_SELECTOR = ".MusicPanelMusicItem__operation [data-icon]"
 # selector is scoped to right after that click, never queried standalone.
 SOUND_VOLUME_INPUT_SELECTOR = ".PropSettingSliderInput__numberInput input"
 SOUND_PANEL_CLOSE_BUTTON_SELECTOR = ".SideModuleRenderBox__header button"
+# 2026-08-19: found live — after adding a track, the caption-fill step started failing with a
+# Playwright "intercepts pointer events" error, the video editor's StageCanvas widget sitting
+# on top of caption_container. Root cause: the inline video editor TikTok's upload page opens
+# by default (the "add title for your video" / Cancel-Save toolbar, present even before any
+# Sounds interaction) was never explicitly exited — closing the Sounds side panel only closes
+# ITS OWN sub-panel, not the whole editor overlay underneath. See _exit_video_editor.
+SOUND_EDITOR_SAVE_TIMEOUT_MS = 8000
 # Randomizing among the first few tracks (rather than always the very first) keeps consecutive
 # uploads from all carrying identical background audio — the same "don't make every render
 # trivially identical to the last" spirit as the "hidden gem" clip-selection guidance, just
@@ -497,11 +504,43 @@ def _set_sound_volume(page) -> None:
         logger.warning("Could not adjust background sound volume — left at the track's default level")
 
 
+def _exit_video_editor(page) -> None:
+    """The inline video editor TikTok's upload page opens by default for every upload (the
+    "add title for your video" / Cancel-Save toolbar — present even before any Sounds
+    interaction) must be explicitly exited via its own Save button once editing is done:
+    otherwise (a) any change made inside it, including the added background sound, is never
+    actually committed to the video, and (b) the editor's own video-preview canvas stays
+    layered on top of the normal upload page underneath it, physically covering the caption
+    box — confirmed live 2026-08-19 as the root cause of a Playwright "intercepts pointer
+    events" error on caption_container right after adding a sound. Always called once
+    _add_background_sound() is done, on every exit path (see its own `finally`), since the
+    editor is opened as a side effect of merely clicking the Sounds panel button regardless
+    of how far past that any individual attempt got.
+
+    Best-effort: if Save can't be found/clicked, logs a warning and moves on rather than
+    raising — the caption-fill step right after this will fail loudly (and informatively) on
+    its own if the page is genuinely still stuck in editor mode, which is more useful than
+    silently swallowing that here."""
+    try:
+        page.get_by_role("button", name="Save").first.click(timeout=SOUND_EDITOR_SAVE_TIMEOUT_MS)
+        logger.info("Saved video editor changes (background sound now committed, if one was added)")
+    except PlaywrightTimeoutError:
+        logger.warning(
+            "Could not find/click the video editor's Save button — an added background sound "
+            "may not be committed, and the caption step below may fail if the editor's "
+            "preview canvas is still covering it."
+        )
+
+
 def _add_background_sound(page) -> Optional[str]:
     """Adds one track from TikTok's own Commercial/royalty-free Music Library (the
     SOUND_LIBRARY_TAB_LABEL tab — see its own comment above for why this specific tab, not
     "For You", is what keeps this feature inside the original no-copyright-risk constraint)
-    as a background layer under the clip's own audio.
+    as a background layer under the clip's own audio, then always exits the video editor via
+    _exit_video_editor() before returning — on every exit path, via `finally`, since the
+    editor is opened as a side effect of clicking the Sounds panel button regardless of how
+    far past that any individual attempt got (see _exit_video_editor's own docstring for why
+    that step is required, not optional cleanup).
 
     Confirmed live 2026-08-19 that clicking a track's add button layers it as a SECOND
     waveform in the render timeline alongside the clip's original audio track — it does not
@@ -512,6 +551,13 @@ def _add_background_sound(page) -> Optional[str]:
     whole upload — a clip that uploads without background music is still a successful
     upload, exactly as it was before this feature existed. Returns the track title actually
     added, or None if nothing was added."""
+    try:
+        return _add_background_sound_impl(page)
+    finally:
+        _exit_video_editor(page)
+
+
+def _add_background_sound_impl(page) -> Optional[str]:
     try:
         page.locator(SOUND_PANEL_BUTTON_SELECTOR).first.click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
     except PlaywrightTimeoutError:
