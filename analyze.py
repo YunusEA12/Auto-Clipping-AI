@@ -39,17 +39,21 @@ AI_GUIDELINES_PATH = Path("ai_guidelines.txt")
 # pointed at instead (gemini-3.6-flash, priced roughly 7-9x higher per token).
 MODEL = "gemini-3.5-flash-lite"
 
+# 2026-08-19: raised per explicit account-owner direction — more clips, longer clips allowed
+# — while SINNHAFTIGKEIT (the top-priority coherence rule below) and the "Quality gate, not a
+# quota" rule are untouched: both explicitly outrank these targets already, so raising the
+# targets doesn't loosen the bar a clip has to clear, only how much room there is once it does.
 MIN_CLIP_DURATION = 30
-MAX_CLIP_DURATION = 90
+MAX_CLIP_DURATION = 150
 MAX_HASHTAGS = 5
-MIN_CLIPS_TARGET = 15
-MAX_CLIPS_TARGET = 20
+MIN_CLIPS_TARGET = 20
+MAX_CLIPS_TARGET = 28
 
-# Generous headroom for ~20 detailed clips (title + hook_explanation + scores) as structured
-# JSON, well within gemini-2.5-flash's 65536-token output cap (confirmed live via
+# Generous headroom for ~28 detailed clips (title + hook_explanation + scores) as structured
+# JSON, well within gemini-3.5-flash-lite's 65536-token output cap (confirmed live via
 # client.models.get()) — without this, an unbounded response risks getting cut off mid-JSON
 # exactly when MAX_CLIPS_TARGET is raised.
-MAX_COMPLETION_TOKENS = 8192
+MAX_COMPLETION_TOKENS = 16384
 
 ENERGY_WINDOW_SECONDS = 2.0
 ENERGY_SPIKE_THRESHOLD_STD = 1.5

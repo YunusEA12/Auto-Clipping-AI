@@ -22,9 +22,9 @@ def _clip(**overrides):
 
 # --- clip duration bounds -------------------------------------------------------------
 
-def test_clip_duration_bounds_are_30_to_90_seconds():
+def test_clip_duration_bounds_are_30_to_150_seconds():
     assert analyze.MIN_CLIP_DURATION == 30
-    assert analyze.MAX_CLIP_DURATION == 90
+    assert analyze.MAX_CLIP_DURATION == 150
 
 
 # --- hashtag validator -----------------------------------------------------------------
