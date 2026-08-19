@@ -116,6 +116,59 @@ def test_viral_memory_section_includes_old_enough_clips(tmp_path, monkeypatch):
     assert "15000 views" in section
 
 
+# --- load_accepted_clips_section (2026-08-19: fallback signal for viral_pattern_rule
+# generation when no real TikTok performance data exists yet — "we have overnight data now"
+# — real metrics take real time (VIRAL_SIGNAL_MIN_AGE_HOURS) to mean anything, but a clip
+# the critic already scored highly and that made it to a confirmed publish is still a
+# weaker, but meaningful, signal worth reinforcing in the meantime) -------------------------
+
+def test_accepted_clips_section_empty_when_dir_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(train_loop, "UPLOADED_CLIPS_DIR", tmp_path / "nope")
+    assert train_loop.load_accepted_clips_section() == ""
+
+
+def test_accepted_clips_section_includes_confirmed_high_score_clip(tmp_path, monkeypatch):
+    monkeypatch.setattr(train_loop, "UPLOADED_CLIPS_DIR", tmp_path)
+    (tmp_path / "clip_1.json").write_text(json.dumps({
+        "title": "Great Clip", "viral_score": 9, "energy_rating": 8, "confirmed": True,
+    }), encoding="utf-8")
+
+    section = train_loop.load_accepted_clips_section()
+
+    assert "Great Clip" in section
+    assert "viral_score=9" in section
+
+
+def test_accepted_clips_section_excludes_unconfirmed_clip(tmp_path, monkeypatch):
+    monkeypatch.setattr(train_loop, "UPLOADED_CLIPS_DIR", tmp_path)
+    (tmp_path / "clip_1.json").write_text(json.dumps({
+        "title": "Unconfirmed Clip", "viral_score": 9, "confirmed": False,
+    }), encoding="utf-8")
+
+    assert train_loop.load_accepted_clips_section() == ""
+
+
+def test_accepted_clips_section_excludes_low_score_clip(tmp_path, monkeypatch):
+    monkeypatch.setattr(train_loop, "UPLOADED_CLIPS_DIR", tmp_path)
+    (tmp_path / "clip_1.json").write_text(json.dumps({
+        "title": "Meh Clip", "viral_score": 4, "confirmed": True,
+    }), encoding="utf-8")
+
+    assert train_loop.load_accepted_clips_section() == ""
+
+
+def test_accepted_clips_section_ignores_unreadable_sidecar(tmp_path, monkeypatch):
+    monkeypatch.setattr(train_loop, "UPLOADED_CLIPS_DIR", tmp_path)
+    (tmp_path / "corrupt.json").write_text("{not valid json", encoding="utf-8")
+    (tmp_path / "good.json").write_text(json.dumps({
+        "title": "Good Clip", "viral_score": 8, "confirmed": True,
+    }), encoding="utf-8")
+
+    section = train_loop.load_accepted_clips_section()
+
+    assert "Good Clip" in section
+
+
 def test_cap_rules_exact_boundary():
     rules = ["a", "b", "c"]
     assert train_loop._cap_rules(rules, max_count=3) == rules

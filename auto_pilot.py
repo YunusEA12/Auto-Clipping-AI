@@ -265,6 +265,31 @@ def run_deployment_phase(survivors: List[Tuple[dict, Path, Optional[int]]], publ
     return uploaded, failed
 
 
+def _cleanup_cycle_temp_files(video_path: Path, wav_path: Path, transcription_path: Path, clips_path: Path, live: bool) -> None:
+    """Deletes this cycle's one-time-use temp artifacts once the cycle is fully done with
+    them (called from a finally block, so this runs on every exit path — the early "no
+    content found" return, a normal completed cycle, or the cycle raising) — the raw
+    recording chunk, extracted audio, transcript, and clips selection. Rejected clips
+    themselves are already cleaned up by purge_low_scoring_clips(); this is everything else
+    "unused or temporary" the pipeline leaves behind (2026-08-19).
+
+    Live mode ONLY: in non-live (--video/VOD) mode, video_path/wav_path/transcription_path
+    are deliberately reused across cycles — ingest.extract_audio()/transcribe.transcribe()
+    skip redoing the work if the file already exists (see L-05 in the audit). Deleting them
+    here would silently break that caching and force a full re-extraction/re-transcription of
+    the same static video every single cycle. In live mode, each cycle records a genuinely
+    fresh .ts chunk with its own timestamped filename, so there is nothing for a next cycle
+    to reuse."""
+    if not live:
+        return
+    for path in (video_path, wav_path, transcription_path, clips_path):
+        if path and path.exists():
+            try:
+                path.unlink()
+            except OSError as e:
+                logger.warning("Could not delete temp file %s: %s", path, e)
+
+
 def run_cycle(
     video_path: Path,
     profile: Optional[dict],
@@ -281,10 +306,16 @@ def run_cycle(
     live: bool,
     auto_upload: bool,
     publish: bool,
+    streamer_handle: Optional[str] = None,
 ) -> Tuple[int, int, int]:
     """Runs one full Collect -> Evaluate -> Purge -> (optionally) Deploy cycle, updating
     agent_state.json at each phase transition. Returns (kept, deleted, uploaded) for THIS
-    cycle, so the caller can track running totals across cycles."""
+    cycle, so the caller can track running totals across cycles.
+
+    `streamer_handle`, when known, is a clean @-mentionable identity (streamers.json's
+    `name`, or a profile's `name`) distinct from `target_streamer` — the latter can be a raw
+    stream URL when neither --streamer-name nor --profile was given, which is not something
+    the LLM should ever be told to @-mention in a caption."""
     common_state = dict(current_cycle=cycle, target_streamer=target_streamer)
 
     update_agent_state(
@@ -297,73 +328,82 @@ def run_cycle(
     transcription_path = transcribe.transcribe(wav_path)
 
     update_agent_state(current_action="🤖 KI-Analyse & Clip-Auswahl läuft", **common_state)
-    clips_path = analyze.analyze(transcription_path, audio_path=wav_path, profile=profile)
+    clips_path = analyze.analyze(
+        transcription_path, audio_path=wav_path, profile=profile, streamer_name=streamer_handle,
+    )
 
-    with open(clips_path, "r", encoding="utf-8") as f:
-        clips_data = json.load(f)
-    if not clips_data.get("clips"):
-        logger.info("Zyklus abgeschlossen: kein Content mit hohem viralem Potenzial gefunden, nichts gerendert.")
-        update_agent_state(
-            current_action="😴 Kein Content gefunden — warte auf nächsten Zyklus",
-            clips_kept_total=kept_total, clips_purged_total=purged_total,
-            clips_uploaded_total=uploaded_total, **common_state,
+    try:
+        with open(clips_path, "r", encoding="utf-8") as f:
+            clips_data = json.load(f)
+        if not clips_data.get("clips"):
+            logger.info("Zyklus abgeschlossen: kein Content mit hohem viralem Potenzial gefunden, nichts gerendert.")
+            update_agent_state(
+                current_action="😴 Kein Content gefunden — warte auf nächsten Zyklus",
+                clips_kept_total=kept_total, clips_purged_total=purged_total,
+                clips_uploaded_total=uploaded_total, **common_state,
+            )
+            return 0, 0, 0
+
+        batch_size = random.randint(BATCH_SIZE_MIN, BATCH_SIZE_MAX)
+        batch_clips = _trim_to_batch(clips_path, batch_size)
+        logger.info("Phase 1 (Collect): %d Clip(s) für diesen Zyklus ausgewählt", len(batch_clips))
+
+        update_agent_state(current_action=f"🎬 Rendering läuft ({len(batch_clips)} Clip(s))", **common_state)
+        transcript = analyze.load_transcript(transcription_path)
+        rendered: Dict[str, Path] = {}
+        for i, total, clip, output_path in process_module.process_clips_iter(
+            video_path, layout=layout, video_format=video_format,
+            highlight_color=highlight_color, transcript=transcript,
+            output_dir=_output_dir_override,
+        ):
+            rendered[clip["title"]] = output_path
+
+        # Phase 2 (Evaluate & Update): score the batch (narrative + visual composition, via
+        # preview frames extracted from the just-rendered clips) and fold new content/visual/
+        # viral-pattern rules into ai_guidelines.txt — reused as-is from train_loop.py.
+        update_agent_state(current_action="🧠 KI bewertet die Clips (Critic)", **common_state)
+        guidelines_path, batch = train_loop.run_training_loop(
+            clips_path=clips_path, model=critic_model, rendered=rendered
         )
-        return 0, 0, 0
 
-    batch_size = random.randint(BATCH_SIZE_MIN, BATCH_SIZE_MAX)
-    batch_clips = _trim_to_batch(clips_path, batch_size)
-    logger.info("Phase 1 (Collect): %d Clip(s) für diesen Zyklus ausgewählt", len(batch_clips))
+        # Phase 3 (Clean & Purge)
+        update_agent_state(current_action="🧹 Bereinigung — lösche schwache Clips", **common_state)
+        kept, deleted, survivors = purge_low_scoring_clips(batch, rendered, clips_path, purge_threshold)
 
-    update_agent_state(current_action=f"🎬 Rendering läuft ({len(batch_clips)} Clip(s))", **common_state)
-    transcript = analyze.load_transcript(transcription_path)
-    rendered: Dict[str, Path] = {}
-    for i, total, clip, output_path in process_module.process_clips_iter(
-        video_path, layout=layout, video_format=video_format,
-        highlight_color=highlight_color, transcript=transcript,
-        output_dir=_output_dir_override,
-    ):
-        rendered[clip["title"]] = output_path
-
-    # Phase 2 (Evaluate & Update): score the batch (narrative + visual composition, via
-    # preview frames extracted from the just-rendered clips) and fold new content/visual/
-    # viral-pattern rules into ai_guidelines.txt — reused as-is from train_loop.py.
-    update_agent_state(current_action="🧠 KI bewertet die Clips (Critic)", **common_state)
-    guidelines_path, batch = train_loop.run_training_loop(
-        clips_path=clips_path, model=critic_model, rendered=rendered
-    )
-
-    # Phase 3 (Clean & Purge)
-    update_agent_state(current_action="🧹 Bereinigung — lösche schwache Clips", **common_state)
-    kept, deleted, survivors = purge_low_scoring_clips(batch, rendered, clips_path, purge_threshold)
-
-    logger.info(
-        "✅ Batch abgeschlossen: %d Clip(s) behalten, %d gelöscht, Regeln aktualisiert (%s).",
-        kept, deleted, guidelines_path,
-    )
-
-    # Phase 5 (Deployment) — every clip that survived the purge gets uploaded to TikTok.
-    # Requires publish too, not just auto_upload: TikTok has no draft-save action anymore
-    # (confirmed 2026-08-18 — an abandoned upload is discarded, not saved), so there is no
-    # safe partial deployment to perform without an explicit intent to actually go live.
-    uploaded = 0
-    if auto_upload and not publish and survivors:
         logger.info(
-            "⏭️ Deployment übersprungen: --auto-upload ist an, aber --publish nicht — TikTok "
-            "hat keinen Entwurfs-Modus mehr, es gibt also nichts Sicheres zu tun. %d Clip(s) "
-            "bleiben in output/ zur manuellen Durchsicht.", len(survivors),
+            "✅ Batch abgeschlossen: %d Clip(s) behalten, %d gelöscht, Regeln aktualisiert (%s).",
+            kept, deleted, guidelines_path,
         )
-    elif should_deploy(auto_upload, publish, survivors):
-        update_agent_state(current_action=f"📤 Upload läuft ({len(survivors)} Clip(s))", **common_state)
-        uploaded, upload_failed = run_deployment_phase(survivors, publish)
-        logger.info("📤 Deployment: %d hochgeladen, %d fehlgeschlagen", uploaded, upload_failed)
 
-    update_agent_state(
-        current_action="✅ Zyklus abgeschlossen — Cooldown",
-        clips_kept_total=kept_total + kept, clips_purged_total=purged_total + deleted,
-        clips_uploaded_total=uploaded_total + uploaded,
-        **common_state,
-    )
-    return kept, deleted, uploaded
+        # Phase 5 (Deployment) — every clip that survived the purge gets uploaded to TikTok.
+        # Requires publish too, not just auto_upload: TikTok has no draft-save action anymore
+        # (confirmed 2026-08-18 — an abandoned upload is discarded, not saved), so there is no
+        # safe partial deployment to perform without an explicit intent to actually go live.
+        uploaded = 0
+        if auto_upload and not publish and survivors:
+            logger.info(
+                "⏭️ Deployment übersprungen: --auto-upload ist an, aber --publish nicht — TikTok "
+                "hat keinen Entwurfs-Modus mehr, es gibt also nichts Sicheres zu tun. %d Clip(s) "
+                "bleiben in output/ zur manuellen Durchsicht.", len(survivors),
+            )
+        elif should_deploy(auto_upload, publish, survivors):
+            update_agent_state(current_action=f"📤 Upload läuft ({len(survivors)} Clip(s))", **common_state)
+            uploaded, upload_failed = run_deployment_phase(survivors, publish)
+            logger.info("📤 Deployment: %d hochgeladen, %d fehlgeschlagen", uploaded, upload_failed)
+
+        update_agent_state(
+            current_action="✅ Zyklus abgeschlossen — Cooldown",
+            clips_kept_total=kept_total + kept, clips_purged_total=purged_total + deleted,
+            clips_uploaded_total=uploaded_total + uploaded,
+            **common_state,
+        )
+        return kept, deleted, uploaded
+    finally:
+        # Aggressive cleanup (2026-08-19): the raw .ts chunk, extracted .wav, and this
+        # cycle's transcript/clips-selection temp files are all one-time-use in live mode —
+        # runs on every exit path (early return, normal return, or an exception propagating
+        # up to main()'s error-cooldown handler), not just the happy path.
+        _cleanup_cycle_temp_files(video_path, wav_path, transcription_path, clips_path, live)
 
 
 def resolve_static_video(args, url: Optional[str]) -> Path:
@@ -459,6 +499,11 @@ def main():
             _agent_state_path_override, _output_dir_override,
         )
 
+    # A clean @-mentionable identity, distinct from target_streamer above (which can be a
+    # raw stream URL) — args.streamer_name (from orchestrator.py) takes priority since it's
+    # the actual streamers.json name; a --profile's name is the fallback for a manual run.
+    streamer_handle: Optional[str] = args.streamer_name or (profile_dict["name"] if profile_dict else None)
+
     cached_video_path: Optional[Path] = None
     kept_total, purged_total, uploaded_total = 0, 0, 0
 
@@ -493,7 +538,7 @@ def main():
                     video_path, profile_dict, args.layout, args.video_format,
                     args.highlight_color, args.purge_threshold, args.critic_model,
                     cycle, target_streamer, kept_total, purged_total, uploaded_total,
-                    args.live, args.auto_upload, args.publish,
+                    args.live, args.auto_upload, args.publish, streamer_handle,
                 )
                 kept_total += kept
                 purged_total += deleted

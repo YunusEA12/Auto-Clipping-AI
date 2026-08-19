@@ -10,7 +10,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 from dotenv import load_dotenv
 from openai import OpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import atomic_io
 import openai_utils
@@ -28,8 +28,9 @@ TOP_PERFORMERS_PATH = Path("top_performers.json")
 AI_GUIDELINES_PATH = Path("ai_guidelines.txt")
 MODEL = "gpt-4o-mini"
 
-MIN_CLIP_DURATION = 8
-MAX_CLIP_DURATION = 120
+MIN_CLIP_DURATION = 30
+MAX_CLIP_DURATION = 90
+MAX_HASHTAGS = 5
 MIN_CLIPS_TARGET = 15
 MAX_CLIPS_TARGET = 20
 
@@ -118,9 +119,11 @@ Rules:
 - Description/caption: Every clip also needs a ready-to-post TikTok/Shorts caption — a short,
   punchy hook written for social media (not a plain summary of the clip), copy-paste ready for
   the creator to post as-is.
-- Hashtags: Every clip needs 5 to 7 viral, content-relevant hashtags, each including the
-  leading '#' (e.g. "#gaming", "#twitchclips", "#viral", "#fy"). Mix broad reach tags (#fyp,
-  #viral, #shorts) with a couple specific to the actual content of the clip.
+- Hashtags: Every clip needs 3 to 5 viral, content-relevant hashtags, each including the
+  leading '#' followed by real text (e.g. "#gaming", "#twitchclips", "#viral", "#fy") — never
+  an empty or whitespace-only tag like "#" or "# ". Mix broad reach tags (#fyp, #viral,
+  #shorts) with one or two specific to the actual content of the clip. Quality over quantity:
+  3 sharp, relevant tags beat 5 generic ones.
 - start_time and end_time must be timestamps that actually occur in the transcript (in seconds).
 - Only select clips that work as a standalone moment without extra context.
 - Do not invent content that is not present in the transcript.
@@ -143,9 +146,30 @@ class Clip(BaseModel):
         "social media, copy-paste ready, not just a plain summary of the clip"
     )
     hashtags: List[str] = Field(
-        description="5 to 7 viral, content-relevant hashtags, each including the leading '#' "
-        "(e.g. '#gaming', '#twitchclips', '#viral', '#fy')"
+        description="3 to 5 viral, content-relevant hashtags, each including the leading '#' "
+        "followed by real text (e.g. '#gaming', '#twitchclips', '#viral', '#fy') — never an "
+        "empty or whitespace-only tag"
     )
+
+    @field_validator("hashtags")
+    @classmethod
+    def _drop_empty_hashtags(cls, value: List[str]) -> List[str]:
+        """Backstop, not just a prompt instruction: an LLM occasionally emits a malformed
+        entry like "#" or "# " despite being told not to (found live, 2026-08-19) — every
+        downstream consumer (tiktok_uploader.build_caption_text/_tokenize_hashtag) assumes
+        each entry has real content after the '#', so this strips anything that doesn't
+        rather than trusting the prompt alone. Also caps at MAX_HASHTAGS as a hard ceiling,
+        independent of how many the model actually returned."""
+        cleaned = []
+        for tag in value:
+            tag = tag.strip()
+            if not tag:
+                continue
+            if not tag.startswith("#"):
+                tag = f"#{tag}"
+            if tag[1:].strip():
+                cleaned.append(tag)
+        return cleaned[:MAX_HASHTAGS]
 
 
 class ClipSelection(BaseModel):
@@ -240,6 +264,23 @@ def build_profile_section(profile: Optional[dict]) -> str:
     return "\n\n" + "\n\n".join(parts)
 
 
+def build_streamer_mention_section(streamer_name: Optional[str] = None) -> str:
+    """Instructs the LLM to credit the source streamer with an @-mention in every caption.
+    Separate from build_profile_section() on purpose: a streamer's TikTok identity is known
+    (streamers.json's `name` field, threaded through as auto_pilot.py's --streamer-name)
+    independently of whether they have a content profile.json configured — in this project's
+    actual streamers.json as of 2026-08-19, every entry has profile="" but a real name, so
+    tying the mention requirement to `profile` would mean it never fires in practice."""
+    if not streamer_name:
+        return ""
+    return (
+        f"\n\nSTREAMER CREDIT (required): every clip's description MUST include the exact "
+        f"text \"@{streamer_name}\" once, naturally worked into the caption (e.g. as a "
+        f"trailing credit like \"... @{streamer_name} 🔥\") — this is the source streamer "
+        f"and must always be credited, in addition to the hashtags above."
+    )
+
+
 def load_ai_guidelines_section() -> str:
     """Learned guidelines from train_loop.py's critic pass over past clips — a running,
     self-updating rulebook of what to repeat and what to never do again."""
@@ -268,12 +309,13 @@ def load_ai_guidelines_section() -> str:
     )
 
 
-def build_system_prompt(profile: Optional[dict] = None) -> str:
+def build_system_prompt(profile: Optional[dict] = None, streamer_name: Optional[str] = None) -> str:
     return (
         BASE_SYSTEM_PROMPT
         + load_top_performers_section()
         + load_feedback_section()
         + build_profile_section(profile)
+        + build_streamer_mention_section(streamer_name)
         + load_ai_guidelines_section()
     )
 
@@ -437,9 +479,10 @@ def select_clips(
     window_scores: Optional[List[Tuple[float, float]]] = None,
     model: str = MODEL,
     profile: Optional[dict] = None,
+    streamer_name: Optional[str] = None,
 ) -> ClipSelection:
     client = OpenAI()
-    system_prompt = build_system_prompt(profile)
+    system_prompt = build_system_prompt(profile, streamer_name)
     energy_section = build_energy_prompt_section(energy_spikes or [])
 
     logger.info("Sending transcript to %s for scene selection", model)
@@ -536,7 +579,7 @@ def ensure_unique_titles(clips: List[Clip]) -> List[Clip]:
     return result
 
 
-def find_longest_segment_fallback(transcript: dict) -> "ClipSelection":
+def find_longest_segment_fallback(transcript: dict, streamer_name: Optional[str] = None) -> "ClipSelection":
     """Pick the longest contiguous run of transcript segments (10-60s) as a single clip.
 
     Used ONLY when select_clips() couldn't get a usable response at all (LLMResponseIncomplete
@@ -573,6 +616,9 @@ def find_longest_segment_fallback(transcript: dict) -> "ClipSelection":
     logger.warning(
         "LLM response was unusable; falling back to the longest available segment (%.1fs)", duration
     )
+    fallback_description = "Das solltest du dir ansehen 👀"
+    if streamer_name:
+        fallback_description += f" @{streamer_name}"
     fallback_clip = Clip(
         start_time=segments[i]["start"],
         end_time=segments[j]["end"],
@@ -580,8 +626,8 @@ def find_longest_segment_fallback(transcript: dict) -> "ClipSelection":
         hook_explanation="Automatisch ausgewählt: längstes verfügbares zusammenhängendes Segment (Fallback, da die KI keine passenden Clips fand).",
         viral_score=5,
         energy_rating=5,
-        description="Das solltest du dir ansehen 👀",
-        hashtags=["#gaming", "#twitchclips", "#viral", "#fy", "#stream"],
+        description=fallback_description,
+        hashtags=["#gaming", "#twitchclips", "#viral", "#fy"],
     )
     return ClipSelection(clips=[fallback_clip])
 
@@ -601,6 +647,7 @@ def analyze(
     model: str = MODEL,
     audio_path: Optional[Path] = None,
     profile: Optional[dict] = None,
+    streamer_name: Optional[str] = None,
 ) -> Path:
     if transcription_path is None:
         transcription_path = TRANSCRIPTION_PATH
@@ -621,10 +668,10 @@ def analyze(
         logger.info("No audio file available; skipping emotional-energy scoring")
 
     try:
-        selection = select_clips(transcript_text, energy_spikes, window_scores, model, profile)
+        selection = select_clips(transcript_text, energy_spikes, window_scores, model, profile, streamer_name)
     except LLMResponseIncomplete as e:
         logger.warning("%s; falling back to the longest available segment instead of failing.", e)
-        selection = find_longest_segment_fallback(transcript)
+        selection = find_longest_segment_fallback(transcript, streamer_name)
 
     if not selection.clips:
         logger.info(

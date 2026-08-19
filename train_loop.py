@@ -51,6 +51,10 @@ logger = logging.getLogger(__name__)
 
 TEMP_DIR = Path("temp")
 VIRAL_MEMORY_PATH = Path("viral_memory.json")
+# Independently defined, matching auto_pilot.UPLOADED_CLIPS_DIR by convention rather than by
+# import: auto_pilot.py already imports this module, so importing it back here would create
+# a circular import.
+UPLOADED_CLIPS_DIR = Path("uploaded_clips")
 
 # Text-only fallback model (cheap/fast) vs. the vision-capable model used when preview
 # frames are available. Falls back to MODEL automatically if the vision path fails.
@@ -135,6 +139,12 @@ Rules for the four kinds of rules you can produce:
   data, set viral_pattern_rule: if a similar style previously performed well, phrase a
   POSITIVE pattern to replicate it; if it flopped, phrase a PENALTY to avoid it. Leave this
   empty if there's no viral data or no clear pattern to draw from.
+- If you're instead shown ACCEPTED CLIPS DATA (no real TikTok metrics yet, but clips that
+  already scored highly and got published) and a recurring topic/energy/style pattern is
+  visible across several of them, you MAY still set a viral_pattern_rule — phrase it a little
+  more tentatively than one backed by real metrics, since it reflects the critic's own past
+  judgment, not confirmed audience response. Never set viral_pattern_rule from BOTH sources
+  at once; only one of the two sections is ever shown per run.
 
 Be concrete about every rule ("Clip war schlecht" is not acceptable). Write all rule text in
 German, matching the style of any existing guidelines you're shown as examples.
@@ -260,6 +270,56 @@ def load_viral_memory_section() -> str:
     )
 
 
+# reward_score/viral_score threshold for treating an uploaded-but-not-yet-measured clip as a
+# positive example when no real TikTok performance data exists yet to judge it by.
+ACCEPTED_CLIP_MIN_VIRAL_SCORE = 7
+
+
+def load_accepted_clips_section() -> str:
+    """Fallback signal for viral_pattern_rule generation when load_viral_memory_section() has
+    nothing (2026-08-19): real TikTok view/like counts take real time to accumulate past
+    VIRAL_SIGNAL_MIN_AGE_HOURS, but a clip the critic itself already scored highly and that
+    made it all the way to a real, confirmed publish is still a meaningful — if weaker —
+    signal about what's working, worth reinforcing before real performance data exists to
+    confirm or deny it. Reads uploaded_clips/*.json directly (not through auto_pilot.py, to
+    avoid a circular import: auto_pilot already imports this module) rather than
+    viral_memory.json, since a just-uploaded clip may not have a viral_memory.json entry at
+    all yet (metrics_tracker.py hasn't polled it once). Only ever used as a fallback — real
+    performance data is always the stronger, preferred signal when it exists."""
+    if not UPLOADED_CLIPS_DIR.exists():
+        return ""
+
+    accepted = []
+    for path in sorted(UPLOADED_CLIPS_DIR.glob("*.json")):
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("confirmed") and (entry.get("viral_score") or 0) >= ACCEPTED_CLIP_MIN_VIRAL_SCORE:
+            accepted.append(entry)
+
+    if not accepted:
+        return ""
+
+    lines = [
+        f"- \"{e.get('title', '?')}\" (viral_score={e.get('viral_score', '?')}, "
+        f"energy={e.get('energy_rating', '?')})"
+        for e in accepted
+    ]
+    logger.info(
+        "Loaded %d accepted-clip data point(s) from %s (no real viral performance data available yet)",
+        len(lines), UPLOADED_CLIPS_DIR,
+    )
+    return (
+        "\n\nACCEPTED CLIPS DATA (no real TikTok view/like data available yet — these are "
+        "clips that already scored highly with the critic and were successfully published; "
+        "a weaker signal than real performance data, but a recurring topic/energy/style "
+        "pattern among them is still worth noticing):\n" + "\n".join(lines)
+    )
+
+
 def extract_clip_transcript_text(transcript: Optional[dict], start: float, end: float) -> str:
     """The actual words spoken during a clip's time range, so the critic can judge
     mid-sentence cuts and missing hooks against the real transcript instead of guessing
@@ -358,7 +418,9 @@ def build_critic_user_content(
 
 def _call_critic(content: List[dict], model: str) -> CriticBatch:
     client = OpenAI()
-    viral_section = load_viral_memory_section()
+    # Accepted-clips data is only ever a fallback (2026-08-19) — real performance data is
+    # always the stronger, preferred signal when it exists.
+    viral_section = load_viral_memory_section() or load_accepted_clips_section()
     if viral_section:
         content = content + [{"type": "text", "text": viral_section}]
 
