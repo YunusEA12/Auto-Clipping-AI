@@ -6,6 +6,8 @@ face_area_ratio is the second signal that does."""
 
 from pathlib import Path
 
+import pytest
+
 import process
 
 
@@ -50,6 +52,45 @@ def test_resolve_layout_ratio_exactly_at_threshold_is_full_cam(monkeypatch):
     assert process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0) == process.LAYOUT_FULL_CAM
 
 
+def test_resolve_layout_retries_on_ambiguous_first_frame_when_clip_end_given(monkeypatch):
+    # First sampled frame looks like 0 faces (a blink, a HUD flicker); the second retry
+    # timestamp (clip_start + 1/3 of the duration) finds the real single webcam.
+    box = (0, 0, 200, 200)  # small ratio -> split_screen
+    calls = []
+
+    def fake_detect(video_path, ts):
+        calls.append(ts)
+        if len(calls) == 1:
+            return 0, None, 1000, 1000
+        return 1, box, 1000, 1000
+
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", fake_detect)
+    resolved = process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), clip_start=0.0, clip_end=30.0)
+
+    assert resolved == process.LAYOUT_SPLIT_SCREEN
+    assert len(calls) == 2
+    assert calls[1] == pytest.approx(10.0)  # 0 + 1/3 * 30
+
+
+def test_resolve_layout_no_clip_end_does_not_retry(monkeypatch):
+    calls = []
+
+    def fake_detect(video_path, ts):
+        calls.append(ts)
+        return 0, None, 1000, 1000
+
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", fake_detect)
+    process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), clip_start=5.0)
+
+    assert calls == [5.0]
+
+
+def test_resolve_layout_still_falls_back_to_blur_after_exhausting_retries(monkeypatch):
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", lambda *a, **k: (0, None, 1000, 1000))
+    resolved = process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), clip_start=0.0, clip_end=30.0)
+    assert resolved == process.LAYOUT_BLUR_BACKGROUND
+
+
 # --- build_filter_complex: full_cam branch ----------------------------------------------
 
 def test_build_filter_complex_full_cam_crops_source_and_fills_full_canvas(tmp_path):
@@ -86,6 +127,35 @@ def test_build_ass_for_clip_includes_title_box_dialogue_line(tmp_path, monkeypat
 
     assert ",TitleBox," in content
     assert "Krasser Moment!" in content
+
+
+def test_build_ass_for_clip_split_screen_anchors_title_to_the_seam(tmp_path, monkeypatch):
+    # 2026-08-19: a real render put the title box in the flat-ratio spot, well above the
+    # facecam/gameplay seam a reference clip in this style uses — split_screen now centers
+    # the title on the seam itself (SPLIT_SCREEN_FACE_RATIO), not the general TITLE_BOX_Y_RATIO.
+    monkeypatch.setattr(process, "TEMP_DIR", tmp_path)
+    clip = {"start_time": 0.0, "end_time": 5.0, "title": "Krasser Moment!"}
+    transcript = {"segments": []}
+
+    ass_path = process.build_ass_for_clip(
+        clip, transcript, index=1, output_w=1080, output_h=1920, layout=process.LAYOUT_SPLIT_SCREEN,
+    )
+    content = ass_path.read_text(encoding="utf-8")
+
+    expected_y = int(1920 * process.SPLIT_SCREEN_FACE_RATIO)
+    assert f"\\pos(540,{expected_y})" in content
+
+
+def test_build_ass_for_clip_full_cam_uses_flat_title_ratio(tmp_path, monkeypatch):
+    monkeypatch.setattr(process, "TEMP_DIR", tmp_path)
+    clip = {"start_time": 0.0, "end_time": 5.0, "title": "Krasser Moment!"}
+    transcript = {"segments": []}
+
+    ass_path = process.build_ass_for_clip(
+        clip, transcript, index=1, output_w=1080, output_h=1920, layout=process.LAYOUT_FULL_CAM,
+    )
+    content = ass_path.read_text(encoding="utf-8")
+
     expected_y = int(1920 * process.TITLE_BOX_Y_RATIO)
     assert f"\\pos(540,{expected_y})" in content
 
@@ -102,5 +172,7 @@ def test_build_ass_for_clip_omits_title_box_dialogue_without_a_title(tmp_path, m
 
 
 def test_title_box_and_subtitles_use_different_y_positions():
-    # The whole point of raising SUBTITLE_Y_RATIO was to keep it clear of TITLE_BOX_Y_RATIO.
+    # The whole point of raising SUBTITLE_Y_RATIO was to keep it clear of TITLE_BOX_Y_RATIO
+    # and, for split_screen, clear of the seam-anchored title position too.
     assert process.TITLE_BOX_Y_RATIO < process.SUBTITLE_Y_RATIO
+    assert process.SPLIT_SCREEN_FACE_RATIO < process.SUBTITLE_Y_RATIO

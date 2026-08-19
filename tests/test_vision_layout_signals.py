@@ -30,7 +30,7 @@ def test_face_area_ratio_zero_frame_area_does_not_crash():
 # --- detect_faces_for_layout ---------------------------------------------------------------
 
 def test_detect_faces_for_layout_no_faces(monkeypatch):
-    monkeypatch.setattr(vision, "_detect_faces", lambda video_path, timestamp: ([], 1920, 1080))
+    monkeypatch.setattr(vision, "_detect_faces", lambda video_path, timestamp: ([], [], 1920, 1080))
     count, box, w, h = vision.detect_faces_for_layout("video.mp4", 1.0)
     assert count == 0
     assert box is None
@@ -38,31 +38,51 @@ def test_detect_faces_for_layout_no_faces(monkeypatch):
 
 
 def test_detect_faces_for_layout_one_face(monkeypatch):
-    monkeypatch.setattr(vision, "_detect_faces", lambda video_path, timestamp: ([(10, 20, 300, 300)], 1920, 1080))
+    monkeypatch.setattr(
+        vision, "_detect_faces",
+        lambda video_path, timestamp: ([(10, 20, 300, 300)], [0.9], 1920, 1080),
+    )
     count, box, w, h = vision.detect_faces_for_layout("video.mp4", 1.0)
     assert count == 1
     assert box == (10, 20, 300, 300)
 
 
-def test_detect_faces_for_layout_multiple_faces_returns_first_box(monkeypatch):
+def test_detect_faces_for_layout_multiple_confident_faces_returns_highest_scoring_box(monkeypatch):
     monkeypatch.setattr(
         vision, "_detect_faces",
-        lambda video_path, timestamp: ([(10, 20, 300, 300), (500, 20, 300, 300)], 1920, 1080),
+        lambda video_path, timestamp: (
+            [(10, 20, 300, 300), (500, 20, 300, 300)], [0.7, 0.95], 1920, 1080,
+        ),
     )
     count, box, w, h = vision.detect_faces_for_layout("video.mp4", 1.0)
     assert count == 2
+    assert box == (500, 20, 300, 300)  # the higher-scoring detection, not just the first
+
+
+def test_detect_faces_for_layout_low_confidence_second_detection_not_counted(monkeypatch):
+    # A gameplay HUD element (character portrait, kill-cam face) clearing MediaPipe's own
+    # baseline 0.5 floor but not FACE_COUNT_MIN_CONFIDENCE shouldn't be counted as a second
+    # person and push a genuine single-webcam clip into the blur_background fallback.
+    monkeypatch.setattr(
+        vision, "_detect_faces",
+        lambda video_path, timestamp: (
+            [(10, 20, 300, 300), (500, 20, 50, 50)], [0.9, 0.55], 1920, 1080,
+        ),
+    )
+    count, box, w, h = vision.detect_faces_for_layout("video.mp4", 1.0)
+    assert count == 1
     assert box == (10, 20, 300, 300)
 
 
 # --- has_face built on the same shared detection call --------------------------------------
 
 def test_has_face_true_with_detections(monkeypatch):
-    monkeypatch.setattr(vision, "_detect_faces", lambda video_path, timestamp: ([(0, 0, 100, 100)], 1920, 1080))
+    monkeypatch.setattr(vision, "_detect_faces", lambda video_path, timestamp: ([(0, 0, 100, 100)], [0.9], 1920, 1080))
     assert vision.has_face("video.mp4", 1.0) is True
 
 
 def test_has_face_false_without_detections(monkeypatch):
-    monkeypatch.setattr(vision, "_detect_faces", lambda video_path, timestamp: ([], 1920, 1080))
+    monkeypatch.setattr(vision, "_detect_faces", lambda video_path, timestamp: ([], [], 1920, 1080))
     assert vision.has_face("video.mp4", 1.0) is False
 
 
@@ -71,7 +91,10 @@ def test_has_face_false_without_detections(monkeypatch):
 # canvas instead of just a short top-third zone) --------------------------------------------
 
 def test_get_facecam_coordinates_larger_padding_factor_yields_larger_box(monkeypatch):
-    monkeypatch.setattr(vision, "_detect_faces", lambda video_path, timestamp: ([(500, 500, 200, 200)], 1920, 1080))
+    monkeypatch.setattr(
+        vision, "_detect_faces",
+        lambda video_path, timestamp: ([(500, 500, 200, 200)], [0.9], 1920, 1080),
+    )
 
     default_box = vision.get_facecam_coordinates("video.mp4", 1.0)
     wide_box = vision.get_facecam_coordinates("video.mp4", 1.0, padding_factor=vision.PADDING_FACTOR * 2)
@@ -81,7 +104,19 @@ def test_get_facecam_coordinates_larger_padding_factor_yields_larger_box(monkeyp
 
 
 def test_get_facecam_coordinates_falls_back_without_a_face(monkeypatch):
-    monkeypatch.setattr(vision, "_detect_faces", lambda video_path, timestamp: ([], 1920, 1080))
+    monkeypatch.setattr(vision, "_detect_faces", lambda video_path, timestamp: ([], [], 1920, 1080))
     box = vision.get_facecam_coordinates("video.mp4", 1.0)
     # _fallback_box always returns a quarter-frame corner box.
     assert box == (960, 0, 960, 540)
+
+
+def test_get_facecam_coordinates_uses_highest_scoring_box(monkeypatch):
+    monkeypatch.setattr(
+        vision, "_detect_faces",
+        lambda video_path, timestamp: (
+            [(10, 20, 300, 300), (500, 20, 50, 50)], [0.6, 0.95], 1920, 1080,
+        ),
+    )
+    box = vision.get_facecam_coordinates("video.mp4", 1.0)
+    # Crops toward the higher-confidence detection, not just boxes[0].
+    assert box[:2] != (10, 20)

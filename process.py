@@ -90,11 +90,19 @@ Style: TitleBox,Arial Black,58,&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,-1,0,
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
-# Where the white title-box hook sits vertically, as a fraction of canvas height — the upper
-# half, but clear of TikTok's own top UI chrome (back arrow, search icon), which occupies
-# roughly the top 8-10% at typical zoom. Empirical/eyeballed against the reference posts this
-# feature was built from (2026-08-19), same "verify by rendering and looking" caveat as every
-# other *_Y_RATIO constant in this file.
+# Where the white title-box hook sits vertically, as a fraction of canvas height, for layouts
+# with no facecam/gameplay seam to anchor to (full_cam, blur_background) — the upper half, but
+# clear of TikTok's own top UI chrome (back arrow, search icon), which occupies roughly the
+# top 8-10% at typical zoom. Empirical/eyeballed against the reference posts this feature was
+# built from (2026-08-19), same "verify by rendering and looking" caveat as every other
+# *_Y_RATIO constant in this file.
+#
+# split_screen does NOT use this: a flat 0.16 lands in the upper-middle of the face zone
+# (SPLIT_SCREEN_FACE_RATIO = 1/3, i.e. 0-33%), often crossing straight over the streamer's
+# face rather than sitting at the natural "hook caption" spot real TikTok reaction-cam clips
+# use — the seam where the facecam ends and gameplay begins. Found live, 2026-08-19, comparing
+# a real render against a reference clip in that style: build_ass_for_clip() below positions
+# split_screen's title at SPLIT_SCREEN_FACE_RATIO instead, centered on the seam itself.
 TITLE_BOX_Y_RATIO = 0.16
 
 # Where the subtitle block sits vertically, as a fraction of the canvas height — the TikTok
@@ -206,6 +214,7 @@ def build_ass_for_clip(
     highlight_color: str = DEFAULT_HIGHLIGHT_COLOR,
     output_w: int = 1080,
     output_h: int = 1920,
+    layout: str = LAYOUT_SPLIT_SCREEN,
 ) -> Path:
     clip_start = clip["start_time"]
     clip_end = clip["end_time"]
@@ -243,7 +252,10 @@ def build_ass_for_clip(
     # than asking the LLM for a second, separate hook string.
     title_text = _escape_ass_text((clip.get("title") or "").strip())
     if title_text:
-        title_pos_y = int(output_h * TITLE_BOX_Y_RATIO)
+        # split_screen anchors the title to the facecam/gameplay seam (see TITLE_BOX_Y_RATIO's
+        # docstring above) instead of the flat ratio other layouts use.
+        title_y_ratio = SPLIT_SCREEN_FACE_RATIO if layout == LAYOUT_SPLIT_SCREEN else TITLE_BOX_Y_RATIO
+        title_pos_y = int(output_h * title_y_ratio)
         title_tag = f"{{\\an5\\pos({pos_x},{title_pos_y})}}"
         clip_duration = clip_end - clip_start
         events.append(
@@ -606,7 +618,17 @@ def find_source_video(explicit: Path | None) -> Path:
     return candidates[0]
 
 
-def resolve_layout(layout: str, video_path: Path, clip_start: float) -> str:
+# A face_count != 1 reading from a SINGLE sampled frame is ambiguous: it might genuinely be
+# zero/multiple people on screen for the whole clip, or it might be one unlucky frame (a
+# blink, motion blur, a HUD element briefly overlapping the webcam) in an otherwise ordinary
+# single-webcam clip. Retrying at a couple more timestamps before committing to
+# blur_background costs at most a couple extra detection passes per clip, only ever paid when
+# the first frame was already ambiguous. Fractions of the clip's own duration, not fixed
+# second offsets, so this scales sensibly across the full MIN/MAX_CLIP_DURATION range.
+LAYOUT_RETRY_FRACTIONS = (1 / 3, 2 / 3)
+
+
+def resolve_layout(layout: str, video_path: Path, clip_start: float, clip_end: float | None = None) -> str:
     """Three-way auto-layout decision (2026-08-19, replacing a plain face-present/absent
     binary): zero or multiple faces both fall back to blur_background — zero because there's
     nothing to crop toward, multiple because a single static crop can't represent several
@@ -614,11 +636,26 @@ def resolve_layout(layout: str, video_path: Path, clip_start: float) -> str:
     second signal to choose between full_cam and split_screen, since a face can be "one face"
     whether it's a close-up filling the whole frame or a small corner webcam box over a much
     bigger gameplay area — face_area_ratio (how much of the SOURCE frame the raw box covers)
-    is that second signal."""
+    is that second signal.
+
+    A face_count != 1 result is retried at a couple more timestamps within the clip (when
+    `clip_end` is given) before falling back to blur_background — see LAYOUT_RETRY_FRACTIONS.
+    """
     if layout != LAYOUT_AUTO:
         return layout
 
-    face_count, raw_box, frame_w, frame_h = vision.detect_faces_for_layout(str(video_path), clip_start)
+    timestamps = [clip_start]
+    if clip_end is not None and clip_end > clip_start:
+        duration = clip_end - clip_start
+        timestamps += [clip_start + f * duration for f in LAYOUT_RETRY_FRACTIONS]
+
+    face_count, raw_box, frame_w, frame_h = 0, None, 0, 0
+    for attempt, ts in enumerate(timestamps):
+        face_count, raw_box, frame_w, frame_h = vision.detect_faces_for_layout(str(video_path), ts)
+        if face_count == 1:
+            if attempt > 0:
+                logger.info("Auto-layout at %.2fs: face_count=1 found on retry at %.2fs", clip_start, ts)
+            break
 
     if face_count == 1:
         ratio = vision.face_area_ratio(raw_box, frame_w, frame_h)
@@ -629,7 +666,10 @@ def resolve_layout(layout: str, video_path: Path, clip_start: float) -> str:
         )
     else:
         resolved = LAYOUT_BLUR_BACKGROUND
-        logger.info("Auto-layout at %.2fs: face_count=%d -> %s", clip_start, face_count, resolved)
+        logger.info(
+            "Auto-layout at %.2fs: face_count=%d after %d attempt(s) -> %s",
+            clip_start, face_count, len(timestamps), resolved,
+        )
 
     return resolved
 
@@ -702,7 +742,7 @@ def process_clips_iter(
 
     total = len(clips)
     for i, clip in enumerate(clips, start=1):
-        effective_layout = resolve_layout(layout, video_path, clip["start_time"])
+        effective_layout = resolve_layout(layout, video_path, clip["start_time"], clip["end_time"])
 
         facecam_box = None
         if effective_layout == LAYOUT_SPLIT_SCREEN:
@@ -712,7 +752,7 @@ def process_clips_iter(
                 str(video_path), clip["start_time"], padding_factor=FULL_CAM_PADDING_FACTOR,
             )
 
-        ass_path = build_ass_for_clip(clip, transcript, i, highlight_color, output_w, output_h)
+        ass_path = build_ass_for_clip(clip, transcript, i, highlight_color, output_w, output_h, effective_layout)
         output_path = render_clip(
             video_path, clip, ass_path, i, effective_layout, output_w, output_h, facecam_box, gameplay_box,
             output_dir=output_dir,

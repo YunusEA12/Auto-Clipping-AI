@@ -39,6 +39,18 @@ PADDING_FACTOR = 2.5
 # would need to scale down with them or it'll start rejecting legitimate detections.
 MIN_BOX_DIMENSION = 100
 
+# 2026-08-19: a real single-webcam clip got auto-laid-out as blur_background instead of
+# split_screen — traced to gameplay HUD elements (character portraits, kill-cam faces, UI
+# icons) tripping FaceDetectorOptions' own baseline confidence floor (0.5) often enough to be
+# counted as a second "face" alongside the real streamer webcam, which pushed
+# process.resolve_layout() into its face_count != 1 fallback path for a clip that only ever
+# had one real person in frame. Detections below this higher bar still show up in has_face()
+# and get_facecam_coordinates()'s crop-box choice (better to crop toward a low-confidence real
+# face than nothing), but are excluded from the face COUNT the split_screen/full_cam/
+# blur_background decision is keyed on — a HUD portrait passing the detector's 0.5 floor
+# rarely also clears 0.65.
+FACE_COUNT_MIN_CONFIDENCE = 0.65
+
 
 def _ensure_model() -> Path:
     if MODEL_PATH.exists():
@@ -73,12 +85,13 @@ def _fallback_box(frame_w: int, frame_h: int) -> tuple[int, int, int, int]:
 
 def _detect_faces(
     video_path: str, timestamp: float
-) -> tuple[list[tuple[int, int, int, int]], int, int]:
-    """Read the frame at `timestamp` and return (all_raw_boxes, frame_w, frame_h) — every
-    face MediaPipe found, not just the first. Previously this only ever kept
-    result.detections[0] and discarded the count entirely, so there was no way to tell "one
-    face" from "several faces" anywhere in this module (found in review, 2026-08-19, needed
-    for the full-cam/split-screen/blur-background layout decision below)."""
+) -> tuple[list[tuple[int, int, int, int]], list[float], int, int]:
+    """Read the frame at `timestamp` and return (all_raw_boxes, all_scores, frame_w,
+    frame_h) — every face MediaPipe found, not just the first, alongside each one's
+    confidence score. Previously this only ever kept result.detections[0] and discarded the
+    count (and score) entirely, so there was no way to tell "one face" from "several faces",
+    or a confident detection from a marginal one, anywhere in this module (found in review,
+    2026-08-19, needed for the full-cam/split-screen/blur-background layout decision below)."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
@@ -108,24 +121,39 @@ def _detect_faces(
         (d.bounding_box.origin_x, d.bounding_box.origin_y, d.bounding_box.width, d.bounding_box.height)
         for d in result.detections
     ]
-    return boxes, frame_w, frame_h
+    scores = [
+        d.categories[0].score if d.categories else 0.0
+        for d in result.detections
+    ]
+    return boxes, scores, frame_w, frame_h
 
 
 def has_face(video_path: str, timestamp: float) -> bool:
     """Cheap presence check."""
-    boxes, _, _ = _detect_faces(video_path, timestamp)
+    boxes, _, _, _ = _detect_faces(video_path, timestamp)
     return len(boxes) > 0
 
 
 def detect_faces_for_layout(video_path: str, timestamp: float) -> tuple[int, Optional[tuple[int, int, int, int]], int, int]:
     """One detection pass covering everything process.resolve_layout() needs to pick between
-    full_cam / split_screen / blur_background: (face_count, first_raw_box_or_None, frame_w,
+    full_cam / split_screen / blur_background: (face_count, primary_raw_box_or_None, frame_w,
     frame_h). A single call instead of running detection twice (once for a presence/count
     check, once for the box) — the raw (unpadded) box lets the caller measure how much of
-    the frame the face actually covers via face_area_ratio() below."""
-    boxes, frame_w, frame_h = _detect_faces(video_path, timestamp)
-    first_box = boxes[0] if boxes else None
-    return len(boxes), first_box, frame_w, frame_h
+    the frame the face actually covers via face_area_ratio() below.
+
+    face_count only counts detections at/above FACE_COUNT_MIN_CONFIDENCE — a gameplay HUD
+    element (character portrait, kill-cam face, UI icon) can clear MediaPipe's own baseline
+    0.5 floor often enough to be miscounted as a second person and wrongly push a genuine
+    single-webcam clip into the blur_background fallback (found live, 2026-08-19); the
+    primary box is still whichever detection scored highest overall (real face or not), so a
+    confident low-scoring true face is still cropped toward rather than discarded."""
+    boxes, scores, frame_w, frame_h = _detect_faces(video_path, timestamp)
+    if not boxes:
+        return 0, None, frame_w, frame_h
+
+    primary_index = max(range(len(boxes)), key=lambda i: scores[i])
+    face_count = sum(1 for s in scores if s >= FACE_COUNT_MIN_CONFIDENCE)
+    return face_count, boxes[primary_index], frame_w, frame_h
 
 
 def face_area_ratio(face_box: tuple[int, int, int, int], frame_w: int, frame_h: int) -> float:
@@ -156,8 +184,8 @@ def get_facecam_coordinates(
     the ENTIRE tall 9:16 canvas instead of a short-wide strip — cover-fitting a padded box
     tuned for a short zone into a much taller one crops far tighter than intended.
     """
-    boxes, frame_w, frame_h = _detect_faces(video_path, timestamp)
-    raw_box = boxes[0] if boxes else None
+    boxes, scores, frame_w, frame_h = _detect_faces(video_path, timestamp)
+    raw_box = boxes[max(range(len(boxes)), key=lambda i: scores[i])] if boxes else None
 
     if raw_box is None:
         logger.warning("No face detected at %.2fs in %s, using fallback crop", timestamp, video_path)
