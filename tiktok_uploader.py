@@ -111,11 +111,33 @@ SOUND_PANEL_CLOSE_BUTTON_SELECTOR = ".SideModuleRenderBox__header button"
 # Sounds interaction) was never explicitly exited — closing the Sounds side panel only closes
 # ITS OWN sub-panel, not the whole editor overlay underneath. See _exit_video_editor.
 SOUND_EDITOR_SAVE_TIMEOUT_MS = 8000
-# Randomizing among the first few tracks (rather than always the very first) keeps consecutive
-# uploads from all carrying identical background audio — the same "don't make every render
-# trivially identical to the last" spirit as the "hidden gem" clip-selection guidance, just
-# applied to music instead of content choice.
-SOUND_CANDIDATE_POOL = 8
+# 2026-08-19: switched from browsing/randomizing among whatever tracks the "Unlimited" tab
+# happens to list first, to searching for one of a fixed, explicitly approved set of titles —
+# the account owner's own call on which specific tracks to use. Search box selector verified
+# live: get_by_placeholder is scoped correctly even though the upload page also has an
+# unrelated "Search locations" input elsewhere (for tagging a location in the caption) — the
+# placeholder text is what actually disambiguates the two, confirmed by dumping both live.
+SOUND_SEARCH_INPUT_PLACEHOLDER = "Search sounds"
+# Fixed settle delay after pressing Enter — confirmed live that the result list doesn't
+# update instantly; no loading-state DOM signal was found to poll instead (unlike the track
+# "Loading" icon SOUND_LOAD_TIMEOUT_MS below waits out), so this is a flat wait, same
+# pragmatic tradeoff as this file's other fixed settle delays.
+SOUND_SEARCH_SETTLE_MS = 2500
+# The exact, explicitly approved song pool (2026-08-19) — one is picked at random per upload,
+# searched for by name, and the top non-blacklisted result is used. Verified live which of
+# these titles actually exist in TikTok's Commercial Music Library right now: "Dexter - The
+# blood theme" and "Veridis Quo" both return real matches (plus cover/edit variants); "A Long
+# Way Home" currently returns zero results. _add_background_sound_impl() retries the other
+# pool entries if one comes up empty rather than silently dropping music for that upload.
+SOUND_TRACK_POOL = [
+    "Dexter - The blood theme",
+    "Veridis Quo",
+    "A Long Way Home",
+]
+# Permanently excluded track (2026-08-19, explicit account-owner call) — checked against
+# every search result's title, not just the pool above, in case a future pool addition's
+# search results happen to surface it too. Lowercased for case-insensitive comparison.
+BLACKLISTED_TRACK_TITLES = {"countless"}
 # Confirmed live: newly-added tracks show a transient "Loading" data-icon while TikTok
 # fetches/prepares the audio before settling into a different icon. Best-effort — if this
 # never resolves, the track was still added (confirmed by the timeline in the live test), so
@@ -617,26 +639,34 @@ def _add_background_sound_impl(page) -> Optional[str]:
         _close_sound_panel(page)
         return None
 
-    rows = page.locator(SOUND_TRACK_ROW_SELECTOR)
-    try:
-        rows.first.wait_for(state="visible", timeout=SOUND_LOAD_TIMEOUT_MS)
-    except PlaywrightTimeoutError:
+    # Search each pool entry (random order, last-used title deprioritized — see
+    # _ordered_search_queries) until one actually surfaces a usable result. Not every title in
+    # the fixed pool is guaranteed to exist in TikTok's library at any given moment ("A Long
+    # Way Home" currently returns zero results — verified live, 2026-08-19), so a single fixed
+    # pick with no fallback would silently drop background music from roughly a third of
+    # uploads.
+    chosen_row = None
+    title = None
+    for query in _ordered_search_queries():
+        row, row_title = _search_and_pick_top_result(page, query)
+        if row is not None:
+            chosen_row, title = row, row_title
+            logger.info("Search for '%s' matched: %s", query, title)
+            break
+        logger.warning("Search for '%s' returned no usable result — trying the next pool entry", query)
+
+    if chosen_row is None:
         logger.warning(
-            "No tracks found in the '%s' sound library tab — uploading without background music",
-            SOUND_LIBRARY_TAB_LABEL,
+            "None of the approved tracks (%s) could be found — uploading without background music",
+            ", ".join(SOUND_TRACK_POOL),
         )
         _close_sound_panel(page)
         return None
 
-    pool_size = min(rows.count(), SOUND_CANDIDATE_POOL)
-    chosen_index = _pick_track_index(rows, pool_size)
-    chosen_row = rows.nth(chosen_index)
-
     try:
-        title = (chosen_row.locator(SOUND_TRACK_TITLE_SELECTOR).text_content() or "").strip()
         chosen_row.locator(SOUND_TRACK_ADD_BUTTON_SELECTOR).click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
     except PlaywrightTimeoutError:
-        logger.warning("Could not add a track from the sound library — uploading without background music")
+        logger.warning("Could not add '%s' from search results — uploading without background music", title)
         _close_sound_panel(page)
         return None
 
@@ -651,22 +681,50 @@ def _add_background_sound_impl(page) -> Optional[str]:
     return title or None
 
 
-def _pick_track_index(rows, pool_size: int) -> int:
-    """Random pick among the candidate pool, re-rolled once against a different index if the
-    first pick's title matches _last_track_title (the previous upload's track) — avoids two
-    consecutive clips carrying identical background music. Best-effort: if reading the title
-    to check fails, or the pool is too small to have an alternative, just keeps the original
-    pick rather than blocking the upload on this."""
-    index = random.randrange(pool_size)
-    if pool_size <= 1 or _last_track_title is None:
-        return index
+def _ordered_search_queries() -> List[str]:
+    """SOUND_TRACK_POOL in random order, with whichever title was actually added last upload
+    (if it's still in the pool) moved to the end — avoids two consecutive clips carrying the
+    same track when a different pool entry is also available, same duplicate-avoidance intent
+    as before this pool became a fixed, named list instead of whatever the library happened to
+    list first. Falls back to repeating it (better than no music at all) only when every other
+    entry's search comes up empty."""
+    queries = list(SOUND_TRACK_POOL)
+    random.shuffle(queries)
+    if _last_track_title in queries and len(queries) > 1:
+        queries.remove(_last_track_title)
+        queries.append(_last_track_title)
+    return queries
+
+
+def _search_and_pick_top_result(page, query: str) -> Tuple[Optional[object], Optional[str]]:
+    """Types `query` into the Sounds panel's search box, presses Enter, and returns
+    (row, title) for the first result whose title isn't in BLACKLISTED_TRACK_TITLES — or
+    (None, None) if the search found nothing usable. Never raises: a failed or empty search
+    just means the caller tries the next pool entry, same best-effort spirit as every other
+    step in this flow."""
     try:
-        title = (rows.nth(index).locator(SOUND_TRACK_TITLE_SELECTOR).text_content() or "").strip()
-    except Exception:
-        return index
-    if title and title == _last_track_title:
-        index = random.choice([i for i in range(pool_size) if i != index])
-    return index
+        search_box = page.get_by_placeholder(SOUND_SEARCH_INPUT_PLACEHOLDER)
+        search_box.click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
+        search_box.fill("")
+        search_box.type(query, delay=30)
+        page.keyboard.press("Enter")
+    except PlaywrightTimeoutError:
+        return None, None
+
+    page.wait_for_timeout(SOUND_SEARCH_SETTLE_MS)
+
+    rows = page.locator(SOUND_TRACK_ROW_SELECTOR)
+    for i in range(rows.count()):
+        row = rows.nth(i)
+        try:
+            row_title = (row.locator(SOUND_TRACK_TITLE_SELECTOR).text_content() or "").strip()
+        except Exception:
+            continue
+        if row_title.lower() in BLACKLISTED_TRACK_TITLES:
+            continue
+        return row, row_title
+
+    return None, None
 
 
 def upload_video(
