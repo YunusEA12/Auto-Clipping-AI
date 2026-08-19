@@ -213,7 +213,12 @@ def test_kill_if_alive_skips_a_pid_that_is_already_gone(monkeypatch):
     process_supervisor.SupervisedProcess._kill_if_alive(999)  # must not raise
 
 
-def test_start_uses_new_process_group_on_windows(monkeypatch):
+def test_start_uses_new_process_group_and_suppresses_window_on_windows(monkeypatch):
+    # CREATE_NO_WINDOW (found live, 2026-08-19 — a real production outage): without it, a
+    # supervised child gets a brand-new, real, closeable console window from Win32 whenever
+    # process_supervisor.py itself has no console of its own (the normal way to run this as a
+    # detached 24/7 service) — closing that window took the entire live fleet down at once
+    # (publish=True active for three streamers at the time).
     calls = []
 
     class FakePopenCapture:
@@ -227,7 +232,7 @@ def test_start_uses_new_process_group_on_windows(monkeypatch):
     proc = process_supervisor.SupervisedProcess("fake.py", ["fake.py"])
     proc.start()
 
-    assert calls == [subprocess.CREATE_NEW_PROCESS_GROUP]
+    assert calls == [subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW]
 
 
 # --- SIGTERM handling (2026-08-19: required for the systemd deployment — `systemctl stop`

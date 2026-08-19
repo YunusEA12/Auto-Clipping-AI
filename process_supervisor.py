@@ -148,7 +148,22 @@ class SupervisedProcess:
         # a later CTRL_BREAK_EVENT can be targeted at just this process tree instead of also
         # hitting process_supervisor.py's own console — see the GRACEFUL_STOP_TIMEOUT_SECONDS
         # comment above for why this matters.
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        #
+        # CREATE_NO_WINDOW (found live, 2026-08-19 — a real production outage): when
+        # process_supervisor.py itself is launched detached/without its own console (the
+        # normal way to run a 24/7 background service), Win32's CreateProcess allocates a
+        # BRAND NEW visible console window for this child by default, since neither flag
+        # suppressing that was set. That window is a real, closeable thing sitting on the
+        # desktop — closing it (or Windows closing it for any reason) sends every process
+        # attached to that console a CTRL_CLOSE_EVENT, which took down orchestrator.py,
+        # metrics_tracker.py, and everything THEY had spawned (auto_pilot.py, ffmpeg,
+        # streamlink — three live, publish=True streamers) all at once, logged only as an
+        # opaque "forrtl: error (200): program aborting due to window-CLOSE event" from
+        # whichever library happened to be linked against the Fortran runtime. Suppressing
+        # window creation entirely removes the thing that could be closed in the first place.
+        creationflags = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
         self.process = subprocess.Popen(self.cmd, creationflags=creationflags)
         self.started_at = datetime.now(timezone.utc)
 
