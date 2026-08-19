@@ -162,6 +162,12 @@ def _write_state(path, target_streamer, hours_ago):
     }), encoding="utf-8")
 
 
+def _write_orchestrator_state(root, live_by_name):
+    (root / "orchestrator_state.json").write_text(json.dumps({
+        "streamers": {name: {"live": live} for name, live in live_by_name.items()},
+    }), encoding="utf-8")
+
+
 def test_purge_removes_orphaned_state_not_in_streamers_json(tmp_path):
     streamers_path = tmp_path / "streamers.json"
     streamers.save_streamers([{"name": "eliasn97", "url": "https://twitch.tv/eliasn97"}], path=streamers_path)
@@ -184,6 +190,75 @@ def test_purge_removes_stale_state_for_a_still_configured_streamer(tmp_path):
 
     assert "agent_state_eliasn97.json" in deleted
     assert not stale.exists()
+
+
+# --- offline-aware grace period (2026-08-19, requested live: "wenn agent länger offline ist
+# dann soll er auch aus dem status raus gehen" — a streamer simply not streaming right now
+# should clear from the dashboard promptly, but a streamer still supposed to be live that
+# just stopped updating (a real crash/hang) should stay visible as an actionable problem for
+# the full max_age_hours) --------------------------------------------------------------
+
+def test_purge_uses_short_grace_period_for_a_streamer_currently_offline(tmp_path):
+    streamers_path = tmp_path / "streamers.json"
+    streamers.save_streamers([{"name": "eliasn97", "url": "https://twitch.tv/eliasn97"}], path=streamers_path)
+    _write_orchestrator_state(tmp_path, {"eliasn97": False})
+    stale = tmp_path / "agent_state_eliasn97.json"
+    _write_state(stale, "https://twitch.tv/eliasn97", hours_ago=2)  # well under max_age_hours=24
+
+    deleted = streamers.purge_stale_agent_states(
+        streamers_path=streamers_path, root=tmp_path, max_age_hours=24, offline_grace_hours=1,
+    )
+
+    assert "agent_state_eliasn97.json" in deleted
+    assert not stale.exists()
+
+
+def test_purge_keeps_offline_streamer_within_its_grace_period(tmp_path):
+    streamers_path = tmp_path / "streamers.json"
+    streamers.save_streamers([{"name": "eliasn97", "url": "https://twitch.tv/eliasn97"}], path=streamers_path)
+    _write_orchestrator_state(tmp_path, {"eliasn97": False})
+    fresh = tmp_path / "agent_state_eliasn97.json"
+    _write_state(fresh, "https://twitch.tv/eliasn97", hours_ago=0.5)  # under offline_grace_hours=1
+
+    deleted = streamers.purge_stale_agent_states(
+        streamers_path=streamers_path, root=tmp_path, max_age_hours=24, offline_grace_hours=1,
+    )
+
+    assert deleted == []
+    assert fresh.exists()
+
+
+def test_purge_uses_long_threshold_for_a_streamer_still_reported_live(tmp_path):
+    # Still live but stuck/crashed — an actionable problem, must NOT vanish after just the
+    # short offline grace period.
+    streamers_path = tmp_path / "streamers.json"
+    streamers.save_streamers([{"name": "eliasn97", "url": "https://twitch.tv/eliasn97"}], path=streamers_path)
+    _write_orchestrator_state(tmp_path, {"eliasn97": True})
+    stuck = tmp_path / "agent_state_eliasn97.json"
+    _write_state(stuck, "https://twitch.tv/eliasn97", hours_ago=2)  # past offline_grace_hours=1
+
+    deleted = streamers.purge_stale_agent_states(
+        streamers_path=streamers_path, root=tmp_path, max_age_hours=24, offline_grace_hours=1,
+    )
+
+    assert deleted == []
+    assert stuck.exists()
+
+
+def test_purge_uses_long_threshold_when_orchestrator_state_has_no_opinion(tmp_path):
+    # No orchestrator_state.json at all (e.g. orchestrator.py itself isn't running) — liveness
+    # is unknown, never guessed at, so this must fall back to the safer, longer threshold.
+    streamers_path = tmp_path / "streamers.json"
+    streamers.save_streamers([{"name": "eliasn97", "url": "https://twitch.tv/eliasn97"}], path=streamers_path)
+    unknown = tmp_path / "agent_state_eliasn97.json"
+    _write_state(unknown, "https://twitch.tv/eliasn97", hours_ago=2)  # past offline_grace_hours=1
+
+    deleted = streamers.purge_stale_agent_states(
+        streamers_path=streamers_path, root=tmp_path, max_age_hours=24, offline_grace_hours=1,
+    )
+
+    assert deleted == []
+    assert unknown.exists()
 
 
 def test_purge_keeps_fresh_state_for_a_still_configured_streamer(tmp_path):

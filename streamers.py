@@ -39,7 +39,12 @@ STREAMERS_PATH = Path("streamers.json")
 # everything THEY depend on, far heavier than orchestrator.py/process_supervisor.py (both
 # meant to stay minimal top-level scripts) need just to glob a filename pattern.
 AGENT_STATE_GLOB = "agent_state*.json"
+# For a streamer whose last update predates a genuine crash/hang while still supposed to be
+# live — an actionable problem, kept visible long enough to actually notice and investigate.
 AGENT_STATE_MAX_AGE_HOURS = 24
+# For a streamer orchestrator_state.json currently reports as simply not live — routine, no
+# action needed, so its dashboard card should clear promptly rather than sit there for a day.
+AGENT_STATE_OFFLINE_GRACE_HOURS = 1
 
 
 def _slugify(text: str) -> str:
@@ -121,28 +126,59 @@ def load_streamers(path: Path = None) -> List[dict]:
     return entries
 
 
+def _read_live_status_by_slug(root: Path) -> dict:
+    """Best-effort {slug: is_live} from orchestrator_state.json — orchestrator.py's own
+    ground truth for whether a streamer is currently streaming, refreshed every poll cycle
+    (default 90s), independent of and far more current than an agent_state file's own
+    last_updated. A missing or corrupt file just means every streamer falls back to treating
+    liveness as unknown, never guessed at."""
+    path = root / "orchestrator_state.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return {
+        _slugify(name): bool(info.get("live"))
+        for name, info in data.get("streamers", {}).items()
+        if isinstance(info, dict)
+    }
+
+
 def purge_stale_agent_states(
-    streamers_path: Path = None, max_age_hours: float = AGENT_STATE_MAX_AGE_HOURS, root: Path = None,
+    streamers_path: Path = None,
+    max_age_hours: float = AGENT_STATE_MAX_AGE_HOURS,
+    offline_grace_hours: float = AGENT_STATE_OFFLINE_GRACE_HOURS,
+    root: Path = None,
 ) -> List[str]:
     """Deletes agent_state*.json files (auto_pilot.py's per-streamer dashboard state, see
     H-14 in the audit) that are either orphaned — their slug no longer matches any streamer
     currently in streamers.json, e.g. a removed streamer's last-known state lingering
-    forever — or stale — no update in over `max_age_hours`, e.g. a subprocess that crashed
-    hard enough to never reach its own error-cooldown update. Found live, 2026-08-19: a
-    leftover flat agent_state.json from before --streamer-name was threaded through
-    everywhere sat next to the real agent_state_papaplatte.json, both showing "papaplatte" in
-    the dashboard at once.
+    forever — or stale, using one of two thresholds depending on WHY nothing has updated it:
 
-    The legacy flat agent_state.json (written by a manual/standalone run with no
-    --streamer-name) has no slug to check against streamers.json, so it can't be orphaned by
-    name the way a per-streamer file can — but its mere COEXISTENCE with any per-streamer
-    agent_state_<slug>.json file is itself sufficient evidence it's obsolete, independent of
-    age: a single auto_pilot.py process only ever writes to one target, and orchestrator.py
-    always passes --streamer-name now, so a live system never legitimately writes both at
-    once. Without this, the exact bug found live would have sat there for another ~15 hours
-    before the age-based staleness check alone caught up to it. It's still also subject to
-    the ordinary staleness check below, for the genuinely-standalone case where no
-    per-streamer files exist at all.
+    - A streamer orchestrator_state.json currently reports as live=False (simply not
+      streaming right now) gets the short `offline_grace_hours` window — routine, not a
+      problem, the dashboard card should clear promptly once they've been offline a while
+      (requested live, 2026-08-19: "wenn agent länger offline ist dann soll er auch aus dem
+      status raus gehen").
+    - A streamer still reported live=True, or one orchestrator_state.json has no opinion
+      about at all (missing file, streamer not in it — e.g. orchestrator.py itself isn't
+      running), gets the much longer `max_age_hours` window instead — this is the "subprocess
+      crashed hard enough to never reach its own error-cooldown update" case (the original
+      reason this function has a staleness check at all), and deserves more patience before
+      vanishing since it represents an actual, actionable problem rather than a routine
+      offline period.
+
+    Found live, 2026-08-19: a leftover flat agent_state.json from before --streamer-name was
+    threaded through everywhere sat next to the real agent_state_papaplatte.json, both
+    showing "papaplatte" in the dashboard at once. The legacy flat agent_state.json (written
+    by a manual/standalone run with no --streamer-name) has no slug to check liveness or
+    streamers.json against, so it always uses `max_age_hours` — but its mere COEXISTENCE with
+    any per-streamer agent_state_<slug>.json file is itself sufficient evidence it's obsolete,
+    independent of age: a single auto_pilot.py process only ever writes to one target, and
+    orchestrator.py always passes --streamer-name now, so a live system never legitimately
+    writes both at once.
 
     A file with no parseable last_updated is left alone rather than guessed at, same
     never-prune-on-ambiguity principle as metrics_tracker.prune_viral_memory.
@@ -152,6 +188,7 @@ def purge_stale_agent_states(
         root = Path(".")
 
     current_slugs = {_slugify(e["name"]) for e in load_streamers(streamers_path)}
+    live_by_slug = _read_live_status_by_slug(root)
     now = datetime.now(timezone.utc)
     deleted: List[str] = []
 
@@ -169,15 +206,18 @@ def purge_stale_agent_states(
 
         if slug is None:
             orphaned = any_namespaced_state_exists
+            threshold = max_age_hours
         else:
             orphaned = slug not in current_slugs
+            is_currently_live = live_by_slug.get(slug)
+            threshold = offline_grace_hours if is_currently_live is False else max_age_hours
 
         stale = False
         last_updated_raw = state.get("last_updated")
         if last_updated_raw:
             try:
                 age_hours = (now - datetime.fromisoformat(last_updated_raw)).total_seconds() / 3600
-                stale = age_hours > max_age_hours
+                stale = age_hours > threshold
             except ValueError:
                 stale = False
 
@@ -187,7 +227,7 @@ def purge_stale_agent_states(
         if orphaned:
             reason = "superseded by per-streamer state files" if slug is None else "orphaned (no matching streamer)"
         else:
-            reason = f"stale (>{max_age_hours:.0f}h since last update)"
+            reason = f"stale (>{threshold:.0f}h since last update)"
         try:
             path.unlink()
             deleted.append(path.name)
