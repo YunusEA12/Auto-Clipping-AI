@@ -36,11 +36,14 @@ Usage:
 
 import argparse
 import logging
+import signal
 import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
+
+import psutil
 
 import streamers as streamers_module
 
@@ -54,6 +57,28 @@ CRASH_LOOP_WINDOW_SECONDS = 60
 CRASH_BACKOFF_BASE_SECONDS = 30
 CRASH_BACKOFF_MAX_SECONDS = 1800
 CRASH_BACKOFF_MAX_STREAK = 20
+
+# 2026-08-19: found live — Ctrl+C on this supervisor left ffmpeg/streamlink recording
+# processes running in the background indefinitely. Root cause: SupervisedProcess.stop() used
+# to call plain Popen.terminate() on orchestrator.py — on Windows that's an unconditional
+# TerminateProcess, which kills the target with NO chance for its own Python-level cleanup to
+# run at all. orchestrator.py already has correct KeyboardInterrupt-driven cleanup (it stops
+# every tracked auto_pilot.py subprocess in its own `finally` block), but that code was simply
+# never reached — the hard kill bypassed it entirely, so auto_pilot.py (and in turn whatever
+# ffmpeg/streamlink call it happened to be blocked in) was orphaned right along with it.
+#
+# The fix below is deliberately two-phase and does not depend on any single layer's internal
+# cleanup actually running correctly:
+#   1. A genuine interrupt (CTRL_BREAK_EVENT on Windows, SIGINT on POSIX — both raise a real,
+#      catchable KeyboardInterrupt in the target, unlike terminate()) gives orchestrator.py/
+#      metrics_tracker.py a real chance to run their own existing graceful-shutdown code.
+#   2. Regardless of whether phase 1 worked at every level, every descendant process (at ANY
+#      depth — auto_pilot.py, ffmpeg, streamlink) is snapshotted BEFORE phase 1 runs and
+#      force-killed if still alive afterward. This is the actual guarantee against orphans:
+#      even if some intermediate script has its own bug, is itself stuck, or a signal simply
+#      isn't delivered, nothing from the original snapshot survives this function.
+GRACEFUL_STOP_TIMEOUT_SECONDS = 30
+FORCE_KILL_WAIT_SECONDS = 5
 
 
 def _crash_backoff_seconds(streak: int) -> float:
@@ -75,7 +100,13 @@ class SupervisedProcess:
 
     def start(self) -> None:
         logger.info("🚀 Starte %s: %s", self.name, " ".join(self.cmd))
-        self.process = subprocess.Popen(self.cmd)
+        # CREATE_NEW_PROCESS_GROUP (Windows-only; getattr(...) is a no-op 0 on POSIX, where
+        # signal delivery is per-PID already) puts this subprocess in its own process group so
+        # a later CTRL_BREAK_EVENT can be targeted at just this process tree instead of also
+        # hitting process_supervisor.py's own console — see the GRACEFUL_STOP_TIMEOUT_SECONDS
+        # comment above for why this matters.
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        self.process = subprocess.Popen(self.cmd, creationflags=creationflags)
         self.started_at = datetime.now(timezone.utc)
 
     def handle_exit(self) -> None:
@@ -101,16 +132,84 @@ class SupervisedProcess:
     def in_backoff(self) -> bool:
         return self.retry_after is not None and datetime.now(timezone.utc) < self.retry_after
 
+    def _snapshot_descendants(self) -> List["psutil.Process"]:
+        """Every process currently rooted at this one (auto_pilot.py per streamer, and
+        whatever THEY spawn — ffmpeg, streamlink — at any depth), captured before anything is
+        signaled. Must happen first: once a process has exited, psutil can no longer walk its
+        children through it, so a snapshot taken only after termination would silently miss
+        exactly the orphans this function exists to catch."""
+        if self.process is None:
+            return []
+        try:
+            return psutil.Process(self.process.pid).children(recursive=True)
+        except psutil.NoSuchProcess:
+            return []
+
+    @staticmethod
+    def _kill_if_alive(pid: int) -> None:
+        try:
+            proc = psutil.Process(pid)
+            if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
+                return
+            logger.warning("🔪 Erzwinge Beendigung von verbliebenem Prozess PID %d (%s)", pid, proc.name())
+            proc.kill()
+            proc.wait(timeout=FORCE_KILL_WAIT_SECONDS)
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.TimeoutExpired:
+            logger.warning("PID %d reagierte nicht einmal auf kill() — aufgegeben.", pid)
+
     def stop(self) -> None:
         if self.process is None:
             return
-        logger.info("⏹️ Beende %s (PID %s)", self.name, self.process.pid)
-        self.process.terminate()
+        pid = self.process.pid
+        logger.info("⏹️ Beende %s (PID %s) und alle Kindprozesse...", self.name, pid)
+
+        # Snapshot BEFORE signaling anything — see _snapshot_descendants' own docstring.
+        descendants = self._snapshot_descendants()
+
+        # Phase 1: a real, catchable interrupt — not terminate()'s unconditional hard kill —
+        # gives this process's own KeyboardInterrupt-driven cleanup (already correct in
+        # orchestrator.py/metrics_tracker.py) a genuine chance to run.
         try:
-            self.process.wait(timeout=15)
+            if sys.platform == "win32":
+                self.process.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                self.process.send_signal(signal.SIGINT)
+        except (ProcessLookupError, OSError) as e:
+            logger.warning("Konnte kein Stop-Signal an %s senden: %s", self.name, e)
+
+        try:
+            self.process.wait(timeout=GRACEFUL_STOP_TIMEOUT_SECONDS)
+            logger.info("%s hat sich innerhalb von %ds sauber beendet.", self.name, GRACEFUL_STOP_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait(timeout=15)
+            logger.warning(
+                "%s hat nicht innerhalb von %ds auf das Stop-Signal reagiert.",
+                self.name, GRACEFUL_STOP_TIMEOUT_SECONDS,
+            )
+
+        # Phase 2 (the actual guarantee): force-kill the root itself (if phase 1 didn't finish
+        # in time) and every descendant from the original snapshot — regardless of whether
+        # phase 1 succeeded at every intermediate layer. This is what makes "no rogue ffmpeg
+        # left behind" true unconditionally, not just when everything upstream behaved.
+        self._kill_if_alive(pid)
+        for proc in descendants:
+            self._kill_if_alive(proc.pid)
+
+        self.process = None
+
+
+def _raise_keyboard_interrupt(signum, frame) -> None:
+    """SIGTERM handler that routes through the exact same try/except KeyboardInterrupt/finally
+    shutdown path below as Ctrl+C, instead of duplicating the cleanup logic for a second
+    trigger. Matters most for the systemd deployment (deploy/auto-clipping-supervisor.service)
+    — `systemctl stop` sends a real SIGTERM, which Python's default handling would otherwise
+    just let terminate the process with zero cleanup. On Windows, os.kill(pid, SIGTERM) is
+    implemented as an unconditional TerminateProcess that never actually reaches a registered
+    handler in the target at all — registering this here is still correct and harmless, just
+    inert for that specific delivery path; SupervisedProcess.stop()'s CTRL_BREAK_EVENT is what
+    does the real graceful-shutdown work on Windows instead."""
+    raise KeyboardInterrupt()
 
 
 def run_supervisor(
@@ -118,6 +217,8 @@ def run_supervisor(
     include_metrics_tracker: bool = True,
     max_iterations: Optional[int] = None,
 ) -> None:
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+
     supervised: Dict[str, SupervisedProcess] = {
         "orchestrator": SupervisedProcess("orchestrator.py", [sys.executable, "orchestrator.py"]),
     }

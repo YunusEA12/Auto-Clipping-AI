@@ -9,6 +9,9 @@ name that collides with a real installed package."""
 import subprocess
 import sys
 
+import psutil
+import pytest
+
 import process_supervisor
 
 
@@ -60,6 +63,196 @@ def test_purge_failure_does_not_crash_the_supervisor(monkeypatch):
 
     # Must not raise.
     process_supervisor.run_supervisor(poll_interval=0, max_iterations=2, include_metrics_tracker=False)
+
+
+# --- Robust shutdown (2026-08-19: found live — Ctrl+C on the supervisor left ffmpeg/
+# streamlink recording processes running in the background indefinitely, because
+# SupervisedProcess.stop() used to send a plain terminate() — an unconditional hard kill on
+# Windows, with zero chance for orchestrator.py's own already-correct KeyboardInterrupt
+# cleanup to run at all, let alone its own children's children) --------------------------
+
+class FakePsutilProcess:
+    """Same fake used by test_orchestrator_reconciliation.py, extended with kill()/name()
+    for the force-kill safety net."""
+
+    def __init__(self, pid, running=True, status="running", name="fake.exe"):
+        self.pid = pid
+        self._running = running
+        self._status = status
+        self._name = name
+        self.killed = False
+
+    def is_running(self):
+        return self._running
+
+    def status(self):
+        return self._status
+
+    def name(self):
+        return self._name
+
+    def kill(self):
+        self.killed = True
+        self._running = False
+
+    def wait(self, timeout=None):
+        pass
+
+    def children(self, recursive=False):
+        return []
+
+
+class FakePopen:
+    def __init__(self, pid):
+        self.pid = pid
+        self.signals_sent = []
+        self.wait_calls = 0
+        self.wait_should_time_out = False
+
+    def send_signal(self, sig):
+        self.signals_sent.append(sig)
+
+    def wait(self, timeout=None):
+        self.wait_calls += 1
+        if self.wait_should_time_out:
+            raise subprocess.TimeoutExpired(cmd="fake", timeout=timeout)
+
+    def poll(self):
+        return None
+
+
+def _make_supervised(monkeypatch, root_pid=100, descendants=None, wait_should_time_out=False, platform="win32"):
+    proc = process_supervisor.SupervisedProcess("fake.py", ["fake.py"])
+    fake_popen = FakePopen(root_pid)
+    fake_popen.wait_should_time_out = wait_should_time_out
+    proc.process = fake_popen
+
+    # The root's psutil-level liveness must mirror whether its Popen-level wait() actually
+    # succeeded — a real OS process that Popen.wait() confirmed exited is genuinely gone by
+    # the time _kill_if_alive() looks it up again; only a real timeout leaves it truly alive.
+    registry = {root_pid: FakePsutilProcess(root_pid, running=wait_should_time_out, name="fake_root")}
+    for d in (descendants or []):
+        registry[d.pid] = d
+
+    def fake_process_ctor(pid):
+        if pid not in registry:
+            raise psutil.NoSuchProcess(pid)
+        return registry[pid]
+
+    monkeypatch.setattr(process_supervisor.psutil, "Process", fake_process_ctor)
+    monkeypatch.setattr(process_supervisor.sys, "platform", platform)
+    # children(recursive=True) is looked up through the ROOT's own psutil.Process object.
+    registry[root_pid].children = lambda recursive=False: (descendants or [])
+
+    return proc, fake_popen, registry
+
+
+def test_stop_sends_ctrl_break_on_windows(monkeypatch):
+    proc, fake_popen, _ = _make_supervised(monkeypatch, platform="win32")
+    proc.stop()
+    assert fake_popen.signals_sent == [process_supervisor.signal.CTRL_BREAK_EVENT]
+
+
+def test_stop_sends_sigint_on_posix(monkeypatch):
+    proc, fake_popen, _ = _make_supervised(monkeypatch, platform="linux")
+    proc.stop()
+    assert fake_popen.signals_sent == [process_supervisor.signal.SIGINT]
+
+
+def test_stop_does_not_force_kill_when_graceful_shutdown_succeeds(monkeypatch):
+    descendant = FakePsutilProcess(pid=101, running=False)  # already exited by the time we check
+    proc, fake_popen, registry = _make_supervised(monkeypatch, descendants=[descendant], wait_should_time_out=False)
+
+    proc.stop()
+
+    assert registry[100].killed is False
+    assert descendant.killed is False
+    assert proc.process is None
+
+
+def test_stop_force_kills_root_and_descendants_after_timeout(monkeypatch):
+    descendant = FakePsutilProcess(pid=101, running=True)
+    proc, fake_popen, registry = _make_supervised(monkeypatch, descendants=[descendant], wait_should_time_out=True)
+
+    proc.stop()
+
+    assert registry[100].killed is True  # root was still alive after the graceful-wait timeout
+    assert descendant.killed is True  # this is the actual orphaned-ffmpeg guarantee
+    assert proc.process is None
+
+
+def test_stop_snapshots_descendants_before_sending_the_stop_signal(monkeypatch):
+    # If the snapshot were taken AFTER signaling, a descendant that already exited as a side
+    # effect of the signal would never be seen at all — silently defeating the safety net for
+    # exactly the processes it exists to catch.
+    order = []
+    descendant = FakePsutilProcess(pid=101, running=True)
+    proc, fake_popen, registry = _make_supervised(monkeypatch, descendants=[descendant])
+
+    real_children = registry[100].children
+    registry[100].children = lambda recursive=False: (order.append("snapshot") or real_children(recursive))
+    original_send_signal = fake_popen.send_signal
+    fake_popen.send_signal = lambda sig: (order.append("signal") or original_send_signal(sig))
+
+    proc.stop()
+
+    assert order == ["snapshot", "signal"]
+
+
+def test_stop_is_a_no_op_when_nothing_is_running():
+    proc = process_supervisor.SupervisedProcess("fake.py", ["fake.py"])
+    proc.process = None
+    proc.stop()  # must not raise
+
+
+def test_kill_if_alive_skips_a_pid_that_is_already_gone(monkeypatch):
+    def raise_no_such(pid):
+        raise psutil.NoSuchProcess(pid)
+    monkeypatch.setattr(process_supervisor.psutil, "Process", raise_no_such)
+
+    process_supervisor.SupervisedProcess._kill_if_alive(999)  # must not raise
+
+
+def test_start_uses_new_process_group_on_windows(monkeypatch):
+    calls = []
+
+    class FakePopenCapture:
+        def __init__(self, cmd, creationflags=None):
+            calls.append(creationflags)
+            self.pid = 1
+
+    monkeypatch.setattr(process_supervisor.subprocess, "Popen", FakePopenCapture)
+    monkeypatch.setattr(process_supervisor.sys, "platform", "win32")
+
+    proc = process_supervisor.SupervisedProcess("fake.py", ["fake.py"])
+    proc.start()
+
+    assert calls == [subprocess.CREATE_NEW_PROCESS_GROUP]
+
+
+# --- SIGTERM handling (2026-08-19: required for the systemd deployment — `systemctl stop`
+# sends SIGTERM, not SIGINT, and Python's default SIGTERM handling has zero cleanup) --------
+
+def test_sigterm_handler_raises_keyboard_interrupt():
+    with pytest.raises(KeyboardInterrupt):
+        process_supervisor._raise_keyboard_interrupt(process_supervisor.signal.SIGTERM, None)
+
+
+def test_run_supervisor_registers_a_sigterm_handler(monkeypatch):
+    monkeypatch.setattr(process_supervisor.SupervisedProcess, "start", lambda self: None)
+    monkeypatch.setattr(process_supervisor.SupervisedProcess, "is_running", lambda self: True)
+    monkeypatch.setattr(process_supervisor.SupervisedProcess, "stop", lambda self: None)
+    monkeypatch.setattr(process_supervisor.streamers_module, "purge_stale_agent_states", lambda: None)
+
+    registered = []
+    monkeypatch.setattr(
+        process_supervisor.signal, "signal",
+        lambda signum, handler: registered.append((signum, handler)),
+    )
+
+    process_supervisor.run_supervisor(poll_interval=0, max_iterations=1, include_metrics_tracker=False)
+
+    assert registered == [(process_supervisor.signal.SIGTERM, process_supervisor._raise_keyboard_interrupt)]
 
 
 def test_streamlit_actually_imports_its_own_file_watcher_dependency():
