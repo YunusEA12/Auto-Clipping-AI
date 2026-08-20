@@ -126,6 +126,28 @@ def remove_streamer(name: str) -> bool:
     return streamers_module.remove_streamer(name)
 
 
+def agent_live_status_by_slug(orchestrator_state: Optional[dict]) -> Dict[str, Dict[str, bool]]:
+    """slug -> {"live": bool, "recording": bool} for every configured streamer, from
+    orchestrator_state.json's real-time ground truth (the same source the "Konfigurierte
+    Streamer" section already trusts) — lets the sidebar's Agent Status cards cross-check a
+    state file's own staleness against whether the streamer is actually still live/recording
+    right now, instead of judging "online vs. offline" from file staleness alone.
+
+    Found live, 2026-08-20: right after process_supervisor.py restarted, several streamers'
+    agent_state_<slug>.json files were still showing a 21+ hour old leftover from before a
+    long gap (auto_pilot.py hadn't written its first update since restarting yet — a full
+    record+transcribe+analyze cycle can easily take longer than the dashboard's 5-minute
+    staleness threshold), so the sidebar wrongly showed "⚠️ Offline" for streamers the main
+    content area correctly showed as 🔴 LIVE and recording, right next to each other."""
+    result: Dict[str, Dict[str, bool]] = {}
+    orchestrator_streamers = (orchestrator_state or {}).get("streamers", {})
+    for entry in streamers_module.load_streamers():
+        slug = streamers_module._slugify(entry["name"])
+        info = orchestrator_streamers.get(entry["name"], {})
+        result[slug] = {"live": bool(info.get("live")), "recording": bool(info.get("recording"))}
+    return result
+
+
 # --- Critic memory (ai_guidelines.txt) -------------------------------------------------------
 
 def parse_guidelines_file(content: str) -> Dict[str, List[str]]:

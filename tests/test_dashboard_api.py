@@ -55,6 +55,51 @@ def test_purge_stale_agent_states_delegates_to_streamers_module(monkeypatch):
     assert result == ["x.json"]
 
 
+# --- agent_live_status_by_slug (2026-08-20: sidebar Agent Status wrongly showed "Offline"
+# for a streamer that had just restarted and was genuinely live/recording, purely because its
+# own agent_state file hadn't caught up yet -- this cross-references orchestrator_state.json's
+# real-time ground truth, the same source the main "Konfigurierte Streamer" section trusts) ---
+
+def test_agent_live_status_by_slug_reflects_orchestrator_state(tmp_path, monkeypatch):
+    path = tmp_path / "streamers.json"
+    monkeypatch.setattr(streamers_module, "STREAMERS_PATH", path)
+    dashboard_api.add_streamer("coachlim", "https://twitch.tv/coachlim", auto_upload=True)
+    dashboard_api.add_streamer("marli", "https://twitch.tv/marli", auto_upload=True)
+
+    orchestrator_state = {
+        "streamers": {
+            "coachlim": {"live": True, "recording": True},
+            "marli": {"live": False, "recording": False},
+        }
+    }
+
+    result = dashboard_api.agent_live_status_by_slug(orchestrator_state)
+
+    assert result["coachlim"] == {"live": True, "recording": True}
+    assert result["marli"] == {"live": False, "recording": False}
+
+
+def test_agent_live_status_by_slug_defaults_to_false_when_streamer_missing_from_state(tmp_path, monkeypatch):
+    path = tmp_path / "streamers.json"
+    monkeypatch.setattr(streamers_module, "STREAMERS_PATH", path)
+    dashboard_api.add_streamer("coachlim", "https://twitch.tv/coachlim", auto_upload=True)
+
+    # orchestrator.py itself isn't running / hasn't reported on this streamer yet.
+    result = dashboard_api.agent_live_status_by_slug({})
+
+    assert result["coachlim"] == {"live": False, "recording": False}
+
+
+def test_agent_live_status_by_slug_handles_none_orchestrator_state(tmp_path, monkeypatch):
+    path = tmp_path / "streamers.json"
+    monkeypatch.setattr(streamers_module, "STREAMERS_PATH", path)
+    dashboard_api.add_streamer("coachlim", "https://twitch.tv/coachlim", auto_upload=True)
+
+    result = dashboard_api.agent_live_status_by_slug(None)
+
+    assert result["coachlim"] == {"live": False, "recording": False}
+
+
 def test_streamer_crud_roundtrip_through_the_facade(tmp_path, monkeypatch):
     path = tmp_path / "streamers.json"
     monkeypatch.setattr(streamers_module, "STREAMERS_PATH", path)

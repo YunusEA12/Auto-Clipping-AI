@@ -158,20 +158,30 @@ agent_states = {
     if (state := read_json_file(path))
 }
 orchestrator_state = read_json_file(ORCHESTRATOR_STATE_PATH)
+live_status_by_slug = dashboard_api.agent_live_status_by_slug(orchestrator_state)
 
 with st.sidebar:
     st.header("🤖 Agent Status")
     if not agent_states:
         st.caption("Auto-Pilot läuft nicht (agent_state.json nicht gefunden).")
     else:
-        for state in agent_states.values():
+        for stem, state in agent_states.items():
+            slug = stem[len("agent_state_"):] if stem != "agent_state" and stem.startswith("agent_state_") else None
+            live_info = live_status_by_slug.get(slug, {})
             age = state_age_seconds(state)
-            offline = age is not None and age > STALE_THRESHOLD_SECONDS
+            file_stale = age is not None and age > STALE_THRESHOLD_SECONDS
             st.caption(f"Ziel: **{state.get('target_streamer', '–')}**")
-            if offline:
-                st.warning(f"⚠️ Offline (seit {int(age)}s)")
-            else:
+            if not file_stale:
                 st.success(state.get("current_action", "Aktiv"))
+            elif live_info.get("recording") or live_info.get("live"):
+                # orchestrator_state.json (updated every poll cycle, independent of this
+                # streamer's own state file) says this streamer is still live/recording right
+                # now — the file just hasn't caught up yet (a full record+transcribe+analyze
+                # cycle can easily run longer than STALE_THRESHOLD_SECONDS). Never show the
+                # misleading "Offline" badge for a streamer that's actually live.
+                st.info(f"🔴 Live — Status-Update seit {int(age)}s ausstehend")
+            else:
+                st.warning(f"⚠️ Offline (seit {int(age)}s)")
 
     st.header("🛰️ Fleet Status")
     orch_status = orchestrator_state.get("status")
