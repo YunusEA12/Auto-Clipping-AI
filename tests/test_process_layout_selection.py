@@ -89,6 +89,41 @@ def test_resolve_layout_retries_on_ambiguous_first_frame_when_clip_end_given(mon
     assert calls[1] == pytest.approx(10.0)  # 0 + 1/3 * 30
 
 
+# --- unreadable-frame retry timestamps (2026-08-20: found live -- a retry timestamp
+# (clip_start + fraction * duration) can land just past the chunk .ts file's actual readable
+# length, e.g. the recording ending a little short of the clip's own end_time. cv2 then fails
+# the frame read outright (vision._detect_faces raises RuntimeError) instead of returning 0
+# faces -- previously this propagated straight up and crashed the ENTIRE cycle, wasting every
+# other clip in it, instead of just falling back for this one clip like a genuine 0-face
+# reading already does) ------------------------------------------------------------------
+
+def test_resolve_layout_recovers_from_unreadable_frame_by_trying_next_timestamp(monkeypatch):
+    box = (0, 0, 200, 200)
+    calls = []
+
+    def fake_detect(video_path, ts):
+        calls.append(ts)
+        if len(calls) == 1:
+            raise RuntimeError(f"Could not read frame at {ts:.2f}s from {video_path}")
+        return 1, box, 1000, 1000
+
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", fake_detect)
+    resolved = process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), clip_start=0.0, clip_end=30.0)
+
+    assert resolved == process.LAYOUT_SPLIT_SCREEN
+    assert len(calls) == 2
+
+
+def test_resolve_layout_falls_back_to_blur_when_every_timestamp_is_unreadable(monkeypatch):
+    def always_unreadable(video_path, ts):
+        raise RuntimeError(f"Could not read frame at {ts:.2f}s from {video_path}")
+
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", always_unreadable)
+    resolved = process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), clip_start=0.0, clip_end=30.0)
+
+    assert resolved == process.LAYOUT_BLUR_BACKGROUND
+
+
 def test_resolve_layout_no_clip_end_does_not_retry(monkeypatch):
     calls = []
 

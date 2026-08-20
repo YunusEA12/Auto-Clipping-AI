@@ -661,7 +661,20 @@ def resolve_layout(layout: str, video_path: Path, clip_start: float, clip_end: f
 
     face_count, raw_box, frame_w, frame_h = 0, None, 0, 0
     for attempt, ts in enumerate(timestamps):
-        face_count, raw_box, frame_w, frame_h = vision.detect_faces_for_layout(str(video_path), ts)
+        try:
+            face_count, raw_box, frame_w, frame_h = vision.detect_faces_for_layout(str(video_path), ts)
+        except RuntimeError as e:
+            # Found live, 2026-08-20: a retry timestamp (clip_start + fraction * duration)
+            # can land just past the chunk .ts file's actual readable length — the recording
+            # can end up a little shorter than the clip's own end_time suggests (e.g. the
+            # stream cut out mid-chunk) — cv2 then fails the frame read outright instead of
+            # returning 0 faces. That's a single-timestamp problem, not a reason to crash the
+            # whole cycle (and every OTHER clip in it) the way an uncaught RuntimeError would.
+            # Treat it exactly like an ambiguous 0-face reading: try the next retry timestamp,
+            # or fall through to the blur_background fallback below if this was the last one.
+            logger.warning("Auto-layout at %.2fs: could not read frame at %.2fs (%s) — trying next timestamp", clip_start, ts, e)
+            face_count, raw_box, frame_w, frame_h = 0, None, 0, 0
+            continue
         if face_count == 1:
             if attempt > 0:
                 logger.info("Auto-layout at %.2fs: face_count=1 found on retry at %.2fs", clip_start, ts)
