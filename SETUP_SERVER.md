@@ -55,8 +55,12 @@ python3 -m venv venv
 venv/bin/pip install --upgrade pip
 venv/bin/pip install -r requirements.txt
 
-# Playwright braucht zusätzlich die System-Bibliotheken für den Chromium-Browser:
-venv/bin/playwright install --with-deps chromium
+# Playwright braucht zusätzlich die System-Bibliotheken für den Chromium-Browser.
+# PLAYWRIGHT_BROWSERS_PATH muss hier gesetzt sein, weil deploy/*.service dieselbe Variable
+# setzt (ProtectSystem=strict erlaubt sonst nur Lesezugriff auf $HOME, kein Schreiben in den
+# Playwright-Standardpfad ~/.cache/ms-playwright) -- Install-Ort und Laufzeit-Ort müssen
+# übereinstimmen:
+PLAYWRIGHT_BROWSERS_PATH=/opt/auto-clipping-ai/.playwright-browsers venv/bin/playwright install --with-deps chromium
 ```
 
 ## 3. `.env` (API-Keys)
@@ -173,16 +177,62 @@ Ohne diesen Schritt funktioniert der Button nicht (der `sudo systemctl restart`-
 scheitert an der fehlenden Berechtigung) — die Kernfunktionalität (Aufnahme/Analyse/Upload)
 ist davon nicht betroffen, nur der Button selbst.
 
+## 8c. journald-Wachstum begrenzen
+
+Beide Services laufen 24/7 und schreiben pro Zyklus mehrere Log-Zeilen — ohne Obergrenze kann
+`/var/log/journal` auf einem kleinen VPS irgendwann mit `output/` um denselben Plattenplatz
+konkurrieren. Ein globales journald-Limit ist schnell gesetzt:
+
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo cp deploy/journald-auto-clipping.conf /etc/systemd/journald.conf.d/
+sudo systemctl restart systemd-journald
+```
+
+Das deckelt den persistenten Journal-Speicher auf 500 MB (siehe Kommentar in der Datei für
+Details). Optional, aber empfohlen — ohne das läuft weiterhin alles, nur eben ohne
+Obergrenze.
+
 ## 9. Prüfen, ob alles läuft
 
 ```bash
 sudo systemctl status auto-clipping-supervisor
 sudo systemctl status auto-clipping-dashboard
 journalctl -u auto-clipping-supervisor -f   # Live-Logs, Strg+C zum Beenden
+
+# Kurz gegenprüfen, dass der Fleet nicht (z. B. durch eine mitgeschleppte fleet_control.json)
+# still pausiert hochgefahren ist:
+journalctl -u auto-clipping-supervisor | grep "Fleet startet pausiert" || echo "OK: kein Pause-Stand gefunden"
 ```
 
 Dashboard aufrufen: `http://<tailscale-ip-des-servers>:8501` — von jedem Gerät aus, auf dem
 Tailscale mit demselben Konto läuft, egal wo es gerade physisch steht.
+
+## Nachträgliches Update für einen bereits laufenden Server (2026-08-21)
+
+Falls dein Server schon nach dieser Anleitung läuft, BEVOR `PLAYWRIGHT_BROWSERS_PATH` in
+`deploy/*.service` dazukam: die schon heruntergeladenen Chromium-Binaries liegen noch unter
+dem alten Default-Pfad (`~autoclip/.cache/ms-playwright`), aber die neue Unit-Datei sucht sie
+unter `/opt/auto-clipping-ai/.playwright-browsers`. Ohne diesen Schritt findet Playwright nach
+dem Update keinen Browser mehr → TikTok-Uploads schlagen fehl.
+
+```bash
+cd /opt/auto-clipping-ai
+git pull
+sudo -u autoclip PLAYWRIGHT_BROWSERS_PATH=/opt/auto-clipping-ai/.playwright-browsers \
+    venv/bin/playwright install --with-deps chromium
+sudo cp deploy/auto-clipping-supervisor.service deploy/auto-clipping-dashboard.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart auto-clipping-supervisor auto-clipping-dashboard
+```
+
+Danach optional den alten, jetzt ungenutzten Cache löschen:
+```bash
+sudo -u autoclip rm -rf /home/autoclip/.cache/ms-playwright
+```
+
+Gleichzeitig auch Schritt 8c (journald-Cap) und die `fleet_control.json`-Prüfung aus Schritt
+6b nachziehen, falls noch nicht geschehen — beides ist unabhängig von diesem Playwright-Fix.
 
 ## Was NICHT automatisch mitkommt
 
@@ -226,10 +276,23 @@ sudo chown -R autoclip:autoclip /opt/auto-clipping-ai
 sudo -u autoclip python3 -m venv /opt/auto-clipping-ai/venv
 sudo -u autoclip /opt/auto-clipping-ai/venv/bin/pip install --upgrade pip
 sudo -u autoclip /opt/auto-clipping-ai/venv/bin/pip install -r /opt/auto-clipping-ai/requirements.txt
-sudo -u autoclip /opt/auto-clipping-ai/venv/bin/playwright install --with-deps chromium
+sudo -u autoclip PLAYWRIGHT_BROWSERS_PATH=/opt/auto-clipping-ai/.playwright-browsers \
+    /opt/auto-clipping-ai/venv/bin/playwright install --with-deps chromium
 
 # 6. Stichprobe: sind .env/streamers.json/client_secret.json mitgekommen?
 ls -la /opt/auto-clipping-ai/.env /opt/auto-clipping-ai/streamers.json /opt/auto-clipping-ai/client_secret.json
+
+# 6b. WICHTIG: fleet_control.json auf einen von der alten Session mitgeschleppten Pause-Stand
+#     prüfen. process_supervisor.py startet unter systemd erfolgreich, startet dann aber still
+#     GAR KEINE Kindprozesse, wenn hier "paused" steht -- ohne Fehlermeldung, nur eine
+#     unauffällige Log-Zeile. Kommt das cp -a von oben aus einer Session, in der du den Fleet
+#     zwischendurch mal pausiert hattest, wandert dieser Zustand sonst unbemerkt mit:
+cat /opt/auto-clipping-ai/fleet_control.json
+# Erwartet: {"target_state": "running"} (oder Datei fehlt ganz -- dann ist running der
+# Default). Steht dort "paused", vor dem ersten Start korrigieren, sonst wirkt der Service
+# nach außen "healthy" (aktiv, kein Crash-Loop) obwohl er de facto nichts tut. Zur Kontrolle
+# nach dem Start in Schritt 9 zusätzlich prüfen:
+#   journalctl -u auto-clipping-supervisor | grep "Fleet startet pausiert"
 
 # Ab hier normal weiter mit Schritt 6 (Tailscale) / 7 (ufw) / 8 (systemd) oben -- die
 # deploy/*.service-Dateien zeigen bereits auf genau diesen Pfad und User.

@@ -14,6 +14,10 @@ WorkingDirectory=/opt/auto-clipping-ai
 # without adding real authentication in front of this port first - the dashboard has none
 # of its own (see H-07/H-11 in the audit for the equivalent tradeoff already accepted
 # elsewhere in this project).
+# Same PLAYWRIGHT_BROWSERS_PATH as the supervisor unit (see there for why) - the dashboard
+# process doesn't launch a browser today, but it imports modules that do (dashboard_api.py ->
+# tiktok_uploader.py), so this keeps both units consistent if that ever changes.
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/auto-clipping-ai/.playwright-browsers
 ExecStart=/opt/auto-clipping-ai/venv/bin/streamlit run app.py --server.address 0.0.0.0 --server.port 8501 --server.headless true --browser.gatherUsageStats false
 Restart=on-failure
 RestartSec=15

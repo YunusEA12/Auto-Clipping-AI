@@ -8,6 +8,11 @@ Type=simple
 User=autoclip
 Group=autoclip
 WorkingDirectory=/opt/auto-clipping-ai
+# Keeps Chromium's downloaded browser binaries inside the one directory this unit is allowed
+# to write to. Without this, Playwright defaults to ~/.cache/ms-playwright, which ProtectSystem
+# =strict does not grant write access to (see SETUP_SERVER.md's Playwright install step, which
+# sets this same variable at install time so the binaries land where this line expects them).
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/auto-clipping-ai/.playwright-browsers
 ExecStart=/opt/auto-clipping-ai/venv/bin/python process_supervisor.py
 # process_supervisor.py already restarts orchestrator.py/metrics_tracker.py internally with
 # its own crash-loop backoff (see process_supervisor.py's own docstring) - this Restart= is
