@@ -195,3 +195,45 @@ Tailscale mit demselben Konto läuft, egal wo es gerade physisch steht.
   einfacher Cron-Job mit `scp`/`rsync` zurück auf deinen PC (oder ein Snapshot beim
   VPS-Anbieter) ist empfehlenswert, ist hier aber bewusst nicht vorgegeben, da das von deinem
   gewünschten Backup-Rhythmus abhängt.
+
+## Anhang: Von einem Ad-hoc-Root-Setup auf den dokumentierten Weg migrieren
+
+Falls du (wie es leicht passiert, wenn man schnell "als root eingeloggt, Repo geklont,
+`screen`, fertig" macht) den Bot bereits woanders laufen hast — z. B. unter `/root/...` statt
+`/opt/auto-clipping-ai`, als `root` statt `autoclip` — hier der Weg zurück zum oben
+dokumentierten, gehärteten Setup, OHNE `.env`/`streamers.json`/Cookies neu einrichten zu
+müssen:
+
+```bash
+# 1. Dedizierten User anlegen (falls noch nicht geschehen — siehe Schritt 1 oben)
+sudo adduser --disabled-password --gecos "" autoclip
+
+# 2. Laufende Prozesse sauber stoppen, BEVOR irgendwas verschoben wird
+#    (Ctrl+C in der screen-Session, siehe process_supervisor.py's eigenes
+#    Graceful-Shutdown -- niemals einfach `screen -X quit` oder `kill -9`,
+#    sonst bleiben ffmpeg/streamlink-Kindprozesse verwaist zurück)
+
+# 3. Alles außer venv/ an den neuen Ort kopieren (der abschließende "/." bei der Quelle
+#    ist wichtig -- kopiert auch versteckte Dateien wie .env mit):
+sudo mkdir -p /opt/auto-clipping-ai
+sudo cp -a /root/Auto-Clipping-AI/. /opt/auto-clipping-ai/
+sudo rm -rf /opt/auto-clipping-ai/venv    # venv-Pfade sind fest verdrahtet -- an Ort und Stelle neu bauen, nicht kopieren
+
+# 4. Besitzer korrigieren
+sudo chown -R autoclip:autoclip /opt/auto-clipping-ai
+
+# 5. venv frisch als autoclip aufbauen
+sudo -u autoclip python3 -m venv /opt/auto-clipping-ai/venv
+sudo -u autoclip /opt/auto-clipping-ai/venv/bin/pip install --upgrade pip
+sudo -u autoclip /opt/auto-clipping-ai/venv/bin/pip install -r /opt/auto-clipping-ai/requirements.txt
+sudo -u autoclip /opt/auto-clipping-ai/venv/bin/playwright install --with-deps chromium
+
+# 6. Stichprobe: sind .env/streamers.json/client_secret.json mitgekommen?
+ls -la /opt/auto-clipping-ai/.env /opt/auto-clipping-ai/streamers.json /opt/auto-clipping-ai/client_secret.json
+
+# Ab hier normal weiter mit Schritt 6 (Tailscale) / 7 (ufw) / 8 (systemd) oben -- die
+# deploy/*.service-Dateien zeigen bereits auf genau diesen Pfad und User.
+
+# 7. Erst NACH Bestätigung, dass alles unter dem neuen Pfad läuft, die alte Kopie entfernen:
+# sudo rm -rf /root/Auto-Clipping-AI
+```
