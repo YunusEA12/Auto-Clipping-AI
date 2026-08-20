@@ -116,6 +116,60 @@ def test_viral_memory_section_includes_old_enough_clips(tmp_path, monkeypatch):
     assert "15000 views" in section
 
 
+# --- per-platform metrics (2026-08-21: metrics_tracker.py started recording YouTube
+# view/like counts alongside TikTok's; _entry_has_metrics/_format_platform_metrics must keep
+# reading pre-existing entries written in the old flat views/likes shape too, since some of
+# those can never be rewritten -- their uploaded_clips/ sidecar is already gone by the time a
+# clip is confirmed twice on TikTok, see metrics_tracker._delete_confirmed_upload()) ---------
+
+def test_format_platform_metrics_shows_both_platforms_when_both_present():
+    entry = {"tiktok_views": 100, "tiktok_likes": 10, "youtube_views": 50, "youtube_likes": 5}
+    result = train_loop._format_platform_metrics(entry)
+    assert "TikTok 100 views/10 likes" in result
+    assert "YouTube 50 views/5 likes" in result
+
+
+def test_format_platform_metrics_omits_platform_with_no_data():
+    entry = {"tiktok_views": 100, "tiktok_likes": 10}
+    result = train_loop._format_platform_metrics(entry)
+    assert "TikTok" in result
+    assert "YouTube" not in result
+
+
+def test_format_platform_metrics_falls_back_to_legacy_flat_keys():
+    # Pre-2026-08-21 shape, some of which can never be migrated -- see module comment above.
+    entry = {"views": 15000, "likes": 900}
+    result = train_loop._format_platform_metrics(entry)
+    assert result == "TikTok 15000 views/900 likes"
+
+
+def test_entry_has_metrics_true_for_new_schema_youtube_only():
+    assert train_loop._entry_has_metrics({"youtube_views": 10}) is True
+
+
+def test_entry_has_metrics_true_for_legacy_flat_schema():
+    assert train_loop._entry_has_metrics({"views": 10}) is True
+
+
+def test_entry_has_metrics_false_when_nothing_checked_yet():
+    assert train_loop._entry_has_metrics({"title": "Unchecked Clip"}) is False
+
+
+def test_viral_memory_section_includes_youtube_only_clip(tmp_path, monkeypatch):
+    memory_path = tmp_path / "viral_memory.json"
+    memory_path.write_text(json.dumps({
+        "yt_clip": {
+            "title": "YouTube Only Clip", "viral_score": 7, "energy_rating": 6,
+            "youtube_views": 4200, "youtube_likes": 300, "uploaded_at": _iso(48),
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(train_loop, "VIRAL_MEMORY_PATH", memory_path)
+
+    section = train_loop.load_viral_memory_section()
+    assert "YouTube Only Clip" in section
+    assert "YouTube 4200 views/300 likes" in section
+
+
 # --- load_accepted_clips_section (2026-08-19: fallback signal for viral_pattern_rule
 # generation when no real TikTok performance data exists yet — "we have overnight data now"
 # — real metrics take real time (VIRAL_SIGNAL_MIN_AGE_HOURS) to mean anything, but a clip

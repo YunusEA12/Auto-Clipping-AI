@@ -1,19 +1,30 @@
 """Viral Feedback Loop: periodically visits your own TikTok Studio content list (via
 cookies.json, reusing tiktok_uploader.py's cookie auth) to read real view/like counts for
-clips you've uploaded, and stores them in viral_memory.json.
+clips you've uploaded, and stores them in viral_memory.json. Since 2026-08-21, also fetches
+real view/like counts for the same clips on YouTube (via the YouTube Data API, reusing
+upload.py's OAuth token) — added after an audit found metrics_tracker.py had zero YouTube
+awareness even though upload_manager.py had already made YouTube a real, live upload target:
+every YouTube-published clip's performance was invisible to the learning loop below.
 
 train_loop.py's critic reads viral_memory.json before generating new rules (see
-load_viral_memory_section() in train_loop.py) — what actually performs on TikTok feeds back
-into future clip selection via analyze.py's injected guidelines, closing the loop:
-    auto_pilot.py uploads a clip + writes a metadata sidecar (title, description, hashtags,
-    caption, viral_score, energy_rating, reward_score) next to it in uploaded_clips/
+load_viral_memory_section() in train_loop.py) — what actually performs feeds back into future
+clip selection via analyze.py's injected guidelines, closing the loop:
+    auto_pilot.py uploads a clip to TikTok and (if that succeeds) YouTube, writing a metadata
+    sidecar (title, description, hashtags, caption, viral_score, energy_rating, reward_score,
+    youtube_uploaded, youtube_url) next to it in uploaded_clips/
       -> metrics_tracker.py matches that sidecar's caption against the live TikTok content
-         list and records real views/likes into viral_memory.json
-      -> once a clip has been matched on two SEPARATE poll cycles (not just one — see
-         _delete_confirmed_upload()), its local .mp4/.json in uploaded_clips/ is permanently
-         deleted to save disk space; its view/like history stays in viral_memory.json
+         list (fuzzy, since TikTok's UI only exposes truncated captions) AND its youtube_url's
+         video ID against the YouTube Data API (exact, since it's a real ID lookup), recording
+         real per-platform views/likes into viral_memory.json
+      -> once a clip has been matched on TikTok on two SEPARATE poll cycles (not just one —
+         see _delete_confirmed_upload()), its local .mp4/.json in uploaded_clips/ is
+         permanently deleted to save disk space; its view/like history stays in
+         viral_memory.json. This confirmation gate is TikTok-specific (see
+         _delete_confirmed_upload()'s own docstring for why) — a clip is only ever in
+         uploaded_clips/ at all because it already succeeded on TikTok (see auto_pilot.py's
+         run_deployment_phase()), so there's no such thing as a YouTube-only entry to gate here
       -> train_loop.py's next critic pass reads viral_memory.json and generates
-         POSITIVE/PENALTY "viral pattern" rules from what actually won or flopped
+         POSITIVE/PENALTY "viral pattern" rules from what actually won or flopped, per platform
       -> analyze.py's next clip selection is shaped by those rules
 
 Run this as its own long-lived process, independent of auto_pilot.py/orchestrator.py:
@@ -47,6 +58,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 import atomic_io
 import tiktok_uploader
+import upload as youtube_uploader
 
 import logging_setup
 
@@ -343,6 +355,53 @@ def _match_uploaded_to_content_rows(uploaded: List[dict], content_rows: List[dic
     return matches
 
 
+def _extract_youtube_video_id(url: Optional[str]) -> Optional[str]:
+    """The exact inverse of upload_manager.YouTubeOutcome.url's construction
+    (f"https://youtu.be/{video_id}") — not a general URL parser, since youtube_url in a
+    sidecar is only ever written that one way (see auto_pilot.run_deployment_phase())."""
+    if not url:
+        return None
+    video_id = url.rsplit("/", 1)[-1].strip()
+    return video_id or None
+
+
+def _fetch_youtube_metrics(uploaded: List[dict]) -> Dict[str, dict]:
+    """{clip_id: {"views": int | None, "likes": int | None}} for every uploaded clip that also
+    went to YouTube. Unlike TikTok's fuzzy caption matching, this is an exact ID lookup — the
+    YouTube Data API returns the exact video for the exact ID upload.upload_clip() already
+    handed back at upload time. Returns {} (never raises) if there's nothing to check or no
+    usable YouTube token this cycle — same graceful-skip contract as fetch_content_list()."""
+    id_to_clip_id: Dict[str, str] = {}
+    for entry in uploaded:
+        if not entry.get("youtube_uploaded"):
+            continue
+        video_id = _extract_youtube_video_id(entry.get("youtube_url"))
+        if video_id:
+            id_to_clip_id[video_id] = entry["_clip_id"]
+
+    if not id_to_clip_id:
+        return {}
+
+    youtube = youtube_uploader.get_stats_service()
+    if youtube is None:
+        logger.info("No usable YouTube token — skipping YouTube metrics this cycle")
+        return {}
+
+    try:
+        stats_by_video_id = youtube_uploader.fetch_video_stats(youtube, list(id_to_clip_id.keys()))
+    except Exception as e:
+        # fetch_video_stats() already degrades per-batch on HttpError; this is the outer net
+        # for anything else (a transport error, an unexpected response shape) so a YouTube-
+        # side problem never takes down the TikTok side of the same pass.
+        logger.error("Could not fetch YouTube stats: %s", e)
+        return {}
+
+    return {
+        id_to_clip_id[video_id]: stats
+        for video_id, stats in stats_by_video_id.items()
+    }
+
+
 def load_viral_memory(path: Path = None) -> Dict[str, dict]:
     # path=None, resolved dynamically below rather than bound as a default-argument value —
     # see streamers.py's load_streamers() for why (a bound default silently ignores a later
@@ -445,17 +504,22 @@ def _delete_confirmed_upload(clip_id: str) -> None:
 
 
 def update_viral_memory(headless: bool = True) -> int:
-    """One full pass: match every locally-uploaded clip against the live TikTok content
-    list and update its view/like counts in viral_memory.json. Returns how many entries
-    were matched and updated this pass.
+    """One full pass: match every locally-uploaded clip against the live TikTok content list
+    AND (if it was also published there) the YouTube Data API, updating its per-platform
+    view/like counts in viral_memory.json. Returns how many entries were matched (on either
+    platform) and updated this pass.
 
-    A clip matched for the second time across separate passes (i.e. already present in
-    viral_memory.json before this pass) also has its local .mp4/.json sidecar permanently
-    deleted — see _delete_confirmed_upload() for why two matches, not one."""
+    The two platforms are fetched independently — a TikTok scrape failure must not skip the
+    YouTube stats fetch, and vice versa — but only TikTok's confirmation-gated local deletion
+    applies (see _delete_confirmed_upload() for why): a clip matched for the second time on
+    TikTok across separate passes (i.e. already present in viral_memory.json before this pass)
+    has its local .mp4/.json sidecar permanently deleted, regardless of its YouTube result."""
     uploaded = load_uploaded_metadata()
     if not uploaded:
         logger.info("No uploaded clips with metadata found in %s", UPLOADED_CLIPS_DIR)
         return 0
+
+    youtube_metrics = _fetch_youtube_metrics(uploaded)
 
     content_rows = fetch_content_list(headless=headless)
     if not content_rows:
@@ -474,32 +538,39 @@ def update_viral_memory(headless: bool = True) -> int:
             )
         else:
             logger.warning(
-                "Could not fetch any TikTok content rows this cycle (failure #%d) — skipping update", streak,
+                "Could not fetch any TikTok content rows this cycle (failure #%d) — skipping "
+                "TikTok update (YouTube metrics, if any, are still applied below)", streak,
             )
-        return 0
-    _record_scrape_result(success=True)
+        row_by_clip_id: Dict[str, dict] = {}
+    else:
+        _record_scrape_result(success=True)
+        row_by_clip_id = _match_uploaded_to_content_rows(uploaded, content_rows)
 
     memory = load_viral_memory()
     previously_confirmed = set(memory.keys())  # captured BEFORE this pass's own updates
     matched = 0
     newly_reconfirmed: List[str] = []
 
-    row_by_clip_id = _match_uploaded_to_content_rows(uploaded, content_rows)
     for entry in uploaded:
         clip_id = entry["_clip_id"]
-
-        match = row_by_clip_id.get(clip_id)
-        if match is None:
+        tiktok_match = row_by_clip_id.get(clip_id)
+        youtube_match = youtube_metrics.get(clip_id)
+        if tiktok_match is None and youtube_match is None:
             continue
 
-        memory[clip_id] = {
-            **{k: v for k, v in entry.items() if k != "_clip_id"},
-            "views": match["views"],
-            "likes": match["likes"],
-            "checked_at": datetime.now(timezone.utc).isoformat(),
-        }
+        existing = memory.get(clip_id, {})
+        updated = {**{k: v for k, v in entry.items() if k != "_clip_id"}}
+        # A miss on one platform this pass must not erase that platform's data from a
+        # previous pass — only actually-fetched platforms overwrite their own fields.
+        updated["tiktok_views"] = tiktok_match["views"] if tiktok_match else existing.get("tiktok_views")
+        updated["tiktok_likes"] = tiktok_match["likes"] if tiktok_match else existing.get("tiktok_likes")
+        updated["youtube_views"] = youtube_match["views"] if youtube_match else existing.get("youtube_views")
+        updated["youtube_likes"] = youtube_match["likes"] if youtube_match else existing.get("youtube_likes")
+        updated["checked_at"] = datetime.now(timezone.utc).isoformat()
+        memory[clip_id] = updated
+
         matched += 1
-        if clip_id in previously_confirmed:
+        if tiktok_match is not None and clip_id in previously_confirmed:
             newly_reconfirmed.append(clip_id)
 
     pruned_memory = prune_viral_memory(memory)
@@ -509,7 +580,10 @@ def update_viral_memory(headless: bool = True) -> int:
     for clip_id in newly_reconfirmed:
         _delete_confirmed_upload(clip_id)
 
-    logger.info("Matched %d/%d uploaded clip(s) against TikTok's content list", matched, len(uploaded))
+    logger.info(
+        "Matched %d/%d uploaded clip(s) (TikTok rows: %d, YouTube stats: %d)",
+        matched, len(uploaded), len(row_by_clip_id), len(youtube_metrics),
+    )
     return matched
 
 
@@ -532,7 +606,7 @@ def run_tracker(poll_interval: int = DEFAULT_POLL_INTERVAL_SECONDS, max_iteratio
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Periodically fetch TikTok view/like counts for uploaded clips into viral_memory.json."
+        description="Periodically fetch TikTok and YouTube view/like counts for uploaded clips into viral_memory.json."
     )
     parser.add_argument(
         "--poll-interval", type=int, default=DEFAULT_POLL_INTERVAL_SECONDS,

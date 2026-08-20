@@ -5,6 +5,7 @@ CLI (upload_video()/upload_all()), which stays untouched (still defaults to priv
 from pathlib import Path
 
 import pytest
+from googleapiclient.errors import HttpError
 
 import upload
 
@@ -155,3 +156,210 @@ def test_upload_clip_always_includes_shorts_in_tags_without_duplicating(fake_you
 
 def test_upload_video_still_defaults_to_private():
     assert upload.PRIVACY_STATUS == "private"
+
+
+# --- get_stats_service() (2026-08-21: read-only YouTube metrics fetch for
+# metrics_tracker.py, deliberately separate from get_authenticated_service() above so it can
+# never fall into the interactive OAuth flow that would hang forever on a headless VPS) -------
+
+# Captured at import time, before conftest.py's autouse _block_real_youtube_calls fixture
+# replaces upload.get_stats_service with a raiser for every other test in the suite -- these
+# tests genuinely need to exercise the real function body, so real_get_stats_service below
+# restores it (a locally-requested fixture's monkeypatch.setattr() applies after the autouse
+# fixture's, same pattern fake_youtube already relies on for get_authenticated_service).
+_real_get_stats_service = upload.get_stats_service
+
+
+@pytest.fixture
+def real_get_stats_service(monkeypatch):
+    monkeypatch.setattr(upload, "get_stats_service", _real_get_stats_service)
+
+
+class FakeCreds:
+    def __init__(self, valid, expired=False, refresh_token=None, raise_on_refresh=False):
+        self.valid = valid
+        self.expired = expired
+        self.refresh_token = refresh_token
+        self.refreshed = False
+        self._raise_on_refresh = raise_on_refresh
+
+    def refresh(self, request):
+        if self._raise_on_refresh:
+            raise Exception("network error")
+        self.refreshed = True
+        self.valid = True
+
+    def to_json(self):
+        return "{}"
+
+
+def test_get_stats_service_returns_none_when_no_token_file(tmp_path, monkeypatch, real_get_stats_service):
+    monkeypatch.setattr(upload, "TOKEN_PATH", tmp_path / "missing_token.json")
+    assert upload.get_stats_service() is None
+
+
+def test_get_stats_service_returns_none_on_unreadable_token(tmp_path, monkeypatch, real_get_stats_service):
+    token_path = tmp_path / "token.json"
+    token_path.write_text("not valid json", encoding="utf-8")
+    monkeypatch.setattr(upload, "TOKEN_PATH", token_path)
+    assert upload.get_stats_service() is None
+
+
+def test_get_stats_service_builds_client_for_already_valid_token(tmp_path, monkeypatch, real_get_stats_service):
+    token_path = tmp_path / "token.json"
+    token_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(upload, "TOKEN_PATH", token_path)
+    monkeypatch.setattr(
+        upload.Credentials, "from_authorized_user_file",
+        classmethod(lambda cls, path, scopes: FakeCreds(valid=True)),
+    )
+    sentinel = object()
+    monkeypatch.setattr(upload, "build", lambda *a, **k: sentinel)
+
+    assert upload.get_stats_service() is sentinel
+
+
+def test_get_stats_service_refreshes_expired_token_non_interactively(tmp_path, monkeypatch, real_get_stats_service):
+    token_path = tmp_path / "token.json"
+    token_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(upload, "TOKEN_PATH", token_path)
+    fake_creds = FakeCreds(valid=False, expired=True, refresh_token="rt")
+    monkeypatch.setattr(
+        upload.Credentials, "from_authorized_user_file",
+        classmethod(lambda cls, path, scopes: fake_creds),
+    )
+    monkeypatch.setattr(upload, "build", lambda *a, **k: object())
+
+    result = upload.get_stats_service()
+
+    assert result is not None
+    assert fake_creds.refreshed is True
+    assert token_path.read_text(encoding="utf-8") == "{}"  # re-saved after refresh
+
+
+def test_get_stats_service_returns_none_when_expired_without_refresh_token(tmp_path, monkeypatch, real_get_stats_service):
+    # Must NOT fall through to the interactive flow.run_local_server() flow -- that would hang
+    # forever on a headless VPS with no browser to complete it in.
+    token_path = tmp_path / "token.json"
+    token_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(upload, "TOKEN_PATH", token_path)
+    fake_creds = FakeCreds(valid=False, expired=True, refresh_token=None)
+    monkeypatch.setattr(
+        upload.Credentials, "from_authorized_user_file",
+        classmethod(lambda cls, path, scopes: fake_creds),
+    )
+
+    assert upload.get_stats_service() is None
+
+
+def test_get_stats_service_returns_none_when_refresh_raises(tmp_path, monkeypatch, real_get_stats_service):
+    token_path = tmp_path / "token.json"
+    token_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(upload, "TOKEN_PATH", token_path)
+    fake_creds = FakeCreds(valid=False, expired=True, refresh_token="rt", raise_on_refresh=True)
+    monkeypatch.setattr(
+        upload.Credentials, "from_authorized_user_file",
+        classmethod(lambda cls, path, scopes: fake_creds),
+    )
+
+    assert upload.get_stats_service() is None
+
+
+# --- fetch_video_stats() (2026-08-21) ---------------------------------------------------------
+
+def _fake_http_error(status=500):
+    class Resp:
+        reason = "Server Error"
+    Resp.status = status
+    return HttpError(Resp(), b"error content")
+
+
+class _FakeVideosListRequest:
+    def __init__(self, response=None, error=None):
+        self._response = response
+        self._error = error
+
+    def execute(self):
+        if self._error is not None:
+            raise self._error
+        return self._response
+
+
+class _FakeVideosResource:
+    """Returns one canned response/error per call, in order."""
+    def __init__(self, responses=None, errors=None):
+        self._queue = list(responses or [])
+        self._error_queue = list(errors or [])
+        self.calls = []
+
+    def list(self, part, id):
+        self.calls.append({"part": part, "id": id})
+        if self._error_queue:
+            return _FakeVideosListRequest(error=self._error_queue.pop(0))
+        return _FakeVideosListRequest(response=self._queue.pop(0))
+
+
+class _FakeYouTubeClient:
+    def __init__(self, responses=None, errors=None):
+        self.resource = _FakeVideosResource(responses, errors)
+
+    def videos(self):
+        return self.resource
+
+
+def test_fetch_video_stats_parses_view_and_like_counts():
+    youtube = _FakeYouTubeClient(responses=[
+        {"items": [{"id": "abc", "statistics": {"viewCount": "1234", "likeCount": "56"}}]}
+    ])
+
+    stats = upload.fetch_video_stats(youtube, ["abc"])
+
+    assert stats == {"abc": {"views": 1234, "likes": 56}}
+
+
+def test_fetch_video_stats_missing_like_count_is_none_not_zero():
+    # A creator can hide their like count -- absent means "unknown", not "zero likes".
+    youtube = _FakeYouTubeClient(responses=[{"items": [{"id": "abc", "statistics": {"viewCount": "10"}}]}])
+
+    stats = upload.fetch_video_stats(youtube, ["abc"])
+
+    assert stats["abc"]["likes"] is None
+
+
+def test_fetch_video_stats_drops_ids_youtube_did_not_return():
+    # A deleted video, or one the API otherwise can't return, just silently isn't in the result.
+    youtube = _FakeYouTubeClient(responses=[{"items": []}])
+
+    assert upload.fetch_video_stats(youtube, ["missing_id"]) == {}
+
+
+def test_fetch_video_stats_deduplicates_ids():
+    youtube = _FakeYouTubeClient(responses=[{"items": [{"id": "abc", "statistics": {"viewCount": "1"}}]}])
+
+    upload.fetch_video_stats(youtube, ["abc", "abc"])
+
+    assert youtube.resource.calls[0]["id"] == "abc"
+
+
+def test_fetch_video_stats_batches_over_the_api_limit():
+    ids = [f"id{i}" for i in range(upload.STATS_BATCH_SIZE + 5)]
+    youtube = _FakeYouTubeClient(responses=[{"items": []}, {"items": []}])
+
+    upload.fetch_video_stats(youtube, ids)
+
+    assert len(youtube.resource.calls) == 2
+    assert len(youtube.resource.calls[0]["id"].split(",")) == upload.STATS_BATCH_SIZE
+    assert len(youtube.resource.calls[1]["id"].split(",")) == 5
+
+
+def test_fetch_video_stats_continues_after_a_failed_batch():
+    ids = [f"id{i}" for i in range(upload.STATS_BATCH_SIZE)] + ["ok_id"]
+    youtube = _FakeYouTubeClient(
+        responses=[{"items": [{"id": "ok_id", "statistics": {"viewCount": "5"}}]}],
+        errors=[_fake_http_error()],
+    )
+
+    stats = upload.fetch_video_stats(youtube, ids)
+
+    assert stats == {"ok_id": {"views": 5, "likes": None}}
+    assert len(youtube.resource.calls) == 2

@@ -5,7 +5,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -60,6 +60,80 @@ def get_authenticated_service():
         logger.info("Saved YouTube OAuth token to %s", TOKEN_PATH)
 
     return build("youtube", "v3", credentials=creds)
+
+
+# YouTube's own limit on how many comma-separated ids videos.list() accepts in one call.
+STATS_BATCH_SIZE = 50
+
+
+def get_stats_service():
+    """Read-only YouTube Data API client for metrics_tracker.py's stats-fetch (2026-08-21) —
+    deliberately separate from get_authenticated_service() above: that function falls into
+    flow.run_local_server()'s interactive OAuth flow when there's no valid token, which would
+    hang forever on a headless VPS with no browser to complete it in. This one only ever does
+    a non-interactive refresh and returns None (never raises) when there's nothing usable to
+    refresh — same "no session material -> return None, let the caller skip this cycle"
+    contract as tiktok_uploader.load_cookies()."""
+    if not TOKEN_PATH.exists():
+        return None
+    try:
+        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+    except (ValueError, OSError) as e:
+        logger.warning("Could not read %s: %s", TOKEN_PATH, e)
+        return None
+
+    if not creds.valid:
+        if creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                logger.warning("Could not refresh YouTube OAuth token: %s", e)
+                return None
+            TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
+        else:
+            logger.warning(
+                "YouTube OAuth token in %s is invalid and has no refresh_token — re-run a "
+                "real upload once to re-authenticate interactively.", TOKEN_PATH,
+            )
+            return None
+
+    return build("youtube", "v3", credentials=creds)
+
+
+def _coerce_stat_int(value) -> Optional[int]:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_video_stats(youtube, video_ids: List[str]) -> Dict[str, dict]:
+    """{video_id: {"views": int | None, "likes": int | None}} for each id YouTube actually
+    returns a row for. A deleted video or one videos.list otherwise can't return simply drops
+    out of the response rather than erroring the whole batch. likeCount can be legitimately
+    absent (a creator can hide their like count) — that comes back as None, not 0, same
+    never-guess-on-ambiguity principle as metrics_tracker._coerce_int(). Never raises — a
+    broken batch just logs and is skipped, mirroring metrics_tracker.fetch_content_list()'s
+    "a broken fetch must degrade gracefully, not crash the loop" contract."""
+    stats: Dict[str, dict] = {}
+    unique_ids = list(dict.fromkeys(video_ids))
+    for i in range(0, len(unique_ids), STATS_BATCH_SIZE):
+        batch = unique_ids[i:i + STATS_BATCH_SIZE]
+        try:
+            response = youtube.videos().list(part="statistics", id=",".join(batch)).execute()
+        except HttpError as e:
+            logger.error("Could not fetch YouTube stats for a batch of %d video(s): %s", len(batch), e)
+            continue
+        for item in response.get("items", []):
+            video_id = item.get("id")
+            if not video_id:
+                continue
+            statistics = item.get("statistics", {})
+            stats[video_id] = {
+                "views": _coerce_stat_int(statistics.get("viewCount")),
+                "likes": _coerce_stat_int(statistics.get("likeCount")),
+            }
+    return stats
 
 
 def find_latest_clips_path() -> Optional[Path]:

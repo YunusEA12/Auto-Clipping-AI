@@ -625,7 +625,7 @@ with tab_brain:
 
         st.divider()
         st.markdown("### 🔥 Viral Success Patterns")
-        st.caption("Aus echten TikTok-Performance-Daten (viral_memory.json via metrics_tracker.py).")
+        st.caption("Aus echten TikTok- und YouTube-Performance-Daten (viral_memory.json via metrics_tracker.py).")
         if categories["viral_patterns"]:
             st.success("\n\n".join(f"🔥 {rule}" for rule in categories["viral_patterns"]))
         else:
@@ -638,7 +638,7 @@ with tab_brain:
 
 with tab_analytics:
     st.subheader("📈 Viral Analytics")
-    st.caption("Echte View-/Like-Zahlen für hochgeladene Clips, erfasst von metrics_tracker.py.")
+    st.caption("Echte View-/Like-Zahlen für hochgeladene Clips (TikTok + YouTube), erfasst von metrics_tracker.py.")
 
     viral_memory = read_json_file(VIRAL_MEMORY_PATH)
     if not viral_memory:
@@ -649,31 +649,47 @@ with tab_analytics:
     else:
         rows = []
         for clip_id, entry in viral_memory.items():
+            # tiktok_views/likes fall back to the legacy flat views/likes keys -- entries
+            # written before metrics_tracker.py split per-platform (2026-08-21) are stuck in
+            # that shape forever once their uploaded_clips/ sidecar is gone (see
+            # metrics_tracker._delete_confirmed_upload()), so this can't just be migrated away.
+            tiktok_views = entry.get("tiktok_views", entry.get("views"))
+            tiktok_likes = entry.get("tiktok_likes", entry.get("likes"))
+            youtube_views = entry.get("youtube_views")
+            youtube_likes = entry.get("youtube_likes")
+            has_any_metric = tiktok_views is not None or youtube_views is not None
+            total_views = (tiktok_views or 0) + (youtube_views or 0) if has_any_metric else None
+            total_likes = (tiktok_likes or 0) + (youtube_likes or 0) if has_any_metric else None
+
             rows.append({
                 "Titel": entry.get("title", clip_id),
-                "Views": entry.get("views"),
-                "Likes": entry.get("likes"),
+                "Views (gesamt)": total_views,
+                "Likes (gesamt)": total_likes,
+                "TikTok Views": tiktok_views,
+                "TikTok Likes": tiktok_likes,
+                "YouTube Views": youtube_views,
+                "YouTube Likes": youtube_likes,
                 "Viral Score (KI)": entry.get("viral_score"),
                 "Energie": entry.get("energy_rating"),
                 "Critic Score": entry.get("reward_score"),
                 "Zuletzt geprüft": entry.get("checked_at", "–"),
             })
 
-        measured = [r for r in rows if r["Views"] is not None]
+        measured = [r for r in rows if r["Views (gesamt)"] is not None]
         unmeasured_count = len(rows) - len(measured)
 
         if measured:
-            total_views = sum(r["Views"] or 0 for r in measured)
-            total_likes = sum(r["Likes"] or 0 for r in measured)
-            best = max(measured, key=lambda r: r["Views"] or 0)
+            total_views = sum(r["Views (gesamt)"] or 0 for r in measured)
+            total_likes = sum(r["Likes (gesamt)"] or 0 for r in measured)
+            best = max(measured, key=lambda r: r["Views (gesamt)"] or 0)
 
             col1, col2, col3 = st.columns(3)
-            col1.metric("Gesamt-Views", f"{total_views:,}".replace(",", "."))
-            col2.metric("Gesamt-Likes", f"{total_likes:,}".replace(",", "."))
-            col3.metric("Top-Clip", best["Titel"], f"{best['Views']:,} Views".replace(",", "."))
+            col1.metric("Gesamt-Views (TikTok + YouTube)", f"{total_views:,}".replace(",", "."))
+            col2.metric("Gesamt-Likes (TikTok + YouTube)", f"{total_likes:,}".replace(",", "."))
+            col3.metric("Top-Clip", best["Titel"], f"{best['Views (gesamt)']:,} Views".replace(",", "."))
 
             st.divider()
-            sorted_rows = sorted(measured, key=lambda r: r["Views"] or 0, reverse=True)
+            sorted_rows = sorted(measured, key=lambda r: r["Views (gesamt)"] or 0, reverse=True)
             st.dataframe(sorted_rows, width="stretch", hide_index=True)
         else:
             st.info("Clips sind erfasst, aber noch keine Metriken gemessen.")

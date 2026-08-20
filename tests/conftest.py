@@ -40,6 +40,14 @@ def _block_real_youtube_calls(monkeypatch):
         )
     monkeypatch.setattr(upload, "get_authenticated_service", _raise)
 
+    def _raise_stats(*args, **kwargs):
+        raise RealYouTubeCallBlocked(
+            "A test tried to call upload.get_stats_service() for real (added 2026-08-21 for "
+            "metrics_tracker.py's YouTube view/like fetch). Mock it explicitly if this test "
+            "genuinely needs to exercise that code path."
+        )
+    monkeypatch.setattr(upload, "get_stats_service", _raise_stats)
+
 
 @pytest.fixture(autouse=True)
 def _block_real_sleep(monkeypatch):

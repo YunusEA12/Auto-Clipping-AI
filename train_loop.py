@@ -244,12 +244,36 @@ def _old_enough_for_viral_signal(entry: dict, now: datetime, min_age_hours: int 
         return False
 
 
+def _entry_has_metrics(e: dict) -> bool:
+    """True once at least one platform has a real count. Falls back to the legacy flat
+    views/likes keys (see _format_platform_metrics()) for entries written before
+    metrics_tracker.py split per-platform (2026-08-21) — some of those are frozen in that
+    shape forever (their uploaded_clips/ sidecar was already deleted after two TikTok
+    confirmations, so they can never be re-matched and rewritten in the new shape)."""
+    return any(e.get(k) is not None for k in ("tiktok_views", "youtube_views", "views"))
+
+
+def _format_platform_metrics(e: dict) -> str:
+    """One clause per platform that actually has data. tiktok_views/likes fall back to the
+    legacy flat views/likes keys — see _entry_has_metrics() for why those can't just be
+    migrated away."""
+    parts = []
+    tiktok_views = e.get("tiktok_views", e.get("views"))
+    if tiktok_views is not None:
+        parts.append(f"TikTok {tiktok_views} views/{e.get('tiktok_likes', e.get('likes')) or 0} likes")
+    youtube_views = e.get("youtube_views")
+    if youtube_views is not None:
+        parts.append(f"YouTube {youtube_views} views/{e.get('youtube_likes') or 0} likes")
+    return ", ".join(parts)
+
+
 def load_viral_memory_section() -> str:
-    """Real TikTok view/like data for previously uploaded clips (written by
-    metrics_tracker.py). Only clips that have actually been checked (views is not None) AND
-    have had at least VIRAL_SIGNAL_MIN_AGE_HOURS since upload are included — a clip checked
-    minutes after going live shows 0 views because TikTok hasn't distributed it yet, not
-    because it flopped, and would just be noise (or actively misleading) here."""
+    """Real per-platform view/like data for previously uploaded clips (written by
+    metrics_tracker.py — TikTok via Studio scrape, YouTube via the Data API since 2026-08-21).
+    Only clips that have actually been checked on at least one platform AND have had at least
+    VIRAL_SIGNAL_MIN_AGE_HOURS since upload are included — a clip checked minutes after going
+    live shows near-zero views because the platform hasn't distributed it yet, not because it
+    flopped, and would just be noise (or actively misleading) here."""
     if not VIRAL_MEMORY_PATH.exists():
         return ""
 
@@ -266,19 +290,19 @@ def load_viral_memory_section() -> str:
     now = datetime.now(timezone.utc)
     scored = [
         e for e in memory.values()
-        if isinstance(e, dict) and e.get("views") is not None and _old_enough_for_viral_signal(e, now)
+        if isinstance(e, dict) and _entry_has_metrics(e) and _old_enough_for_viral_signal(e, now)
     ]
     if not scored:
         return ""
 
     lines = [
         f"- \"{e.get('title', '?')}\" (viral_score={e.get('viral_score', '?')}, "
-        f"energy={e.get('energy_rating', '?')}): {e.get('views', 0)} views, {e.get('likes', 0)} likes"
+        f"energy={e.get('energy_rating', '?')}): {_format_platform_metrics(e)}"
         for e in scored
     ]
     logger.info("Loaded %d viral performance data point(s) from %s", len(lines), VIRAL_MEMORY_PATH)
     return (
-        "\n\nVIRAL PERFORMANCE DATA (real TikTok metrics for previously uploaded clips — "
+        "\n\nVIRAL PERFORMANCE DATA (real per-platform metrics for previously uploaded clips — "
         "cross-reference this with the clips you're scoring now; a similar topic/energy/"
         "visual style to a past winner should push reward_score up and may earn a "
         "viral_pattern_rule, a similar style to a past flop should push it down):\n"
