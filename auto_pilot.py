@@ -463,22 +463,33 @@ def run_cycle(
     stream URL when neither --streamer-name nor --profile was given, which is not something
     the LLM should ever be told to @-mention in a caption."""
     common_state = dict(current_cycle=cycle, target_streamer=target_streamer)
-
-    update_agent_state(
-        current_action="🔴 Aufnahme läuft" if live else "📥 Quelle wird geladen & Audio extrahiert",
-        **common_state,
-    )
-    wav_path = ingest.extract_audio(video_path)
-
-    update_agent_state(current_action="📝 Transkription läuft (Whisper)", **common_state)
-    transcription_path = transcribe.transcribe(wav_path)
-
-    update_agent_state(current_action="🤖 KI-Analyse & Clip-Auswahl läuft", **common_state)
-    clips_path = analyze.analyze(
-        transcription_path, audio_path=wav_path, profile=profile, streamer_name=streamer_handle,
-    )
+    # Assigned before the try so the finally block's cleanup call is always well-defined, even
+    # if analyze.analyze() itself is what raises (see the try's own docstring note below).
+    wav_path = None
+    transcription_path = None
+    clips_path = None
 
     try:
+        update_agent_state(
+            current_action="🔴 Aufnahme läuft" if live else "📥 Quelle wird geladen & Audio extrahiert",
+            **common_state,
+        )
+        wav_path = ingest.extract_audio(video_path)
+
+        update_agent_state(current_action="📝 Transkription läuft (Whisper)", **common_state)
+        transcription_path = transcribe.transcribe(wav_path)
+
+        update_agent_state(current_action="🤖 KI-Analyse & Clip-Auswahl läuft", **common_state)
+        # 2026-08-21: found live — this call used to sit BEFORE the try/finally below, so
+        # when it raised (e.g. a missing/invalid GEMINI_API_KEY -> a non-retryable 401 from
+        # llm_utils), the finally's _cleanup_cycle_temp_files() never ran at all: that cycle's
+        # raw recording chunk, extracted audio, and transcript leaked to disk forever. Every
+        # subsequent failed cycle (there's no limit on retries — see main()'s error-cooldown
+        # loop) leaked another set, unbounded, for as long as the failure persisted.
+        clips_path = analyze.analyze(
+            transcription_path, audio_path=wav_path, profile=profile, streamer_name=streamer_handle,
+        )
+
         with open(clips_path, "r", encoding="utf-8") as f:
             clips_data = json.load(f)
         if not clips_data.get("clips"):

@@ -6,6 +6,8 @@ ingest.extract_audio()/transcribe.transcribe() (see L-05 in the audit), so delet
 there would silently force a full re-extraction/re-transcription every cycle. Called from a
 finally block in run_cycle() so it runs on every exit path, not just the happy one."""
 
+import pytest
+
 import auto_pilot
 
 
@@ -47,3 +49,48 @@ def test_cleanup_tolerates_already_missing_files(tmp_path):
     missing = tmp_path / "gone.ts"
     # Must not raise even though the file was never created.
     auto_pilot._cleanup_cycle_temp_files(missing, missing, missing, missing, live=True)
+
+
+# --- run_cycle() still cleans up when analyze.analyze() itself raises (2026-08-21: found
+# live -- the try/finally used to start AFTER `clips_path = analyze.analyze(...)`, so when
+# that call raised (e.g. a missing/invalid GEMINI_API_KEY -> a non-retryable 401), the
+# finally's _cleanup_cycle_temp_files() never ran at all for that cycle. Confirmed by dozens
+# of orphaned live_chunk_*.ts/.wav/*_transcription.json files that accumulated, unbounded,
+# every 90s-cooldown retry for as long as the failure persisted.) -------------------------
+
+def test_run_cycle_cleans_up_temp_files_when_analysis_raises(tmp_path, monkeypatch):
+    video_path = _touch(tmp_path / "live_chunk_1.ts")
+    wav_path = _touch(tmp_path / "live_chunk_1.wav")
+    transcription_path = _touch(tmp_path / "live_chunk_1_transcription.json")
+
+    monkeypatch.setattr(auto_pilot, "update_agent_state", lambda **kw: {})
+    monkeypatch.setattr(auto_pilot.ingest, "extract_audio", lambda video_path: wav_path)
+    monkeypatch.setattr(auto_pilot.transcribe, "transcribe", lambda wav_path: transcription_path)
+
+    class FakeAnalysisError(Exception):
+        pass
+
+    def _raise(*args, **kwargs):
+        raise FakeAnalysisError("401 UNAUTHENTICATED — missing/invalid GEMINI_API_KEY")
+    monkeypatch.setattr(auto_pilot.analyze, "analyze", _raise)
+
+    cleanup_calls = []
+    monkeypatch.setattr(
+        auto_pilot, "_cleanup_cycle_temp_files", lambda *args: cleanup_calls.append(args),
+    )
+
+    with pytest.raises(FakeAnalysisError):
+        auto_pilot.run_cycle(
+            video_path=video_path, profile=None, layout="split_screen", video_format="9:16",
+            highlight_color="#FFFFFF", purge_threshold=-2, critic_model="gemini-x", cycle=1,
+            target_streamer="eliasn97", kept_total=0, purged_total=0, uploaded_total=0,
+            live=True, auto_upload=False, publish=False,
+        )
+
+    assert len(cleanup_calls) == 1
+    called_video, called_wav, called_transcription, called_clips, called_live = cleanup_calls[0]
+    assert called_video == video_path
+    assert called_wav == wav_path
+    assert called_transcription == transcription_path
+    assert called_clips is None  # analyze.analyze() raised before this was ever assigned
+    assert called_live is True

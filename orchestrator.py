@@ -42,6 +42,18 @@ import stream_watcher
 
 import logging_setup
 
+# 2026-08-21: found in a production incident audit — a stale orchestrator_state.json copied
+# over from an old ad-hoc deployment (SETUP_SERVER.md's own documented root->autoclip
+# migration does exactly this: `cp -a` the whole directory, orchestrator_state.json included)
+# can carry PIDs that are still alive but belong to a completely different, unrelated checkout
+# of this same script (e.g. a leftover /root/Auto-Clipping-AI running in a screen session,
+# never stopped when the new systemd-managed copy was set up). _is_still_our_auto_pilot()'s
+# cmdline check alone can't tell those apart — "auto_pilot.py" and the streamer name show up
+# in the cmdline of ANY checkout. THIS_DIR anchors the extra cwd check added there to actually
+# verify the candidate process is running out of the same directory this orchestrator lives
+# in, not just a same-named process anywhere on the box.
+THIS_DIR = Path(__file__).resolve().parent
+
 logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
 
@@ -206,10 +218,29 @@ def _is_still_our_auto_pilot(pid: int, streamer_name: str) -> bool:
     subprocess from an unrelated process that happens to have been assigned the same PID
     after ours already exited (PID reuse). Not a hardened defense against that race — just
     enough to make the actually-common case (subprocess survived, orchestrator restarted)
-    safe instead of ignored entirely."""
+    safe instead of ignored entirely.
+
+    Also requires the candidate's cwd to match THIS_DIR (2026-08-21, found live: a stale
+    orchestrator_state.json — e.g. copied over by SETUP_SERVER.md's own documented root ->
+    autoclip migration — named a PID that was still alive but belonged to an entirely
+    different, un-updated checkout of this same script, running as root in a leftover screen
+    session. It matched on cmdline alone for hours: real recording happened, but every clip
+    silently failed at the analysis step because that checkout's .env was missing
+    GEMINI_API_KEY, and nothing ever surfaced the mismatch. cwd is the cheapest reliable
+    signal that "the same script name, running for the same streamer" is actually THIS
+    codebase's own subprocess, not a look-alike elsewhere on the box."""
     try:
-        cmdline = " ".join(psutil.Process(pid).cmdline())
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        proc = psutil.Process(pid)
+        cmdline = " ".join(proc.cmdline())
+        cwd_matches = Path(proc.cwd()).resolve() == THIS_DIR
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+        return False
+    if not cwd_matches:
+        logger.warning(
+            "⚠️ Gefundener Prozess (PID %s) sieht wie unser auto_pilot.py für '%s' aus, läuft "
+            "aber aus einem anderen Verzeichnis als %s — wird NICHT übernommen (vermutlich ein "
+            "anderer, veralteter Checkout).", pid, streamer_name, THIS_DIR,
+        )
         return False
     return "auto_pilot.py" in cmdline and streamer_name in cmdline
 

@@ -13,16 +13,23 @@ import orchestrator
 # subprocess and started a brand-new, duplicate one for the same streamer) -----------------
 
 class FakePsutilProcess:
-    def __init__(self, pid, cmdline=None, running=True, status="running"):
+    def __init__(self, pid, cmdline=None, running=True, status="running", cwd=None):
         self.pid = pid
         self._cmdline = cmdline or []
         self._running = running
         self._status = status
+        # Defaults to orchestrator's own directory so every existing test (written before the
+        # cwd check existed) keeps matching by default -- only tests explicitly about the cwd
+        # check itself pass a mismatched one.
+        self._cwd = cwd if cwd is not None else str(orchestrator.THIS_DIR)
         self.terminated = False
         self.killed = False
 
     def cmdline(self):
         return self._cmdline
+
+    def cwd(self):
+        return self._cwd
 
     def is_running(self):
         return self._running
@@ -60,6 +67,30 @@ def test_is_still_our_auto_pilot_false_when_pid_gone(monkeypatch):
         raise psutil.NoSuchProcess(pid)
     monkeypatch.setattr(orchestrator.psutil, "Process", raise_no_such)
     assert orchestrator._is_still_our_auto_pilot(123, "eliasn97") is False
+
+
+# --- cwd check (2026-08-21: found live -- a stale orchestrator_state.json carried a PID that
+# was still alive and matched by cmdline, but belonged to an entirely different, un-updated
+# checkout of this script running as root in a leftover screen session. Real recording
+# happened there for hours; every clip silently failed at analysis because that checkout's
+# .env was missing GEMINI_API_KEY, and the mismatch was never surfaced.) ---------------------
+
+def test_is_still_our_auto_pilot_false_when_cwd_does_not_match(monkeypatch):
+    fake = FakePsutilProcess(
+        123, cmdline=["python", "auto_pilot.py", "--streamer-name", "eliasn97"],
+        cwd="/root/Auto-Clipping-AI",
+    )
+    monkeypatch.setattr(orchestrator.psutil, "Process", lambda pid: fake)
+    assert orchestrator._is_still_our_auto_pilot(123, "eliasn97") is False
+
+
+def test_is_still_our_auto_pilot_true_when_cwd_matches_explicitly(monkeypatch):
+    fake = FakePsutilProcess(
+        123, cmdline=["python", "auto_pilot.py", "--streamer-name", "eliasn97"],
+        cwd=str(orchestrator.THIS_DIR),
+    )
+    monkeypatch.setattr(orchestrator.psutil, "Process", lambda pid: fake)
+    assert orchestrator._is_still_our_auto_pilot(123, "eliasn97") is True
 
 
 # --- reconcile_with_running_subprocesses ------------------------------------------------
