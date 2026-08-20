@@ -5,7 +5,26 @@ version of this codebase wrongly assumed the opposite). Phase 5 (Deployment) mus
 require an explicit publish=True, not just auto_upload=True, or it silently wastes every
 upload attempt for nothing."""
 
+import pytest
+
 import auto_pilot
+import upload_manager
+
+
+@pytest.fixture(autouse=True)
+def _stub_youtube_leg(monkeypatch):
+    # run_deployment_phase() now also dispatches to YouTube via upload_manager.py
+    # (2026-08-20) -- these tests are about TikTok's own confirmed/unconfirmed handling
+    # specifically, so the YouTube leg (and its pacing delay) is stubbed out rather than
+    # exercised here. See tests/test_upload_manager.py for YouTube-path coverage, and
+    # tests/conftest.py for why an unmocked real call/sleep fails loudly instead of silently
+    # doing something real (found live, 2026-08-20: these two tests originally uploaded a
+    # real, public, garbage video to the account owner's actual YouTube channel).
+    monkeypatch.setattr(upload_manager.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        upload_manager, "_upload_to_youtube",
+        lambda *a, **k: upload_manager.YouTubeOutcome(attempted=False, success=False, detail="stubbed in test"),
+    )
 
 
 def test_deploy_requires_both_auto_upload_and_publish():

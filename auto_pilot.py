@@ -52,6 +52,7 @@ import stream_watcher
 import tiktok_uploader
 import train_loop
 import transcribe
+import upload_manager
 
 import logging_setup
 
@@ -190,15 +191,20 @@ def should_deploy(auto_upload: bool, publish: bool, survivors: list) -> bool:
 
 
 def run_deployment_phase(survivors: List[Tuple[dict, Path, Optional[int]]], publish: bool) -> Tuple[int, int]:
-    """Phase 5 (Deployment): upload every clip that survived Phase 3's purge to TikTok via
-    tiktok_uploader.py (cookie-authenticated Playwright bot), then move successfully
-    uploaded files out of output/ into uploaded_clips/ to keep it clean. A failed upload
-    just leaves that clip in output/ for a future opportunity — it never stops the loop.
+    """Phase 5 (Deployment): upload every clip that survived Phase 3's purge to every
+    configured platform via upload_manager.py (2026-08-20: TikTok + YouTube Shorts, was
+    TikTok-only through tiktok_uploader.py directly), then move successfully uploaded files
+    out of output/ into uploaded_clips/ to keep it clean. A failed upload just leaves that
+    clip in output/ for a future opportunity — it never stops the loop. A clip counts as
+    "uploaded" here based on TikTok's result alone (unchanged from before this file supported
+    multiple platforms) — see the metadata sidecar for the full per-platform breakdown,
+    including whether YouTube succeeded independently.
 
     Only ever called with publish=True (see run_cycle()) — TikTok has no draft-save action
     anymore (confirmed 2026-08-18: an abandoned upload is discarded, not saved), so there is
-    no safe reason to call this with publish=False; tiktok_uploader.try_upload_clip() would
-    just no-op every clip and report every single one as "failed" for no real reason.
+    no safe reason to call this with publish=False; upload_manager.upload_clip_everywhere()
+    would just no-op every clip on every platform and report every single one as "failed" for
+    no real reason.
 
     Alongside each moved .mp4, writes a metadata sidecar .json (title, description,
     hashtags, the exact caption text posted, viral_score/energy_rating/reward_score, when
@@ -213,7 +219,8 @@ def run_deployment_phase(survivors: List[Tuple[dict, Path, Optional[int]]], publ
         description = clip.get("description") or title
         caption = tiktok_uploader.build_caption_text(description, hashtags)
 
-        outcome = tiktok_uploader.try_upload_clip(output_path, description, hashtags, publish=publish)
+        result = upload_manager.upload_clip_everywhere(output_path, title, description, hashtags, publish=publish)
+        outcome = result.tiktok
         if not outcome.success:
             failed += 1
             logger.warning("Upload fehlgeschlagen für '%s' — bleibt in output/", title)
@@ -255,10 +262,18 @@ def run_deployment_phase(survivors: List[Tuple[dict, Path, Optional[int]]], publ
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
                 "publish": publish,
                 "confirmed": outcome.confirmed,
+                "youtube_uploaded": result.youtube.success,
+                "youtube_url": result.youtube.url,
             }
             atomic_io.atomic_write_json(destination.with_suffix(".json"), metadata)
 
-            logger.info("📦 '%s' hochgeladen und nach %s verschoben", title, destination)
+            youtube_note = result.youtube.url if result.youtube.success else (
+                "übersprungen" if not result.youtube.attempted else "fehlgeschlagen"
+            )
+            logger.info(
+                "📦 '%s' hochgeladen und nach %s verschoben (YouTube: %s)",
+                title, destination, youtube_note,
+            )
         except OSError as e:
             logger.warning("Upload für '%s' erfolgreich, aber Verschieben nach %s fehlgeschlagen: %s", title, UPLOADED_CLIPS_DIR, e)
 

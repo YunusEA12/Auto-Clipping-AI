@@ -25,6 +25,7 @@ import process as process_module
 import profiles
 import tiktok_uploader
 import transcribe
+import upload_manager
 
 import logging_setup
 
@@ -175,13 +176,15 @@ def render_hot_clips(
     """Bridge into the existing rendering pipeline (vision.py facecam detection + process.py
     FFmpeg rendering) for exactly the flagged hot clips, cut straight from this chunk's own
     recorded video. If `auto_upload` AND `publish`, each rendered clip is also pushed live to
-    TikTok — TikTok's web upload flow has no draft-save action anymore (confirmed
-    2026-08-18: an abandoned upload is discarded, not saved), so `auto_upload` without
-    `publish` renders clips but never touches the browser; tiktok_uploader.try_upload_clip()
-    would just no-op regardless, so this checks both explicitly rather than relying on that
-    to be silently correct. Either way, a Discord notification is sent at the end of the
-    chain for every rendered clip — whether the upload succeeded, failed, or wasn't
-    attempted at all."""
+    every configured platform via upload_manager.py (2026-08-20: TikTok + YouTube Shorts) —
+    TikTok's web upload flow has no draft-save action anymore (confirmed 2026-08-18: an
+    abandoned upload is discarded, not saved), so `auto_upload` without `publish` renders
+    clips but never touches either platform; upload_manager.upload_clip_everywhere() would
+    just no-op regardless, so this checks both explicitly rather than relying on that to be
+    silently correct. `upload_status` (used for the notification below) reflects TikTok's
+    result specifically, unchanged from before this supported multiple platforms. Either way,
+    a Discord notification is sent at the end of the chain for every rendered clip — whether
+    the upload succeeded, failed, or wasn't attempted at all."""
     # Must match the *_clips.json path process_module.process() derives internally from
     # video_chunk_path's own stem, since that's the file it will read the clips back from.
     clips_path = TEMP_DIR / f"{video_chunk_path.stem}_clips.json"
@@ -211,10 +214,10 @@ def render_hot_clips(
         hashtags = clip.get("hashtags") or tiktok_uploader.DEFAULT_HASHTAGS
 
         if auto_upload and publish:
-            outcome = tiktok_uploader.try_upload_clip(
-                output_path, clip.get("description", clip["title"]), hashtags, publish=True
+            result = upload_manager.upload_clip_everywhere(
+                output_path, clip["title"], clip.get("description", clip["title"]), hashtags, publish=True,
             )
-            upload_status = "uploaded" if outcome.success else "failed"
+            upload_status = "uploaded" if result.tiktok.success else "failed"
         elif auto_upload and not publish:
             logger.info(
                 "auto_upload ist an, aber publish nicht — '%s' bleibt lokal (kein "

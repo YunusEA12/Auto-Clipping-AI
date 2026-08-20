@@ -5,7 +5,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -27,6 +27,13 @@ TOKEN_PATH = Path("token.json")
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 DEFAULT_HASHTAGS = "#shorts #gaming"
 PRIVACY_STATUS = "private"
+
+# YouTube's own hard limit on video titles (2026-08-20) — used by upload_clip() below, the
+# per-clip entry point upload_manager.py calls. upload_video()/upload_all() above already had
+# their own title[:100] truncation; this constant just gives that number a name for the new
+# function's own (slightly smarter, "leave room for the tag") truncation.
+TITLE_MAX_LENGTH = 100
+SHORTS_TAG = "#shorts"
 
 
 def get_authenticated_service():
@@ -110,6 +117,75 @@ def upload_video(youtube, video_path: Path, clip: Optional[dict]) -> str:
 
     video_id = response["id"]
     logger.info("Uploaded %s -> https://youtu.be/%s", video_path.name, video_id)
+    return video_id
+
+
+def _append_shorts_tag(text: str, max_length: Optional[int] = None) -> str:
+    """Appends SHORTS_TAG unless it's already present (case-insensitive) — needed to reliably
+    hit the Shorts algorithm/surface. When `max_length` is given (the title, which has
+    YouTube's 100-char hard limit; the description has none), the base text is trimmed first
+    so the combined result never exceeds it, rather than truncating AFTER appending and
+    risking cutting the tag itself off."""
+    if SHORTS_TAG.lower() in text.lower():
+        return text if max_length is None else text[:max_length]
+    combined = f"{text.rstrip()} {SHORTS_TAG}"
+    if max_length is None or len(combined) <= max_length:
+        return combined
+    available = max_length - len(SHORTS_TAG) - 1  # -1 for the space before the tag
+    return f"{text[:available].rstrip()} {SHORTS_TAG}"
+
+
+def upload_clip(
+    video_path: Path,
+    title: str,
+    description: str = "",
+    tags: Optional[List[str]] = None,
+    privacy_status: str = "public",
+) -> str:
+    """Per-clip YouTube Shorts upload — the entry point upload_manager.py calls, one already-
+    rendered clip at a time, mirroring tiktok_uploader.try_upload_clip()'s per-clip interface.
+    Distinct from upload_video()/upload_all() above (that pair is the manual/exploratory batch
+    CLI, `python upload.py`, which still defaults to private — deliberately left unchanged):
+    this is the live, automated multi-platform pipeline path, so it defaults to public.
+
+    Raises on failure rather than swallowing it — upload_manager.py is the layer that decides
+    a YouTube failure shouldn't crash the whole cycle, the same layering tiktok_uploader.py
+    (which can itself raise) plus its caller already use.
+
+    Returns the uploaded video's ID."""
+    youtube = get_authenticated_service()
+
+    final_title = _append_shorts_tag(title.strip(), max_length=TITLE_MAX_LENGTH)
+    final_description = _append_shorts_tag((description or title).strip())
+    # Tags are plain keywords, not hashtags (YouTube API convention) — strip any leading '#'
+    # a caller passes through from TikTok-style hashtags (e.g. clip["hashtags"]).
+    final_tags = list(dict.fromkeys([t.lstrip("#") for t in (tags or []) if t.strip()] + ["shorts"]))
+
+    body = {
+        "snippet": {
+            "title": final_title,
+            "description": final_description,
+            "tags": final_tags,
+            "categoryId": "20",
+        },
+        "status": {
+            "privacyStatus": privacy_status,
+            "selfDeclaredMadeForKids": False,
+        },
+    }
+
+    media = MediaFileUpload(str(video_path), chunksize=-1, resumable=True, mimetype="video/mp4")
+    request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+
+    logger.info("Uploading %s to YouTube as '%s' (privacy=%s)", video_path.name, final_title, privacy_status)
+    response = None
+    while response is None:
+        status, response = request.next_chunk()
+        if status:
+            logger.info("YouTube upload progress for %s: %d%%", video_path.name, int(status.progress() * 100))
+
+    video_id = response["id"]
+    logger.info("Uploaded %s to YouTube -> https://youtu.be/%s", video_path.name, video_id)
     return video_id
 
 
