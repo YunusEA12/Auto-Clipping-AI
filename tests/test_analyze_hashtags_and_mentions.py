@@ -22,8 +22,8 @@ def _clip(**overrides):
 
 # --- clip duration bounds -------------------------------------------------------------
 
-def test_clip_duration_bounds_are_30_to_150_seconds():
-    assert analyze.MIN_CLIP_DURATION == 30
+def test_clip_duration_bounds_are_15_to_150_seconds():
+    assert analyze.MIN_CLIP_DURATION == 15
     assert analyze.MAX_CLIP_DURATION == 150
 
 

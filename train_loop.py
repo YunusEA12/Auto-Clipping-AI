@@ -114,11 +114,22 @@ Evaluate TWO independent dimensions:
    understandable context, and a resolved end? Does it start or end mid-sentence? Is there
    an actual hook, or is it boring/rambling without a payoff?
 
-2. VISUAL COMPOSITION (only when screenshots are provided): Is the split-screen layout
-   correct — facecam centered in the top {_FACE_ZONE_DESC}, gameplay clearly visible filling
-   the bottom {_GAME_ZONE_DESC}? Are there visual glitches, duplicated footage, unexpected
-   black bars, a misplaced or cropped-wrong facecam, or anything else visually broken? Judge
-   purely from what's visible in the screenshots, not from the transcript.
+2. VISUAL COMPOSITION (only when screenshots are provided): This pipeline renders in
+   whichever of three layouts actually fits the source footage — judge correctness against
+   WHICHEVER ONE you're actually looking at, not a single fixed template:
+   - Split-screen: a small facecam box, centered in the top {_FACE_ZONE_DESC}, over a
+     separate, clearly visible gameplay area filling the bottom {_GAME_ZONE_DESC}. Correct
+     when there genuinely IS a separate gameplay feed to show.
+   - Full-cam: the speaker's face/upper body fills most or all of the frame, with NO separate
+     gameplay area at all. This is CORRECT — not a mistake — whenever the whole source shot
+     already IS the person (a wide or close "Just Chatting"-style shot). Do not penalize the
+     absence of visible gameplay here; that would be judging it against the wrong template.
+   - Blurred background: the speaker's face over a blurred/stretched version of the same
+     source footage filling the rest of the frame (used when zero or multiple faces were
+     detected). Correct as long as the blur itself looks clean, not glitchy or pixelated.
+   Whichever layout it is, always flag genuine visual problems: glitches, duplicated footage,
+   unexpected black bars, a misplaced or badly cropped face, or a broken/pixelated blur.
+   Judge purely from what's visible in the screenshots, not from the transcript.
 
 Score each clip's overall reward_score from -10 to +10, weighing both dimensions:
 - Negative scores (-10 to -1): bad on either dimension — boring/flat with no payoff,

@@ -43,16 +43,25 @@ MODEL = "gemini-3.5-flash-lite"
 # — while SINNHAFTIGKEIT (the top-priority coherence rule below) and the "Quality gate, not a
 # quota" rule are untouched: both explicitly outrank these targets already, so raising the
 # targets doesn't loosen the bar a clip has to clear, only how much room there is once it does.
-MIN_CLIP_DURATION = 30
+#
+# 2026-08-20: MIN_CLIP_DURATION dropped 30 -> 15 after a live funnel audit (parsed
+# logs/process_supervisor_live.log — see the diagnostic notes in the commit for this change)
+# found the duration-bounds filter was the single biggest source of attrition in the whole
+# pipeline: 131 clips dropped for being outside 30-150s vs. only ~24 that survived to
+# rendering, a far bigger drop than either the LLM's own selection (finds ~3 candidates in
+# every non-empty cycle) or the vision critic (52% survival). A punchy reaction clip (a
+# laugh, a one-line zinger — exactly what TRIGGER_WORDS targets) very often naturally runs
+# 15-25s; forcing every clip to either pad out past 30s or get discarded outright was
+# throwing away real, usable content on a mechanical technicality, not a quality judgment.
+MIN_CLIP_DURATION = 15
 MAX_CLIP_DURATION = 150
 MAX_HASHTAGS = 5
-MIN_CLIPS_TARGET = 20
-MAX_CLIPS_TARGET = 28
 
-# Generous headroom for ~28 detailed clips (title + hook_explanation + scores) as structured
-# JSON, well within gemini-3.5-flash-lite's 65536-token output cap (confirmed live via
-# client.models.get()) — without this, an unbounded response risks getting cut off mid-JSON
-# exactly when MAX_CLIPS_TARGET is raised.
+# Generous headroom as structured JSON, well within gemini-3.5-flash-lite's 65536-token
+# output cap (confirmed live via client.models.get()) — a single ~3-minute chunk transcript
+# realistically yields at most a handful of clips (see MIN_CLIP_DURATION's own comment), so
+# this is nowhere near a binding constraint; kept generous rather than tuned tight in case a
+# future change (a longer chunk window, a batched multi-chunk call) needs the room.
 MAX_COMPLETION_TOKENS = 16384
 
 ENERGY_WINDOW_SECONDS = 2.0
@@ -97,17 +106,27 @@ Rules:
   PENALTIES rule, you MUST return an empty clips list. An empty list is a valid, correct, and
   preferred result over forcing a mediocre clip out of weak material — never pad the output to
   hit a target count.
-- Volume: When the material genuinely supports it, aim for {MIN_CLIPS_TARGET}-{MAX_CLIPS_TARGET}
-  clips by scanning the full transcript for distinct usable moments — but this target never
-  overrides the quality gate above. Fewer clips, or zero, is correct when that's what the
-  material actually supports.
+- Volume: This transcript is a short (~3-minute) rolling window from a much longer live
+  stream, not the whole video — do not anchor to a large fixed clip count, that's not a
+  realistic amount of distinct content for a window this size. Instead: scan the ENTIRE
+  window and extract EVERY moment that clears the quality bar above, whatever that number
+  turns out to be — usually zero, one, or two, occasionally more if the window happens to be
+  unusually packed with distinct hooks (e.g. a joke early on AND an unrelated reaction
+  later). Never stop scanning just because you already found one good clip, and never pad
+  the output to hit any particular count either way.
 - Length: Each clip MUST be at least {MIN_CLIP_DURATION} seconds and at most {MAX_CLIP_DURATION}
-  seconds long. When in doubt, make a clip LONGER rather than shorter — a slightly-too-long clip
-  is fine, but a clip that starts mid-sentence because it was cut too tight is not.
-- Setup context: Before the actual punchline/payoff/energy spike, include roughly 10-15 seconds
-  of setup so a viewer who has no other context understands what's going on. Avoid bare 10-second
-  clips that start mid-sentence right on top of the punchline with no lead-in — the viewer needs
-  time to orient before the payoff lands.
+  seconds long. A short, punchy, self-contained reaction (a laugh, a one-line zinger) is
+  completely fine at the shorter end of that range — don't pad it out with dead air just to
+  make it longer than it needs to be. When in doubt between two cut points, make a clip
+  LONGER rather than shorter — a slightly-too-long clip is fine, but a clip that starts
+  mid-sentence because it was cut too tight is not.
+- Setup context: For a longer or more complex moment, include roughly 10-15 seconds of setup
+  before the punchline/payoff/energy spike so a viewer with no other context understands
+  what's going on. For a short, self-explanatory punchy reaction that needs no context to
+  land, a shorter (or near-zero) setup is fine — the goal is a viewer never being confused
+  about what just happened, not a fixed lead-in length. Avoid bare clips that start
+  mid-sentence right on top of the punchline with no lead-in at all — the viewer needs at
+  least a moment to orient before the payoff lands.
 - Hooks: Every clip should begin on or shortly before its hook — something that gives the viewer
   a reason to keep watching. Trim away long dead air or filler before it, but don't trim so tight
   that the setup context above gets lost.

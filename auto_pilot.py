@@ -62,7 +62,17 @@ logger = logging.getLogger(__name__)
 BATCH_SIZE_MIN = 3
 BATCH_SIZE_MAX = 5
 
-DEFAULT_PURGE_THRESHOLD = 0
+# 2026-08-20: nudged 0 -> -2 after a live funnel audit found only ~52% of rendered clips
+# survived the critic pass (kept 12 / deleted 11 across the sampled window) — the second-
+# biggest source of attrition in the pipeline after the duration-bounds filter (see
+# analyze.MIN_CLIP_DURATION's own comment for that fix). Part of that 48% loss was very
+# likely the critic's visual-composition rubric penalizing correctly-classified full_cam/
+# blur_background clips for "missing gameplay" (also fixed the same day — see
+# train_loop.CRITIC_SYSTEM_PROMPT). This gives genuinely borderline content (a decent clip
+# with one minor quibble, scored -1 or -2) room to survive, while still purging anything the
+# critic actually considers bad (-3 and below) — a small, reversible nudge, not a removal of
+# the quality gate.
+DEFAULT_PURGE_THRESHOLD = -2
 DEFAULT_COOLDOWN_SECONDS = 30
 DEFAULT_ERROR_COOLDOWN_SECONDS = 90
 
