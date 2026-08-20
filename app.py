@@ -492,6 +492,46 @@ with tab_fleet:
                         except RuntimeError as e:
                             st.error(str(e))
 
+                # Edit (2026-08-21): add/remove already existed, but there was no way to
+                # change auto_upload/publish (or url/profile) on an EXISTING entry without
+                # deleting and recreating it — the actual thing needed for quick remote
+                # toggles from a phone. `name` itself stays fixed (it's the lookup key
+                # streamers.json/orchestrator_state.json/agent_state files all key off of);
+                # rename via remove + add instead.
+                with st.expander(f"✏️ Bearbeiten — {entry['name']}"):
+                    with st.form(f"edit_streamer_form_{entry['name']}"):
+                        edit_url = st.text_input("Stream-URL", value=entry["url"])
+                        edit_profile_options = [""] + dashboard_api.list_profiles()
+                        current_profile = entry.get("profile") or ""
+                        edit_profile_index = (
+                            edit_profile_options.index(current_profile)
+                            if current_profile in edit_profile_options else 0
+                        )
+                        edit_profile = st.selectbox("Profil", edit_profile_options, index=edit_profile_index)
+                        edit_auto_upload = st.checkbox(
+                            "🚀 Auto-Upload zu TikTok/YouTube aktivieren", value=entry.get("auto_upload", False),
+                        )
+                        edit_publish = st.checkbox(
+                            "🔴 Sofort live veröffentlichen (nicht nur Entwurf)",
+                            value=entry.get("publish", False),
+                            help=(
+                                "TikTok hat keinen Entwurfs-Modus mehr — ein Upload, der nicht "
+                                "veröffentlicht wird, wird von TikTok verworfen, nicht gespeichert."
+                            ),
+                        )
+                        if st.form_submit_button("💾 Speichern", type="primary"):
+                            if not edit_url:
+                                st.error("Stream-URL darf nicht leer sein.")
+                            else:
+                                try:
+                                    dashboard_api.update_streamer(
+                                        entry["name"], edit_url, edit_profile, edit_auto_upload, edit_publish,
+                                    )
+                                    st.success(f"'{entry['name']}' aktualisiert.")
+                                    st.rerun()
+                                except RuntimeError as e:
+                                    st.error(str(e))
+
     st.divider()
     st.markdown("#### ➕ Neuen Streamer hinzufügen")
     with st.form("add_streamer_form", clear_on_submit=True):

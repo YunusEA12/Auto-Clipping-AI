@@ -19,7 +19,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from filelock import FileLock, Timeout
 from pydantic import BaseModel
@@ -269,6 +269,51 @@ def add_streamer(
                 StreamerEntry(name=name, url=url, profile=profile, auto_upload=auto_upload, publish=publish).model_dump()
             )
             save_streamers(entries, path)
+    except Timeout:
+        raise RuntimeError(f"Could not acquire lock on {path} within {STREAMERS_LOCK_TIMEOUT_SECONDS}s")
+
+
+def update_streamer(
+    name: str,
+    url: Optional[str] = None,
+    profile: Optional[str] = None,
+    auto_upload: Optional[bool] = None,
+    publish: Optional[bool] = None,
+    path: Path = None,
+) -> bool:
+    """Updates an existing streamer's fields in place (preserving its position in the list,
+    unlike remove-then-add). Only fields explicitly passed (not None) are changed — lets a
+    caller flip just `publish` from the dashboard's edit form without needing to already
+    know and resend every other field. `name` itself is not editable this way (it's the
+    lookup key); rename via remove + add. Returns True if `name` was found and updated,
+    False otherwise.
+
+    2026-08-21: added because the dashboard's Fleet tab only ever supported add/remove — an
+    account owner managing streamers from their phone had no way to toggle auto_upload/
+    publish on an existing entry without deleting and recreating it (losing its position in
+    the list in the process)."""
+    if path is None:
+        path = STREAMERS_PATH
+    try:
+        with _streamers_lock(path):
+            entries = load_streamers(path)
+            for entry in entries:
+                if entry["name"] != name:
+                    continue
+                if url is not None:
+                    entry["url"] = url
+                if profile is not None:
+                    entry["profile"] = profile
+                if auto_upload is not None:
+                    entry["auto_upload"] = auto_upload
+                if publish is not None:
+                    entry["publish"] = publish
+                # Re-validate through the model so a bad partial update (e.g. a caller
+                # passing a non-bool) can't silently write a malformed entry to disk.
+                StreamerEntry(**entry)
+                save_streamers(entries, path)
+                return True
+            return False
     except Timeout:
         raise RuntimeError(f"Could not acquire lock on {path} within {STREAMERS_LOCK_TIMEOUT_SECONDS}s")
 

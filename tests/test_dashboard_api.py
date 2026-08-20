@@ -113,6 +113,10 @@ def test_streamer_crud_roundtrip_through_the_facade(tmp_path, monkeypatch):
     assert [e["name"] for e in entries] == ["elias"]
     assert entries[0]["auto_upload"] is True
 
+    assert dashboard_api.update_streamer("elias", publish=True) is True
+    assert dashboard_api.load_streamers()[0]["publish"] is True
+    assert dashboard_api.update_streamer("nobody", publish=True) is False
+
     assert dashboard_api.remove_streamer("elias") is True
     assert dashboard_api.load_streamers() == []
 

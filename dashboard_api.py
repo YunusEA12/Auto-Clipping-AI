@@ -186,6 +186,16 @@ def add_streamer(
     streamers_module.add_streamer(name, url, profile=profile, auto_upload=auto_upload, publish=publish)
 
 
+def update_streamer(
+    name: str,
+    url: Optional[str] = None,
+    profile: Optional[str] = None,
+    auto_upload: Optional[bool] = None,
+    publish: Optional[bool] = None,
+) -> bool:
+    return streamers_module.update_streamer(name, url, profile, auto_upload, publish)
+
+
 def remove_streamer(name: str) -> bool:
     return streamers_module.remove_streamer(name)
 

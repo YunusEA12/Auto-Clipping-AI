@@ -33,6 +33,65 @@ def test_remove_streamer(tmp_path):
     assert streamers.remove_streamer("elias", path=path) is False
 
 
+# --- update_streamer (2026-08-21: add/remove existed, but no way to change auto_upload/
+# publish/url/profile on an EXISTING entry without deleting and recreating it -- lost its
+# position in the list and required re-typing everything for a quick remote toggle) --------
+
+def test_update_streamer_changes_only_the_given_fields(tmp_path):
+    path = tmp_path / "streamers.json"
+    streamers.add_streamer("elias", "https://twitch.tv/elias", profile="p1", auto_upload=True, path=path)
+
+    assert streamers.update_streamer("elias", publish=True, path=path) is True
+
+    entry = streamers.load_streamers(path)[0]
+    assert entry["publish"] is True
+    assert entry["url"] == "https://twitch.tv/elias"  # untouched
+    assert entry["profile"] == "p1"                    # untouched
+    assert entry["auto_upload"] is True                 # untouched
+
+
+def test_update_streamer_can_change_multiple_fields_at_once(tmp_path):
+    path = tmp_path / "streamers.json"
+    streamers.add_streamer("elias", "https://twitch.tv/elias", path=path)
+
+    streamers.update_streamer(
+        "elias", url="https://twitch.tv/new_elias", profile="p2", auto_upload=True, publish=True, path=path,
+    )
+
+    entry = streamers.load_streamers(path)[0]
+    assert entry["url"] == "https://twitch.tv/new_elias"
+    assert entry["profile"] == "p2"
+    assert entry["auto_upload"] is True
+    assert entry["publish"] is True
+
+
+def test_update_streamer_returns_false_when_not_found(tmp_path):
+    path = tmp_path / "streamers.json"
+    streamers.add_streamer("elias", "https://twitch.tv/elias", path=path)
+    assert streamers.update_streamer("nobody", publish=True, path=path) is False
+
+
+def test_update_streamer_preserves_list_position(tmp_path):
+    path = tmp_path / "streamers.json"
+    streamers.add_streamer("a", "https://twitch.tv/a", path=path)
+    streamers.add_streamer("b", "https://twitch.tv/b", path=path)
+    streamers.add_streamer("c", "https://twitch.tv/c", path=path)
+
+    streamers.update_streamer("b", publish=True, path=path)
+
+    assert [e["name"] for e in streamers.load_streamers(path)] == ["a", "b", "c"]
+
+
+def test_update_streamer_false_can_turn_off_publish(tmp_path):
+    path = tmp_path / "streamers.json"
+    streamers.add_streamer("elias", "https://twitch.tv/elias", auto_upload=True, publish=True, path=path)
+
+    # False must actually apply, not be treated as "not passed" (that's what None is for).
+    streamers.update_streamer("elias", publish=False, path=path)
+
+    assert streamers.load_streamers(path)[0]["publish"] is False
+
+
 def test_load_missing_file_returns_empty_list(tmp_path):
     assert streamers.load_streamers(tmp_path / "nope.json") == []
 
