@@ -76,6 +76,18 @@ DEFAULT_PURGE_THRESHOLD = -2
 DEFAULT_COOLDOWN_SECONDS = 30
 DEFAULT_ERROR_COOLDOWN_SECONDS = 90
 
+# 2026-08-21: found in a production health-check audit — output/<streamer>/ for a streamer
+# configured auto_upload=True, publish=False never gets touched by anything. It's not
+# low-scoring (purge_low_scoring_clips() only removes clips BELOW the purge threshold, not
+# high-scoring survivors) and run_deployment_phase() is never called in this configuration
+# (see the "Deployment übersprungen" branch below) — so these clips accumulate forever with
+# zero eviction. On a VPS where ProtectSystem=strict limits writes to a single partition
+# (/opt/auto-clipping-ai), this eventually fills the disk and breaks rendering for every
+# OTHER streamer sharing it too, not just this one. 14 days is long enough for a human to
+# actually go review them (the whole point of this configuration), short enough not to let
+# months of unwatched clips pile up unattended.
+OUTPUT_RETENTION_DAYS = 14
+
 # Where successfully-uploaded clips are archived to, out of output/ — keeps the working
 # directory limited to clips still awaiting a decision (upload or the next purge pass).
 UPLOADED_CLIPS_DIR = Path("uploaded_clips")
@@ -143,6 +155,45 @@ def _trim_to_batch(clips_path: Path, batch_size: int) -> list:
     atomic_io.atomic_write_json(clips_path, {"clips": batch})
 
     return batch
+
+
+def purge_old_local_only_clips(output_dir: Path, retention_days: int = OUTPUT_RETENTION_DAYS) -> int:
+    """Deletes each .mp4 (+ its render-metadata .json sidecar) in `output_dir` whose file
+    mtime is older than `retention_days` — see OUTPUT_RETENTION_DAYS's own comment for why
+    this exists at all. Age is judged by the file's own mtime, not any "rendered_at" field
+    inside the sidecar, so this still works even if the sidecar is missing or corrupt.
+
+    Best-effort: a single file that can't be deleted (e.g. a permissions hiccup) is logged
+    and skipped rather than aborting the whole pass — this runs once per cycle for a
+    streamer that's otherwise working fine, so it must never be the thing that breaks it.
+    Returns the number of clips deleted."""
+    if not output_dir.exists():
+        return 0
+
+    cutoff = time.time() - retention_days * 86400
+    deleted = 0
+    for mp4_path in output_dir.glob("*.mp4"):
+        try:
+            if mp4_path.stat().st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        for path in (mp4_path, mp4_path.with_suffix(".json")):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                logger.warning("Could not delete old local-only clip file %s: %s", path, e)
+        deleted += 1
+
+    if deleted:
+        logger.info(
+            "🧹 %d alte lokale Clip(s) in %s gelöscht (älter als %d Tage, nie veröffentlicht "
+            "— auto_upload an, publish aus)",
+            deleted, output_dir, retention_days,
+        )
+    return deleted
 
 
 def purge_low_scoring_clips(
@@ -405,12 +456,18 @@ def run_cycle(
         # (confirmed 2026-08-18 — an abandoned upload is discarded, not saved), so there is no
         # safe partial deployment to perform without an explicit intent to actually go live.
         uploaded = 0
-        if auto_upload and not publish and survivors:
-            logger.info(
-                "⏭️ Deployment übersprungen: --auto-upload ist an, aber --publish nicht — TikTok "
-                "hat keinen Entwurfs-Modus mehr, es gibt also nichts Sicheres zu tun. %d Clip(s) "
-                "bleiben in output/ zur manuellen Durchsicht.", len(survivors),
-            )
+        if auto_upload and not publish:
+            # Runs every cycle for this configuration, not just ones with new survivors —
+            # clips from PAST cycles need to age out too, not only ones just rendered (see
+            # OUTPUT_RETENTION_DAYS's own comment for why this exists).
+            purge_old_local_only_clips(_output_dir_override or process_module.OUTPUT_DIR)
+            if survivors:
+                logger.info(
+                    "⏭️ Deployment übersprungen: --auto-upload ist an, aber --publish nicht — TikTok "
+                    "hat keinen Entwurfs-Modus mehr, es gibt also nichts Sicheres zu tun. %d Clip(s) "
+                    "bleiben in output/ zur manuellen Durchsicht (bis zu %d Tage).",
+                    len(survivors), OUTPUT_RETENTION_DAYS,
+                )
         elif should_deploy(auto_upload, publish, survivors):
             update_agent_state(current_action=f"📤 Upload läuft ({len(survivors)} Clip(s))", **common_state)
             uploaded, upload_failed = run_deployment_phase(survivors, publish)
