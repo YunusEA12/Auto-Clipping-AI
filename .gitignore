@@ -1,5 +1,6 @@
 venv/
 .env
+.playwright-browsers/
 temp/
 output/
 __pycache__/

@@ -62,6 +62,13 @@ logger = logging.getLogger(__name__)
 BATCH_SIZE_MIN = 3
 BATCH_SIZE_MAX = 5
 
+# Caps how many backlog clips (see find_backlog_clips) get swept into a single cycle's
+# deployment batch. Without this, a streamer that was down for a while (VPS reboot, a long
+# upload outage) would dump its entire backlog into one deployment pass the moment it comes
+# back — the same burst-of-uploads risk BATCH_SIZE_MAX already guards against for freshly
+# rendered clips, just for the backlog path instead.
+BACKLOG_BATCH_LIMIT = BATCH_SIZE_MAX
+
 # 2026-08-20: nudged 0 -> -2 after a live funnel audit found only ~52% of rendered clips
 # survived the critic pass (kept 12 / deleted 11 across the sampled window) — the second-
 # biggest source of attrition in the pipeline after the duration-bounds filter (see
@@ -196,6 +203,68 @@ def purge_old_local_only_clips(output_dir: Path, retention_days: int = OUTPUT_RE
     return deleted
 
 
+def find_backlog_clips(
+    output_dir: Path, exclude: set,
+) -> List[Tuple[dict, Path, Optional[int]]]:
+    """Phase 5 (Deployment) only ever sees clips THIS cycle just rendered (survivors is built
+    from this cycle's own `rendered`/`batch`) — a clip that survived a PAST cycle's Phase 3
+    purge but never made it into uploaded_clips/ (the process was killed or the VPS rebooted
+    mid-cycle, an upload attempt failed and outlived that cycle, ...) is otherwise invisible to
+    every later cycle forever: analyze.analyze() writes a fresh clips.json each cycle, and
+    purge_old_local_only_clips() only runs for auto_upload-without-publish configs (see its own
+    comment) — never for the auto_upload+publish configs this actually matters for. Left alone,
+    output/ grows one orphaned clip at a time for a streamer that's supposed to be fully live.
+
+    Only surfaces clips whose render sidecar carries a reward_score (see
+    _persist_reward_score) — proof the clip already passed Phase 3's critic gate, not merely
+    that an .mp4 happens to exist. A clip whose process died BEFORE scoring has no such proof
+    and is deliberately left alone here rather than skipping the quality gate to force it
+    through; it's still visible for manual review, and simply persists in output/ until either
+    a human clears it or a future cycle's own purge logic is extended to cover it.
+
+    `exclude` is this cycle's own freshly-rendered paths (already handled as ordinary
+    survivors), so nothing is ever double-counted or double-uploaded within one cycle."""
+    if not output_dir.exists():
+        return []
+
+    backlog: List[Tuple[dict, Path, Optional[int]]] = []
+    for mp4_path in sorted(output_dir.glob("*.mp4")):
+        if mp4_path in exclude:
+            continue
+        sidecar_path = mp4_path.with_suffix(".json")
+        try:
+            with open(sidecar_path, "r", encoding="utf-8") as f:
+                clip = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if "reward_score" not in clip:
+            continue
+        backlog.append((clip, mp4_path, clip.get("reward_score")))
+    return backlog
+
+
+def _persist_reward_score(output_path: Path, score: Optional[int]) -> None:
+    """Folds the critic's reward_score into the render-time metadata sidecar (written by
+    process._write_clip_metadata_sidecar before scoring ever happened, so it can't include
+    this on its own). Without this, a stray .mp4 sitting in output/ from an interrupted past
+    cycle is indistinguishable from one whose process died between rendering and scoring —
+    both are just "an .mp4 with a sidecar that has no reward_score". find_backlog_clips()
+    relies on this field's presence as proof a clip already passed Phase 3, not just that it
+    exists. Best-effort, same contract as the sidecar's own initial write: never fails the
+    cycle it's describing."""
+    if score is None:
+        return
+    sidecar_path = output_path.with_suffix(".json")
+    try:
+        with open(sidecar_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Could not persist reward_score into sidecar %s: %s", sidecar_path, e)
+        return
+    data["reward_score"] = score
+    atomic_io.atomic_write_json(sidecar_path, data)
+
+
 def purge_low_scoring_clips(
     batch: "train_loop.CriticBatch",
     rendered: Dict[str, Path],
@@ -237,6 +306,7 @@ def purge_low_scoring_clips(
             kept += 1
             if output_path and output_path.exists():
                 survivors.append((clip, output_path, score))
+                _persist_reward_score(output_path, score)
 
     atomic_io.atomic_write_json(clips_path, {"clips": surviving_clips})
 
@@ -456,11 +526,12 @@ def run_cycle(
         # (confirmed 2026-08-18 — an abandoned upload is discarded, not saved), so there is no
         # safe partial deployment to perform without an explicit intent to actually go live.
         uploaded = 0
+        output_dir = _output_dir_override or process_module.OUTPUT_DIR
         if auto_upload and not publish:
             # Runs every cycle for this configuration, not just ones with new survivors —
             # clips from PAST cycles need to age out too, not only ones just rendered (see
             # OUTPUT_RETENTION_DAYS's own comment for why this exists).
-            purge_old_local_only_clips(_output_dir_override or process_module.OUTPUT_DIR)
+            purge_old_local_only_clips(output_dir)
             if survivors:
                 logger.info(
                     "⏭️ Deployment übersprungen: --auto-upload ist an, aber --publish nicht — TikTok "
@@ -468,10 +539,24 @@ def run_cycle(
                     "bleiben in output/ zur manuellen Durchsicht (bis zu %d Tage).",
                     len(survivors), OUTPUT_RETENTION_DAYS,
                 )
-        elif should_deploy(auto_upload, publish, survivors):
-            update_agent_state(current_action=f"📤 Upload läuft ({len(survivors)} Clip(s))", **common_state)
-            uploaded, upload_failed = run_deployment_phase(survivors, publish)
-            logger.info("📤 Deployment: %d hochgeladen, %d fehlgeschlagen", uploaded, upload_failed)
+        elif auto_upload and publish:
+            # Backlog reconciliation: fold in any already-evaluated clip a PAST cycle left
+            # behind in output/ (crashed process, VPS restart, a prior upload attempt that
+            # failed and outlived its cycle) — see find_backlog_clips()'s own docstring for why
+            # this configuration otherwise leaks silently. Deliberately never runs for
+            # publish=False streamers above — those clips are intentionally local-only, not
+            # backlog (see purge_old_local_only_clips instead).
+            backlog = find_backlog_clips(output_dir, exclude=set(rendered.values()))[:BACKLOG_BATCH_LIMIT]
+            if backlog:
+                logger.info(
+                    "📦 %d Backlog-Clip(s) aus früheren Zyklen gefunden (bereits bewertet, nie "
+                    "hochgeladen) — werden in diesem Zyklus mit versucht.", len(backlog),
+                )
+            deploy_batch = survivors + backlog
+            if should_deploy(auto_upload, publish, deploy_batch):
+                update_agent_state(current_action=f"📤 Upload läuft ({len(deploy_batch)} Clip(s))", **common_state)
+                uploaded, upload_failed = run_deployment_phase(deploy_batch, publish)
+                logger.info("📤 Deployment: %d hochgeladen, %d fehlgeschlagen", uploaded, upload_failed)
 
         update_agent_state(
             current_action="✅ Zyklus abgeschlossen — Cooldown",
