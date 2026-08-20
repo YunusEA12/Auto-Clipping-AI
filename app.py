@@ -11,6 +11,7 @@ orchestrator.py, and metrics_tracker.py, each typically running as its own long-
 process. This dashboard only reads the files those processes write (agent_state.json,
 orchestrator_state.json, ai_guidelines.txt, viral_memory.json, output/)."""
 
+import hmac
 import json
 import logging
 import os
@@ -20,8 +21,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import streamlit as st
+from dotenv import load_dotenv
 
 import dashboard_api
+
+load_dotenv()
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -63,6 +67,39 @@ HIGHLIGHT_OPTIONS = dashboard_api.HIGHLIGHT_COLORS
 NO_PROFILE_LABEL = "Kein Profil (Standard)"
 
 st.set_page_config(page_title="Auto-Clipping AI — Agent Control Center", page_icon="🛰️", layout="wide")
+
+
+def _require_dashboard_password() -> None:
+    """Defense-in-depth login gate, on top of (not instead of) the real access control:
+    on the VPS deployment (see SETUP_SERVER.md), the dashboard's port is only reachable via
+    Tailscale in the first place — ufw blocks it from the public internet entirely. This gate
+    is a second layer in case a device on the Tailscale network is ever compromised, not the
+    primary defense.
+
+    Only enforced when DASHBOARD_PASSWORD is actually set: unset (the default for local/
+    Windows dev use, where the dashboard is never exposed beyond localhost) means no gate at
+    all, unchanged from this project's existing local-dev experience. SETUP_SERVER.md sets
+    this explicitly on the VPS. Uses hmac.compare_digest for the comparison — a plain `==`
+    on a password check leaks timing information about how many leading characters matched."""
+    if st.session_state.get("dashboard_authenticated"):
+        return
+
+    expected = os.environ.get("DASHBOARD_PASSWORD")
+    if not expected:
+        return  # gate disabled — no password configured (see docstring)
+
+    st.title("🔒 Auto-Clipping AI")
+    password = st.text_input("Passwort", type="password", key="dashboard_password_input")
+    if st.button("Anmelden", key="dashboard_login_btn") or password:
+        if hmac.compare_digest(password, expected):
+            st.session_state["dashboard_authenticated"] = True
+            st.rerun()
+        elif password:
+            st.error("Falsches Passwort.")
+    st.stop()
+
+
+_require_dashboard_password()
 
 # Base look (dark background, accent color, rounded cards) comes from .streamlit/config.toml.
 # This CSS only adds what the theme system can't: a gradient CTA button and a bit of card
@@ -262,6 +299,50 @@ with st.sidebar:
     else:
         st.error("🔴 Keine Cookies gefunden. Führe `python get_cookies.py` aus.")
     st.caption(tiktok_detail)
+
+    # Deployment (2026-08-21): only meaningful on the VPS (see SETUP_SERVER.md) — the systemd
+    # services these buttons restart don't exist on a local Windows dev checkout, so the
+    # section hides itself there rather than showing controls that would just error out.
+    if dashboard_api.is_systemd_deployment():
+        st.divider()
+        st.header("🚀 Deployment")
+        st.caption(
+            "Holt den neuesten Code von GitHub (`git pull`) und startet den Supervisor "
+            "(Aufnahme/Analyse/Upload) neu, damit Code-Änderungen live greifen."
+        )
+
+        if st.button("🔄 Git Pull & Supervisor neu starten", key="git_pull_arm", width="stretch"):
+            st.session_state["git_pull_armed"] = True
+
+        if st.session_state.get("git_pull_armed"):
+            st.warning(
+                "Sicher? Laufende Aufnahmen werden kurz unterbrochen (Supervisor stoppt "
+                "alle Kindprozesse sauber und startet neu — siehe process_supervisor.py)."
+            )
+            col_confirm, col_cancel = st.columns(2)
+            with col_confirm:
+                if st.button("✅ Ja, jetzt", key="git_pull_confirm", width="stretch"):
+                    st.session_state["git_pull_armed"] = False
+                    with st.spinner("git pull + Neustart läuft..."):
+                        success, detail = dashboard_api.git_pull_and_restart_supervisor()
+                    if success:
+                        st.success("✅ Aktualisiert und neu gestartet.")
+                    else:
+                        st.error("❌ Fehlgeschlagen — siehe Details unten.")
+                    st.code(detail)
+            with col_cancel:
+                if st.button("Abbrechen", key="git_pull_cancel", width="stretch"):
+                    st.session_state["git_pull_armed"] = False
+                    st.rerun()
+
+        st.caption(
+            "Nur den Supervisor neu zu starten reicht für Code-Änderungen an "
+            "orchestrator.py/auto_pilot.py/etc. — das Dashboard selbst (app.py) braucht "
+            "einen eigenen Neustart, um seinen EIGENEN Code zu aktualisieren."
+        )
+        if st.button("🔁 Dashboard selbst neu starten", key="restart_dashboard_btn"):
+            dashboard_api.restart_dashboard_service()
+            st.info("Dashboard wird neu gestartet — Seite in ein paar Sekunden neu laden.")
 
     st.divider()
     st.header("🕴️ Streamer-Mitarbeiter")

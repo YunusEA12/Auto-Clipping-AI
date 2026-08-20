@@ -1,0 +1,16 @@
+# Lets the `autoclip` user (the unprivileged account the dashboard/supervisor run as, see
+# deploy/*.service) restart exactly these two systemd units without a password prompt --
+# needed because the "Git Pull & Restart" button in app.py has no way to interactively enter
+# a sudo password. Scoped to the exact two commands, nothing broader (no blanket `systemctl`,
+# no `ALL`) -- a compromised dashboard password can restart these services and nothing else.
+#
+# Install: sudo cp deploy/sudoers-auto-clipping /etc/sudoers.d/auto-clipping
+#          sudo chmod 440 /etc/sudoers.d/auto-clipping
+#          sudo visudo -c   # validates syntax before it takes effect -- always run this
+#                            # after editing anything under /etc/sudoers.d/
+#
+# If `which systemctl` on your server prints something other than /usr/bin/systemctl, update
+# both lines below to match before installing -- sudoers matches the exact resolved path, not
+# a bare command name.
+autoclip ALL=(root) NOPASSWD: /usr/bin/systemctl restart auto-clipping-supervisor
+autoclip ALL=(root) NOPASSWD: /usr/bin/systemctl restart auto-clipping-dashboard

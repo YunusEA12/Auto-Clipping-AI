@@ -15,9 +15,11 @@ aus bleiben, der Server läuft weiter.
 - **Keine TikTok-Cookies aus einem lokal eingeloggten Browser.** `get_cookies.py` liest
   Cookies aus Chrome/Edge/Firefox über deren Verschlüsselung (DPAPI unter Windows) — auf
   einem headless Linux-Server gibt es diesen Browser-Login gar nicht. Siehe unten.
-- **Kein automatischer Zugriffsschutz fürs Dashboard.** `app.py` hat keine eigene
-  Authentifizierung. Der Server exponiert das Dashboard deshalb NICHT öffentlich, sondern
-  nur über Tailscale (dein eigenes privates Netzwerk).
+- **Kein automatischer Zugriffsschutz fürs Dashboard.** Der Server exponiert das Dashboard
+  deshalb NICHT öffentlich, sondern nur über Tailscale (dein eigenes privates Netzwerk) — das
+  ist die eigentliche Absicherung. `app.py` hat seit 2026-08-21 zusätzlich ein optionales
+  Passwort-Login (siehe Schritt 3) als zweite Schutzschicht, falls ein Gerät in deinem
+  Tailscale-Netzwerk je kompromittiert wird — das ersetzt Tailscale nicht, es ergänzt es.
 
 ## Server-Empfehlung
 
@@ -66,6 +68,16 @@ einfach rüberkopieren, nicht neu anlegen:
 # Von deinem Windows-PC aus (PowerShell), IP durch die echte Server-IP ersetzen:
 scp .env autoclip@<server-ip>:/opt/auto-clipping-ai/.env
 ```
+
+Auf dem Server zusätzlich eine Zeile an die `.env` anhängen — das Dashboard-Passwort (zweite
+Schutzschicht hinter Tailscale, siehe oben). Ein zufälliges Passwort erzeugen und einsetzen,
+nicht den Platzhalter stehen lassen:
+```bash
+echo 'DASHBOARD_PASSWORD=<dein-passwort-hier>' >> /opt/auto-clipping-ai/.env
+```
+Lokal auf deinem PC absichtlich NICHT setzen — dort ist das Dashboard eh nur über localhost
+erreichbar, ein Login-Screen wäre nur unnötige Reibung. Ohne `DASHBOARD_PASSWORD` in der
+`.env` bleibt der Login-Screen einfach deaktiviert (siehe app.py's `_require_dashboard_password`).
 
 ## 4. TikTok-Cookies — die eine Sache, die nicht automatisch "einfach so" geht
 
@@ -141,6 +153,25 @@ sudo systemctl enable --now auto-clipping-dashboard
 
 `enable` sorgt dafür, dass beide Services auch nach einem Server-Neustart automatisch wieder
 hochfahren.
+
+## 8b. "Git Pull & Restart"-Button im Dashboard freischalten
+
+Das Dashboard hat einen Button, der `git pull` ausführt und den Supervisor-Service neu
+startet — ohne dass du dich per SSH einloggen musst. Er läuft als der unprivilegierte
+`autoclip`-User, braucht für `systemctl restart` aber `sudo` — dafür eine eng begrenzte
+passwortlose sudo-Regel installieren (erlaubt NUR diese zwei exakten Befehle, nichts
+Weiteres):
+
+```bash
+which systemctl   # prüfen, ob das wirklich /usr/bin/systemctl ausgibt (Ubuntu 24.04: ja)
+sudo cp deploy/sudoers-auto-clipping /etc/sudoers.d/auto-clipping
+sudo chmod 440 /etc/sudoers.d/auto-clipping
+sudo visudo -c    # validiert die Syntax -- IMMER nach einer Änderung unter /etc/sudoers.d/
+```
+
+Ohne diesen Schritt funktioniert der Button nicht (der `sudo systemctl restart`-Aufruf
+scheitert an der fehlenden Berechtigung) — die Kernfunktionalität (Aufnahme/Analyse/Upload)
+ist davon nicht betroffen, nur der Button selbst.
 
 ## 9. Prüfen, ob alles läuft
 

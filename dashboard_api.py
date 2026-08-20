@@ -16,6 +16,7 @@ they write (AGENT_STATE_PATH, ORCHESTRATOR_STATE_PATH), which are plain paths re
 below, not functions to wrap.
 """
 
+import subprocess
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -77,6 +78,69 @@ def read_fleet_target_state() -> str:
 
 def set_fleet_target_state(target_state: str) -> None:
     process_supervisor.write_fleet_target_state(target_state)
+
+
+# --- Remote deployment control (2026-08-21) --------------------------------------------------
+# Lets the VPS deployment (see SETUP_SERVER.md) pull the latest code and restart itself from
+# the dashboard, instead of needing an SSH session every time. Deliberately named after the
+# exact systemd unit names deploy/*.service installs — this only works on that specific
+# deployment, never on a local Windows dev checkout (see is_systemd_deployment()).
+SUPERVISOR_SYSTEMD_UNIT = "auto-clipping-supervisor"
+DASHBOARD_SYSTEMD_UNIT = "auto-clipping-dashboard"
+_SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
+
+
+def is_systemd_deployment() -> bool:
+    """Whether this process is running under the systemd units SETUP_SERVER.md installs —
+    used to hide the Deployment controls entirely on a local Windows/manual checkout, where
+    `sudo systemctl restart ...` has nothing to act on (no `sudo`, no systemd, no such unit)."""
+    return (_SYSTEMD_UNIT_DIR / f"{SUPERVISOR_SYSTEMD_UNIT}.service").exists()
+
+
+def git_pull_and_restart_supervisor(cwd: Optional[Path] = None) -> Tuple[bool, str]:
+    """Runs `git pull` then restarts ONLY the supervisor's systemd unit — safe to call from
+    inside the dashboard's own request handler, since it never touches the dashboard's own
+    process. Requires a narrowly-scoped passwordless sudo rule for exactly this systemctl
+    command (see deploy/sudoers-auto-clipping, installed by SETUP_SERVER.md) — the dashboard
+    itself runs as the unprivileged `autoclip` user, same as every other process in this
+    deployment.
+
+    Returns (success, detail) rather than raising: the caller (app.py) always has something
+    concrete to show the user — the actual git/systemctl output — regardless of which step
+    failed."""
+    try:
+        pull = subprocess.run(
+            ["git", "pull"], capture_output=True, text=True, timeout=60, cwd=cwd,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, f"git pull konnte nicht ausgeführt werden: {e}"
+    pull_output = (pull.stdout or "") + (pull.stderr or "")
+    if pull.returncode != 0:
+        return False, f"git pull fehlgeschlagen:\n{pull_output}"
+
+    try:
+        restart = subprocess.run(
+            ["sudo", "systemctl", "restart", SUPERVISOR_SYSTEMD_UNIT],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, f"{pull_output}\n\nsystemctl restart konnte nicht ausgeführt werden: {e}"
+    if restart.returncode != 0:
+        return False, f"{pull_output}\n\nsystemctl restart fehlgeschlagen:\n{restart.stderr}"
+
+    return True, f"{pull_output}\n\nSupervisor ({SUPERVISOR_SYSTEMD_UNIT}) neu gestartet."
+
+
+def restart_dashboard_service() -> None:
+    """Restarts the dashboard's OWN systemd unit — deliberately fire-and-forget
+    (subprocess.Popen, not run()): this call is made from inside the very process about to be
+    killed, so nothing after it is guaranteed to execute once systemctl sends the signal. The
+    browser tab shows a dropped connection for a few seconds until the new process comes up;
+    reloading the page reconnects to it."""
+    subprocess.Popen(
+        ["sudo", "systemctl", "restart", DASHBOARD_SYSTEMD_UNIT],
+        start_new_session=True,
+    )
 
 
 # --- Rendering constants ---------------------------------------------------------------

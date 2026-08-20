@@ -4,6 +4,10 @@ the expected signature and correctly delegates to the underlying module, using t
 monkeypatch-the-real-module isolation pattern as the rest of this suite (never touching real
 project state files)."""
 
+import subprocess
+
+import pytest
+
 import dashboard_api
 import streamers as streamers_module
 import profiles
@@ -137,6 +141,98 @@ def test_read_fleet_target_state_defaults_to_running_without_touching_real_proje
     import process_supervisor
     monkeypatch.setattr(process_supervisor, "FLEET_CONTROL_PATH", tmp_path / "never_written.json")
     assert dashboard_api.read_fleet_target_state() == dashboard_api.FLEET_STATE_RUNNING
+
+
+# --- Remote deployment control (2026-08-21: "Git Pull & Restart" button, VPS-only) ----------
+
+def test_is_systemd_deployment_true_when_unit_file_present(tmp_path, monkeypatch):
+    monkeypatch.setattr(dashboard_api, "_SYSTEMD_UNIT_DIR", tmp_path)
+    (tmp_path / f"{dashboard_api.SUPERVISOR_SYSTEMD_UNIT}.service").write_text("", encoding="utf-8")
+    assert dashboard_api.is_systemd_deployment() is True
+
+
+def test_is_systemd_deployment_false_when_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr(dashboard_api, "_SYSTEMD_UNIT_DIR", tmp_path)
+    assert dashboard_api.is_systemd_deployment() is False
+
+
+class _FakeCompletedProcess:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_git_pull_and_restart_supervisor_success(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[:2] == ["git", "pull"]:
+            return _FakeCompletedProcess(returncode=0, stdout="Already up to date.\n")
+        return _FakeCompletedProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    success, detail = dashboard_api.git_pull_and_restart_supervisor()
+
+    assert success is True
+    assert "Already up to date" in detail
+    assert calls[0] == ["git", "pull"]
+    assert calls[1] == ["sudo", "systemctl", "restart", dashboard_api.SUPERVISOR_SYSTEMD_UNIT]
+
+
+def test_git_pull_and_restart_supervisor_stops_on_git_failure_never_restarts(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _FakeCompletedProcess(returncode=1, stderr="merge conflict")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    success, detail = dashboard_api.git_pull_and_restart_supervisor()
+
+    assert success is False
+    assert "merge conflict" in detail
+    assert len(calls) == 1  # never even attempted the restart
+
+
+def test_git_pull_and_restart_supervisor_reports_restart_failure(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["git", "pull"]:
+            return _FakeCompletedProcess(returncode=0, stdout="ok")
+        return _FakeCompletedProcess(returncode=1, stderr="Unit not found")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    success, detail = dashboard_api.git_pull_and_restart_supervisor()
+
+    assert success is False
+    assert "Unit not found" in detail
+
+
+def test_git_pull_and_restart_supervisor_handles_timeout(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 60)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    success, detail = dashboard_api.git_pull_and_restart_supervisor()
+
+    assert success is False
+    assert "git pull" in detail.lower()
+
+
+def test_restart_dashboard_service_uses_popen_not_run(monkeypatch):
+    # Must never block waiting for a process that's about to kill the caller.
+    calls = []
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: calls.append(cmd))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("must not call subprocess.run"))
+
+    dashboard_api.restart_dashboard_service()
+
+    assert calls == [["sudo", "systemctl", "restart", dashboard_api.DASHBOARD_SYSTEMD_UNIT]]
 
 
 def test_load_profile_returns_a_plain_dict_not_a_pydantic_model(tmp_path, monkeypatch):
