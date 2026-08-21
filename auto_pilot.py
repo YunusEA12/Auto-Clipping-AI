@@ -265,6 +265,87 @@ def _persist_reward_score(output_path: Path, score: Optional[int]) -> None:
     atomic_io.atomic_write_json(sidecar_path, data)
 
 
+# Caps how many uploaded_clips/ entries get a YouTube retry attempt per cycle — same
+# burst-avoidance reasoning as BACKLOG_BATCH_LIMIT, just for a YouTube-specific outage (quota
+# exceeded, a stale OAuth token) instead of a whole-pipeline one.
+YOUTUBE_RETRY_BATCH_LIMIT = BATCH_SIZE_MAX
+
+
+def find_missing_youtube_uploads(uploaded_clips_dir: Path) -> List[Path]:
+    """upload_manager.upload_clip_everywhere() attempts TikTok and YouTube independently per
+    clip (see its own module docstring: "a YouTube failure never crashes the calling cycle,
+    and never blocks the TikTok result") — but only TikTok's outcome decides whether a clip
+    moves into uploaded_clips/ at all (run_deployment_phase's own docstring: "based on
+    TikTok's result alone"). That means a clip whose YouTube leg failed (quota exceeded, a
+    transient API error, an expired token) or wasn't attempted (an old sidecar predating the
+    YouTube leg entirely) has no automatic retry once it's archived here: find_backlog_clips()
+    only ever looks at output/, never uploaded_clips/. This scans uploaded_clips/ for exactly
+    that gap — clips whose sidecar shows `publish: true` (upload was genuinely intended, not
+    e.g. a manual-mode/publish=False artifact) but `youtube_uploaded` isn't `true`.
+
+    Returns sidecar-having .mp4 paths only — a clip missing its metadata (a write failure at
+    upload time) has no title/description/hashtags to retry with and is left for manual
+    review rather than guessed at."""
+    if not uploaded_clips_dir.exists():
+        return []
+
+    missing: List[Path] = []
+    for mp4_path in sorted(uploaded_clips_dir.glob("*.mp4")):
+        sidecar_path = mp4_path.with_suffix(".json")
+        try:
+            with open(sidecar_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("publish") and not data.get("youtube_uploaded"):
+            missing.append(mp4_path)
+    return missing
+
+
+def retry_missing_youtube_uploads(uploaded_clips_dir: Path) -> Tuple[int, int]:
+    """Retries ONLY the YouTube leg for clips found by find_missing_youtube_uploads() — never
+    TikTok, since that already succeeded and re-running tiktok_uploader.try_upload_clip()
+    would post a second, duplicate, publicly-visible copy of a clip that's already live.
+    Uses upload_manager._upload_to_youtube() directly (not upload_clip_everywhere()) for
+    exactly that reason — there's no TikTok leg to run here at all.
+
+    Returns (retried_ok, retried_failed). Best-effort per clip: a sidecar write failure after
+    a successful upload is logged, not raised — the YouTube upload already happened by then,
+    so raising would make a real success look like a failure to the caller."""
+    candidates = find_missing_youtube_uploads(uploaded_clips_dir)[:YOUTUBE_RETRY_BATCH_LIMIT]
+    ok, failed = 0, 0
+
+    for mp4_path in candidates:
+        sidecar_path = mp4_path.with_suffix(".json")
+        with open(sidecar_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        outcome = upload_manager._upload_to_youtube(
+            mp4_path, data.get("title", mp4_path.stem), data.get("description", ""),
+            data.get("hashtags"), publish=True,
+        )
+        if not outcome.success:
+            failed += 1
+            logger.warning(
+                "YouTube-Nachversuch für '%s' erneut fehlgeschlagen: %s", mp4_path.name, outcome.detail,
+            )
+            continue
+
+        ok += 1
+        data["youtube_uploaded"] = True
+        data["youtube_url"] = outcome.url
+        try:
+            atomic_io.atomic_write_json(sidecar_path, data)
+        except OSError as e:
+            logger.warning(
+                "YouTube-Upload für '%s' erfolgreich (%s), aber Sidecar-Update fehlgeschlagen: %s",
+                mp4_path.name, outcome.url, e,
+            )
+        logger.info("📺 YouTube-Nachversuch erfolgreich für '%s' -> %s", mp4_path.name, outcome.url)
+
+    return ok, failed
+
+
 def purge_low_scoring_clips(
     batch: "train_loop.CriticBatch",
     rendered: Dict[str, Path],
@@ -568,6 +649,15 @@ def run_cycle(
                 update_agent_state(current_action=f"📤 Upload läuft ({len(deploy_batch)} Clip(s))", **common_state)
                 uploaded, upload_failed = run_deployment_phase(deploy_batch, publish)
                 logger.info("📤 Deployment: %d hochgeladen, %d fehlgeschlagen", uploaded, upload_failed)
+
+            # YouTube-only backlog: a clip already live on TikTok (hence already archived into
+            # uploaded_clips/) whose YouTube leg failed or was never attempted — see
+            # find_missing_youtube_uploads()'s own docstring. Runs every cycle regardless of
+            # whether this cycle had its own survivors, same reasoning as the output/ backlog
+            # scan above; never touches TikTok.
+            yt_ok, yt_failed = retry_missing_youtube_uploads(UPLOADED_CLIPS_DIR)
+            if yt_ok or yt_failed:
+                logger.info("📺 YouTube-Nachversuch: %d erfolgreich, %d fehlgeschlagen", yt_ok, yt_failed)
 
         update_agent_state(
             current_action="✅ Zyklus abgeschlossen — Cooldown",
