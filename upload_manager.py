@@ -221,6 +221,8 @@ def upload_clip_everywhere(
     publish: bool = False,
     add_background_sound: bool = True,
     instagram_enabled: bool = False,
+    skip_youtube: Optional[YouTubeOutcome] = None,
+    skip_instagram: Optional[InstagramOutcome] = None,
 ) -> MultiPlatformOutcome:
     """Uploads one rendered clip to TikTok, then — after a randomized pacing delay — to
     YouTube Shorts, then — after another pacing delay, only if instagram_enabled — to
@@ -228,23 +230,38 @@ def upload_clip_everywhere(
     outcome (moving the file into uploaded_clips/, the metadata sidecar); each delay sits
     BEFORE the next platform so the very first upload of a cycle never waits on nothing.
     instagram_enabled defaults to False — see _upload_to_instagram()'s own docstring for why
-    this is a separate, explicit per-streamer opt-in rather than firing automatically."""
+    this is a separate, explicit per-streamer opt-in rather than firing automatically.
+
+    skip_youtube/skip_instagram (2026-08-21, CONFIRMED live — see auto_pilot.py's
+    _read_platform_state()/_write_platform_state()): a clip whose TikTok click isn't confirmed
+    stays in output/ for a retry, and until this fix, retrying meant calling this whole
+    function again from scratch — re-uploading to YouTube and Instagram too, even though
+    those two had already genuinely succeeded on an earlier attempt. Observed live: a single
+    clip whose TikTok confirmation kept flaking ended up with 3 separate real YouTube videos
+    and 3 separate real Instagram posts for identical content before TikTok finally confirmed.
+    When the caller already has a successful outcome for a platform from a previous attempt at
+    this same still-pending clip, passing it here skips both the real upload call AND its
+    pacing delay (there is nothing to pace — nothing is being sent)."""
     tiktok_outcome = tiktok_uploader.try_upload_clip(
         video_path, description, hashtags, publish=publish, add_background_sound=add_background_sound,
     )
 
-    if publish:
-        delay = random.uniform(UPLOAD_DELAY_MIN_SECONDS, UPLOAD_DELAY_MAX_SECONDS)
-        logger.info("Waiting %.0fs before the YouTube upload (rate-limit/pacing buffer)", delay)
-        time.sleep(delay)
+    if skip_youtube is not None:
+        youtube_outcome = skip_youtube
+    else:
+        if publish:
+            delay = random.uniform(UPLOAD_DELAY_MIN_SECONDS, UPLOAD_DELAY_MAX_SECONDS)
+            logger.info("Waiting %.0fs before the YouTube upload (rate-limit/pacing buffer)", delay)
+            time.sleep(delay)
+        youtube_outcome = _upload_to_youtube(video_path, title, description, hashtags, publish)
 
-    youtube_outcome = _upload_to_youtube(video_path, title, description, hashtags, publish)
-
-    if publish and instagram_enabled:
-        delay = random.uniform(UPLOAD_DELAY_MIN_SECONDS, UPLOAD_DELAY_MAX_SECONDS)
-        logger.info("Waiting %.0fs before the Instagram upload (rate-limit/pacing buffer)", delay)
-        time.sleep(delay)
-
-    instagram_outcome = _upload_to_instagram(video_path, title, description, hashtags, publish, instagram_enabled)
+    if skip_instagram is not None:
+        instagram_outcome = skip_instagram
+    else:
+        if publish and instagram_enabled:
+            delay = random.uniform(UPLOAD_DELAY_MIN_SECONDS, UPLOAD_DELAY_MAX_SECONDS)
+            logger.info("Waiting %.0fs before the Instagram upload (rate-limit/pacing buffer)", delay)
+            time.sleep(delay)
+        instagram_outcome = _upload_to_instagram(video_path, title, description, hashtags, publish, instagram_enabled)
 
     return MultiPlatformOutcome(tiktok=tiktok_outcome, youtube=youtube_outcome, instagram=instagram_outcome)

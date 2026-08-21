@@ -402,6 +402,74 @@ def should_deploy(auto_upload: bool, publish: bool, survivors: list) -> bool:
     return bool(auto_upload and publish and survivors)
 
 
+def _platform_state_path(output_path: Path) -> Path:
+    return output_path.with_suffix(".platform_state.json")
+
+
+def _read_platform_state(output_path: Path) -> Tuple[Optional["upload_manager.YouTubeOutcome"], Optional["upload_manager.InstagramOutcome"]]:
+    """Reads back already-succeeded YouTube/Instagram outcomes for a clip still sitting in
+    output/ from an earlier, TikTok-unconfirmed attempt — see _write_platform_state()'s
+    docstring for why this file exists at all. Returns (None, None) on any read/parse problem
+    or if nothing was ever recorded — the normal case for a clip's first attempt — so the
+    caller just re-attempts every platform exactly as before this fix existed."""
+    path = _platform_state_path(output_path)
+    if not path.exists():
+        return None, None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None, None
+
+    youtube_outcome = None
+    yt = data.get("youtube")
+    if yt and yt.get("success"):
+        youtube_outcome = upload_manager.YouTubeOutcome(**yt)
+
+    instagram_outcome = None
+    ig = data.get("instagram")
+    if ig and ig.get("success"):
+        instagram_outcome = upload_manager.InstagramOutcome(**ig)
+
+    return youtube_outcome, instagram_outcome
+
+
+def _write_platform_state(output_path: Path, result: "upload_manager.MultiPlatformOutcome") -> None:
+    """Persists YouTube/Instagram outcomes alongside a clip still in output/ so a future retry
+    (triggered by TikTok's click not being confirmed — see run_deployment_phase's existing
+    "bleibt in output/ für einen erneuten Versuch" branch) can skip platforms that already
+    genuinely succeeded instead of blindly re-running upload_clip_everywhere() from scratch.
+
+    CONFIRMED live, 2026-08-21: before this fix, a single clip whose TikTok confirmation kept
+    flaking across 3 cycles ended up with 3 separate real YouTube videos and 3 separate real
+    Instagram Reels posted for identical content — TikTok being unconfirmed said nothing about
+    whether YouTube/Instagram (attempted independently, earlier in the same call) had already
+    succeeded, yet the whole clip was retried as if nothing had happened yet.
+
+    Only ever written with the LATEST attempt's outcomes (not merged with a previous file) —
+    each call already receives skip_youtube/skip_instagram for anything previously successful
+    (see _read_platform_state()), so a fresh outcome here is either a genuine first success or
+    confirmation that a previously-recorded success is still the right one to keep."""
+    path = _platform_state_path(output_path)
+    state = {
+        "youtube": result.youtube._asdict(),
+        "instagram": result.instagram._asdict(),
+    }
+    try:
+        atomic_io.atomic_write_json(path, state)
+    except OSError as e:
+        logger.warning("Could not persist platform-state sidecar %s: %s", path, e)
+
+
+def _clear_platform_state(output_path: Path) -> None:
+    path = _platform_state_path(output_path)
+    if path.exists():
+        try:
+            path.unlink()
+        except OSError as e:
+            logger.warning("Could not remove platform-state sidecar %s: %s", path, e)
+
+
 def run_deployment_phase(
     survivors: List[Tuple[dict, Path, Optional[int]]], publish: bool, instagram: bool = False,
 ) -> Tuple[int, int]:
@@ -439,11 +507,19 @@ def run_deployment_phase(
         description = clip.get("description") or title
         caption = tiktok_uploader.build_caption_text(description, hashtags)
 
+        skip_youtube, skip_instagram = _read_platform_state(output_path)
         result = upload_manager.upload_clip_everywhere(
             output_path, title, description, hashtags, publish=publish, instagram_enabled=instagram,
+            skip_youtube=skip_youtube, skip_instagram=skip_instagram,
         )
         outcome = result.tiktok
         if not outcome.success:
+            # upload_clip_everywhere() already ran YouTube/Instagram independently of TikTok's
+            # own result by this point (they don't gate on it) — persist any success there too,
+            # for the exact same reason as the "unconfirmed" branch below: a TikTok failure
+            # here means this clip stays in output/ for a retry, and that retry must not
+            # re-upload a platform that already genuinely succeeded.
+            _write_platform_state(output_path, result)
             failed += 1
             logger.warning("Upload fehlgeschlagen für '%s' — bleibt in output/", title)
             continue
@@ -454,6 +530,16 @@ def run_deployment_phase(
             # actually received, with no automatic retry (metrics_tracker only ever revisits
             # uploaded_clips/, never output/). Leaving it in output/ lets the next cycle try
             # again instead of silently treating an unverified click as done.
+            #
+            # This next cycle's retry re-calls upload_clip_everywhere() above, which re-runs
+            # tiktok_uploader unconditionally every time (a genuinely separate, pre-existing,
+            # documented risk — see retry_missing_youtube_uploads()'s own docstring on why a
+            # TikTok re-run risks a real duplicate post if this "unconfirmed" attempt actually
+            # went through) — but YouTube/Instagram no longer compound that risk further, since
+            # _write_platform_state() below persists whichever of them already succeeded, and
+            # the next attempt's _read_platform_state() call passes those back in as
+            # skip_youtube/skip_instagram instead of re-uploading them from scratch.
+            _write_platform_state(output_path, result)
             failed += 1
             logger.warning(
                 "Upload für '%s' wurde geklickt, aber nicht bestätigt (kein Redirect/Erfolgs-"
@@ -472,6 +558,7 @@ def run_deployment_phase(
             render_sidecar = output_path.with_suffix(".json")
             if render_sidecar.exists():
                 render_sidecar.unlink()
+            _clear_platform_state(output_path)
 
             metadata = {
                 "title": title,
