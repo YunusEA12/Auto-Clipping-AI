@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import metrics_tracker
+import upload_ledger
 
 
 # --- embedded-JSON content extraction (C-01: real per-row DOM has no views/likes words at
@@ -244,7 +245,12 @@ def test_update_viral_memory_deletes_once_youtube_also_uploaded(tmp_path, monkey
     monkeypatch.setattr(metrics_tracker, "VIRAL_MEMORY_PATH", tmp_path / "viral_memory.json")
     monkeypatch.setattr(metrics_tracker, "SCRAPE_HEALTH_PATH", tmp_path / "health.json")
 
-    (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
+    mp4_path = uploaded_dir / "clip_1.mp4"
+    mp4_path.write_bytes(b"fake video")
+    # The deletion guard's ledger cross-check (2026-08-21) needs a real "done" entry matching
+    # this file's actual content hash — a hand-crafted sidecar claiming youtube_uploaded=True
+    # with no corresponding ledger entry is exactly the mismatch that check exists to catch.
+    upload_ledger.mark_done(upload_ledger.compute_content_hash(mp4_path), "youtube", video_id="yt1")
     (uploaded_dir / "clip_1.json").write_text(
         json.dumps({"caption": "hello world #fyp", "publish": True, "youtube_uploaded": True}),
         encoding="utf-8",
@@ -328,7 +334,11 @@ def test_update_viral_memory_deletes_once_youtube_and_instagram_both_done(tmp_pa
     monkeypatch.setattr(metrics_tracker, "VIRAL_MEMORY_PATH", tmp_path / "viral_memory.json")
     monkeypatch.setattr(metrics_tracker, "SCRAPE_HEALTH_PATH", tmp_path / "health.json")
 
-    (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
+    mp4_path = uploaded_dir / "clip_1.mp4"
+    mp4_path.write_bytes(b"fake video")
+    content_hash = upload_ledger.compute_content_hash(mp4_path)
+    upload_ledger.mark_done(content_hash, "youtube", video_id="yt1")
+    upload_ledger.mark_done(content_hash, "instagram")
     (uploaded_dir / "clip_1.json").write_text(
         json.dumps({
             "caption": "hello world #fyp", "publish": True, "youtube_uploaded": True,
@@ -358,7 +368,9 @@ def test_update_viral_memory_deletes_when_instagram_never_enabled_for_this_clip(
     monkeypatch.setattr(metrics_tracker, "VIRAL_MEMORY_PATH", tmp_path / "viral_memory.json")
     monkeypatch.setattr(metrics_tracker, "SCRAPE_HEALTH_PATH", tmp_path / "health.json")
 
-    (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
+    mp4_path = uploaded_dir / "clip_1.mp4"
+    mp4_path.write_bytes(b"fake video")
+    upload_ledger.mark_done(upload_ledger.compute_content_hash(mp4_path), "youtube", video_id="yt1")
     (uploaded_dir / "clip_1.json").write_text(
         json.dumps({"caption": "hello world #fyp", "publish": True, "youtube_uploaded": True}),
         encoding="utf-8",

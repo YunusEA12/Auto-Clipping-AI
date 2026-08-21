@@ -31,6 +31,8 @@ config/instagram_cookies.json
 uploaded_clips/
 gemini_call_budget.json
 youtube_upload_backoff.json
+upload_ledger.json
+upload_ledger.json.lock
 selector_audit/
 metrics_scrape_health.json
 .tiktok_browser_profile/

@@ -40,6 +40,7 @@ import atomic_io
 import tiktok_uploader
 import upload as youtube_uploader
 import upload_instagram_playwright as instagram_uploader
+import upload_ledger
 
 import logging_setup
 
@@ -150,6 +151,27 @@ def _upload_to_youtube(
         )
         return YouTubeOutcome(attempted=False, success=False, detail="uploadLimitExceeded backoff")
 
+    # Content-hash ledger check (2026-08-21) — see upload_ledger.py's own module docstring for
+    # the two real production incidents this closes. Checked BEFORE ever touching the network:
+    # a clip already recorded "done" is a pure local no-op, no API call at all.
+    content_hash = upload_ledger.compute_content_hash(video_path)
+    existing = upload_ledger.get_entry(content_hash, "youtube")
+    if existing and existing.get("status") == "done":
+        logger.info(
+            "Skipping YouTube upload for %s — already uploaded per the ledger (video_id=%s, "
+            "hash=%s...); not submitting a duplicate.",
+            video_path.name, existing.get("video_id"), content_hash[:12],
+        )
+        return YouTubeOutcome(attempted=True, success=True, video_id=existing.get("video_id"), detail="already uploaded (ledger)")
+
+    if not upload_ledger.try_mark_pending(content_hash, "youtube", title=title):
+        logger.warning(
+            "Skipping YouTube upload for %s — another attempt for this exact clip (hash=%s...) "
+            "is already in flight or was very recently attempted; not submitting a duplicate.",
+            video_path.name, content_hash[:12],
+        )
+        return YouTubeOutcome(attempted=False, success=False, detail="duplicate upload blocked by ledger (pending)")
+
     try:
         video_id = youtube_uploader.upload_clip(video_path, title, description, tags)
     except HttpError as e:
@@ -171,12 +193,16 @@ def _upload_to_youtube(
             logger.error("YouTube API quota exceeded — could not upload %s: %s", video_path.name, e)
         else:
             logger.error("YouTube upload failed for %s: %s", video_path.name, e)
+        upload_ledger.mark_failed(content_hash, "youtube", detail=error_text)
         return YouTubeOutcome(attempted=True, success=False, detail=error_text)
     except Exception as e:
         # Anything else (OAuth/token problem, network failure, a missing client_secret.json)
         # — never let a YouTube-side problem take down the cycle that's also reporting the
-        # TikTok result.
+        # TikTok result. upload.upload_clip() itself already self-heals the "raised, but the
+        # video actually made it up" case via _find_recent_upload_by_title() before this
+        # ever runs — reaching here means it genuinely couldn't verify a success either.
         logger.error("YouTube upload raised unexpectedly for %s: %s", video_path.name, e)
+        upload_ledger.mark_failed(content_hash, "youtube", detail=str(e))
         return YouTubeOutcome(attempted=True, success=False, detail=str(e))
 
     # Background music for YouTube is now mixed directly into the render (process.py's
@@ -184,6 +210,7 @@ def _upload_to_youtube(
     # YouTube Studio automation this step used to call (youtube_studio_uploader.py), which
     # never got past cookie-based login on this VPS (Google's session cookies appear to be
     # IP-bound) and risked the account's OAuth token being flagged for scripted Studio access.
+    upload_ledger.mark_done(content_hash, "youtube", video_id=video_id, title=title)
     return YouTubeOutcome(attempted=True, success=True, video_id=video_id)
 
 
@@ -202,15 +229,100 @@ def _upload_to_instagram(
         logger.info("%s — skipping Instagram upload for %s", reason, video_path.name)
         return InstagramOutcome(attempted=False, success=False, detail=reason)
 
+    content_hash = upload_ledger.compute_content_hash(video_path)
+    existing = upload_ledger.get_entry(content_hash, "instagram")
+    if existing and existing.get("status") == "done":
+        logger.info(
+            "Skipping Instagram upload for %s — already uploaded per the ledger (hash=%s...); "
+            "not submitting a duplicate.", video_path.name, content_hash[:12],
+        )
+        return InstagramOutcome(attempted=True, success=True, confirmed=True, detail="already uploaded (ledger)")
+
+    if not upload_ledger.try_mark_pending(content_hash, "instagram", title=title):
+        logger.warning(
+            "Skipping Instagram upload for %s — another attempt for this exact clip "
+            "(hash=%s...) is already in flight, was very recently attempted, or its last "
+            "attempt's publish status is still unconfirmed and within the cooldown window; "
+            "not submitting a duplicate.", video_path.name, content_hash[:12],
+        )
+        return InstagramOutcome(attempted=False, success=False, detail="duplicate upload blocked by ledger (pending)")
+
     try:
         outcome = instagram_uploader.try_upload_clip(video_path, description, tags, publish=publish)
     except Exception as e:
         # Never let an Instagram-side problem take down a cycle that's also reporting TikTok
         # and YouTube results — same reasoning as the YouTube try/except above.
         logger.error("Instagram upload raised unexpectedly for %s: %s", video_path.name, e)
+        upload_ledger.mark_failed(content_hash, "instagram", detail=str(e))
         return InstagramOutcome(attempted=True, success=False, detail=str(e))
 
+    if outcome.success and outcome.confirmed:
+        upload_ledger.mark_done(content_hash, "instagram", title=title)
+    elif outcome.success:
+        # Clicked without raising, but Instagram never showed a confirming signal — the same
+        # "did it actually go through?" ambiguity TikTok has always had. Left "pending" rather
+        # than resolved either way (see upload_ledger.mark_unresolved()'s own docstring): a
+        # caller that immediately retries this exact clip is blocked until
+        # PENDING_STALE_MINUTES passes, instead of risking a real duplicate Reel post over an
+        # unconfirmed signal that may well have actually succeeded.
+        upload_ledger.mark_unresolved(content_hash, "instagram", detail="clicked but unconfirmed")
+    else:
+        upload_ledger.mark_failed(content_hash, "instagram", detail="upload_video returned success=False")
+
     return InstagramOutcome(attempted=True, success=outcome.success, confirmed=outcome.confirmed)
+
+
+def _upload_to_tiktok(
+    video_path: Path, description: str, hashtags: Optional[List[str]], publish: bool, add_background_sound: bool,
+) -> tiktok_uploader.UploadOutcome:
+    """Wraps tiktok_uploader.try_upload_clip() with the same content-hash ledger protection as
+    YouTube/Instagram above (2026-08-21). TikTok's own click-confirmation signal has always
+    been the least reliable of the three (see retry_missing_youtube_uploads()'s own docstring,
+    and tiktok_uploader.py's C-08/C-09 history), making an automatic unconfirmed-retry here
+    the single most likely source of a genuine duplicate post. publish=False stays a complete
+    no-op, mirroring tiktok_uploader.try_upload_clip()'s own contract — no ledger interaction
+    for a call that never touches the browser at all."""
+    if not publish:
+        return tiktok_uploader.try_upload_clip(
+            video_path, description, hashtags, publish=publish, add_background_sound=add_background_sound,
+        )
+
+    content_hash = upload_ledger.compute_content_hash(video_path)
+    existing = upload_ledger.get_entry(content_hash, "tiktok")
+    if existing and existing.get("status") == "done":
+        logger.info(
+            "Skipping TikTok upload for %s — already uploaded per the ledger (hash=%s...); "
+            "not submitting a duplicate.", video_path.name, content_hash[:12],
+        )
+        return tiktok_uploader.UploadOutcome(success=True, confirmed=True)
+
+    if not upload_ledger.try_mark_pending(content_hash, "tiktok"):
+        logger.warning(
+            "Skipping TikTok upload for %s — another attempt for this exact clip (hash=%s...) "
+            "is already in flight, was very recently attempted, or its last attempt's publish "
+            "status is still unconfirmed and within the cooldown window; not submitting a "
+            "duplicate. This clip will be retried automatically once that cooldown passes.",
+            video_path.name, content_hash[:12],
+        )
+        return tiktok_uploader.UploadOutcome(success=False, confirmed=False)
+
+    outcome = tiktok_uploader.try_upload_clip(
+        video_path, description, hashtags, publish=publish, add_background_sound=add_background_sound,
+    )
+
+    if outcome.success and outcome.confirmed:
+        upload_ledger.mark_done(content_hash, "tiktok")
+    elif outcome.success:
+        # Clicked without raising, but no redirect/success signal was observed — see
+        # upload_ledger.mark_unresolved()'s own docstring. Left as "pending" rather than
+        # "failed" so an immediate next-cycle retry is blocked (PENDING_STALE_MINUTES cooldown)
+        # instead of risking a second real TikTok post over a click that may well have
+        # actually gone through.
+        upload_ledger.mark_unresolved(content_hash, "tiktok", detail="clicked but unconfirmed")
+    else:
+        upload_ledger.mark_failed(content_hash, "tiktok", detail="upload returned success=False")
+
+    return outcome
 
 
 def upload_clip_everywhere(
@@ -221,8 +333,6 @@ def upload_clip_everywhere(
     publish: bool = False,
     add_background_sound: bool = True,
     instagram_enabled: bool = False,
-    skip_youtube: Optional[YouTubeOutcome] = None,
-    skip_instagram: Optional[InstagramOutcome] = None,
 ) -> MultiPlatformOutcome:
     """Uploads one rendered clip to TikTok, then — after a randomized pacing delay — to
     YouTube Shorts, then — after another pacing delay, only if instagram_enabled — to
@@ -232,36 +342,28 @@ def upload_clip_everywhere(
     instagram_enabled defaults to False — see _upload_to_instagram()'s own docstring for why
     this is a separate, explicit per-streamer opt-in rather than firing automatically.
 
-    skip_youtube/skip_instagram (2026-08-21, CONFIRMED live — see auto_pilot.py's
-    _read_platform_state()/_write_platform_state()): a clip whose TikTok click isn't confirmed
-    stays in output/ for a retry, and until this fix, retrying meant calling this whole
-    function again from scratch — re-uploading to YouTube and Instagram too, even though
-    those two had already genuinely succeeded on an earlier attempt. Observed live: a single
-    clip whose TikTok confirmation kept flaking ended up with 3 separate real YouTube videos
-    and 3 separate real Instagram posts for identical content before TikTok finally confirmed.
-    When the caller already has a successful outcome for a platform from a previous attempt at
-    this same still-pending clip, passing it here skips both the real upload call AND its
-    pacing delay (there is nothing to pace — nothing is being sent)."""
-    tiktok_outcome = tiktok_uploader.try_upload_clip(
-        video_path, description, hashtags, publish=publish, add_background_sound=add_background_sound,
-    )
+    Duplicate-upload protection (2026-08-21) now lives one layer down, inside
+    _upload_to_tiktok()/_upload_to_youtube()/_upload_to_instagram() themselves, via
+    upload_ledger.py's content-hash ledger — every call to this function is safe to repeat for
+    the exact same clip (a retry after a crash, a supervisor restart, a caller that doesn't
+    know whether an earlier attempt already succeeded) without risking a real duplicate post,
+    because each platform's own already-succeeded/in-flight state is checked before any
+    network call is made, not passed in by the caller. See upload_ledger.py's own module
+    docstring for the two real production incidents this replaced/closes (an earlier, narrower
+    fix here — skip_youtube/skip_instagram params reading a per-clip output/ sidecar,
+    commit 0aa31b1 — is now redundant and has been removed in favor of this global mechanism)."""
+    tiktok_outcome = _upload_to_tiktok(video_path, description, hashtags, publish, add_background_sound)
 
-    if skip_youtube is not None:
-        youtube_outcome = skip_youtube
-    else:
-        if publish:
-            delay = random.uniform(UPLOAD_DELAY_MIN_SECONDS, UPLOAD_DELAY_MAX_SECONDS)
-            logger.info("Waiting %.0fs before the YouTube upload (rate-limit/pacing buffer)", delay)
-            time.sleep(delay)
-        youtube_outcome = _upload_to_youtube(video_path, title, description, hashtags, publish)
+    if publish:
+        delay = random.uniform(UPLOAD_DELAY_MIN_SECONDS, UPLOAD_DELAY_MAX_SECONDS)
+        logger.info("Waiting %.0fs before the YouTube upload (rate-limit/pacing buffer)", delay)
+        time.sleep(delay)
+    youtube_outcome = _upload_to_youtube(video_path, title, description, hashtags, publish)
 
-    if skip_instagram is not None:
-        instagram_outcome = skip_instagram
-    else:
-        if publish and instagram_enabled:
-            delay = random.uniform(UPLOAD_DELAY_MIN_SECONDS, UPLOAD_DELAY_MAX_SECONDS)
-            logger.info("Waiting %.0fs before the Instagram upload (rate-limit/pacing buffer)", delay)
-            time.sleep(delay)
-        instagram_outcome = _upload_to_instagram(video_path, title, description, hashtags, publish, instagram_enabled)
+    if publish and instagram_enabled:
+        delay = random.uniform(UPLOAD_DELAY_MIN_SECONDS, UPLOAD_DELAY_MAX_SECONDS)
+        logger.info("Waiting %.0fs before the Instagram upload (rate-limit/pacing buffer)", delay)
+        time.sleep(delay)
+    instagram_outcome = _upload_to_instagram(video_path, title, description, hashtags, publish, instagram_enabled)
 
     return MultiPlatformOutcome(tiktok=tiktok_outcome, youtube=youtube_outcome, instagram=instagram_outcome)

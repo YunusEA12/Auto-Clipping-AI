@@ -52,13 +52,14 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 import atomic_io
 import tiktok_uploader
 import upload as youtube_uploader
+import upload_ledger
 
 import logging_setup
 
@@ -482,7 +483,7 @@ def _record_scrape_result(success: bool, path: Path = None) -> dict:
     return health
 
 
-def _delete_confirmed_upload(clip_id: str) -> None:
+def _delete_confirmed_upload(clip_id: str, metadata: Optional[dict] = None) -> None:
     """Permanently deletes the local .mp4 and .json sidecar for a clip that's been matched
     against TikTok's real content list on two SEPARATE poll cycles, not just once — a single
     match could be a transient/flaky read, and a click-based "confirmed" from
@@ -498,7 +499,42 @@ def _delete_confirmed_upload(clip_id: str) -> None:
     — see update_viral_memory()'s own guard — since this local file is also the only way
     retry_missing_youtube_uploads() can ever backfill YouTube for this clip; deleting it the
     moment TikTok alone reconfirms can permanently strand a clip that's still mid-retry on
-    YouTube (real, 2026-08-21 — see that guard's comment for the full account)."""
+    YouTube (real, 2026-08-21 — see that guard's comment for the full account).
+
+    metadata (2026-08-21) — an EXTRA safety cross-check against upload_ledger.py's own
+    persistent record, on top of the caller's own youtube_uploaded/instagram_uploaded sidecar
+    check: the sidecar's booleans are written once, at archive time, and never revisited,
+    while the ledger is the same source every upload/retry attempt across the whole pipeline
+    actually reads and writes. If they ever disagree — a bug elsewhere, a race, a hand-edited
+    sidecar — trust the ledger and refuse to delete rather than silently deleting a file that
+    might still be needed for a real retry. Best-effort: if metadata isn't provided, or the
+    file is already gone, or the hash can't be computed, this cross-check is skipped and the
+    deletion proceeds exactly as it did before this check existed — this is additional
+    defense-in-depth, not a replacement for the caller's own existing gate."""
+    if metadata is not None:
+        mp4_path = UPLOADED_CLIPS_DIR / f"{clip_id}.mp4"
+        if mp4_path.exists():
+            try:
+                content_hash = upload_ledger.compute_content_hash(mp4_path)
+            except OSError as e:
+                logger.warning("Could not hash %s for the ledger cross-check: %s — proceeding without it.", mp4_path, e)
+                content_hash = None
+            if content_hash is not None:
+                if metadata.get("publish") and not upload_ledger.is_done(content_hash, "youtube"):
+                    logger.warning(
+                        "Refusing to delete '%s' — its sidecar says youtube_uploaded, but "
+                        "upload_ledger.py has no matching 'done' entry for this file's content "
+                        "hash. Keeping the local file until this is resolved.", clip_id,
+                    )
+                    return
+                if metadata.get("instagram_enabled") and not upload_ledger.is_done(content_hash, "instagram"):
+                    logger.warning(
+                        "Refusing to delete '%s' — its sidecar says instagram_uploaded, but "
+                        "upload_ledger.py has no matching 'done' entry for this file's content "
+                        "hash. Keeping the local file until this is resolved.", clip_id,
+                    )
+                    return
+
     for suffix in (".mp4", ".json"):
         path = UPLOADED_CLIPS_DIR / f"{clip_id}{suffix}"
         try:
@@ -555,7 +591,7 @@ def update_viral_memory(headless: bool = True) -> int:
     memory = load_viral_memory()
     previously_confirmed = set(memory.keys())  # captured BEFORE this pass's own updates
     matched = 0
-    newly_reconfirmed: List[str] = []
+    newly_reconfirmed: List[Tuple[str, dict]] = []
 
     for entry in uploaded:
         clip_id = entry["_clip_id"]
@@ -592,7 +628,7 @@ def update_viral_memory(headless: bool = True) -> int:
             youtube_done = updated.get("youtube_uploaded") or not updated.get("publish")
             instagram_done = updated.get("instagram_uploaded") or not updated.get("instagram_enabled")
             if youtube_done and instagram_done:
-                newly_reconfirmed.append(clip_id)
+                newly_reconfirmed.append((clip_id, updated))
             else:
                 pending = [
                     name for name, done in (("YouTube", youtube_done), ("Instagram", instagram_done)) if not done
@@ -606,8 +642,8 @@ def update_viral_memory(headless: bool = True) -> int:
     if matched or len(pruned_memory) != len(memory):
         save_viral_memory(pruned_memory)
 
-    for clip_id in newly_reconfirmed:
-        _delete_confirmed_upload(clip_id)
+    for clip_id, clip_metadata in newly_reconfirmed:
+        _delete_confirmed_upload(clip_id, clip_metadata)
 
     logger.info(
         "Matched %d/%d uploaded clip(s) (TikTok rows: %d, YouTube stats: %d)",

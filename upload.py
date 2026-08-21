@@ -245,6 +245,42 @@ def _append_shorts_tag(text: str, max_length: Optional[int] = None) -> str:
     return f"{text[:available].rstrip()} {SHORTS_TAG}"
 
 
+def _find_recent_upload_by_title(youtube, title: str, lookback: int = 10) -> Optional[str]:
+    """Checks the channel's own uploads playlist for a video whose title exactly matches —
+    used to verify whether an upload that raised locally actually succeeded server-side
+    before the caller assumes it failed and retries, which would otherwise risk posting the
+    exact same clip a second time (2026-08-21, account-owner request: "verify the remote
+    state before retrying so the exact same clip is never posted twice").
+
+    YouTube's resumable upload can fail AFTER the video bytes are fully received but before
+    the response confirming the new video's id reaches this process (a network blip on the
+    final chunk, a timeout waiting for the acknowledgement) — from here, that is
+    indistinguishable from a genuine failure where nothing was ever created. Only the channel
+    itself can say which one actually happened.
+
+    Only checks the most recent `lookback` uploads (cheap: two small API list calls, not a
+    video insert) — a real duplicate risk is always near the front of the channel's own
+    upload history, never buried in it. Best-effort: any failure here (including no channel
+    found) returns None rather than raising, so a verification problem never masks the
+    original error the caller is already handling."""
+    try:
+        channels_response = youtube.channels().list(mine=True, part="contentDetails").execute()
+        items = channels_response.get("items", [])
+        if not items:
+            return None
+        uploads_playlist_id = items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+        playlist_response = youtube.playlistItems().list(
+            playlistId=uploads_playlist_id, part="snippet", maxResults=lookback,
+        ).execute()
+        for item in playlist_response.get("items", []):
+            snippet = item.get("snippet", {})
+            if snippet.get("title") == title:
+                return snippet.get("resourceId", {}).get("videoId")
+    except Exception as e:
+        logger.warning("Could not verify remote YouTube upload state for title %r: %s", title, e)
+    return None
+
+
 def upload_clip(
     video_path: Path,
     title: str,
@@ -288,11 +324,26 @@ def upload_clip(
     request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
 
     logger.info("Uploading %s to YouTube as '%s' (privacy=%s)", video_path.name, final_title, privacy_status)
-    response = None
-    while response is None:
-        status, response = request.next_chunk()
-        if status:
-            logger.info("YouTube upload progress for %s: %d%%", video_path.name, int(status.progress() * 100))
+    try:
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status:
+                logger.info("YouTube upload progress for %s: %d%%", video_path.name, int(status.progress() * 100))
+    except Exception as e:
+        # The upload call itself raised — see _find_recent_upload_by_title()'s own docstring
+        # for why that alone doesn't mean nothing was created. Check before letting the
+        # caller's own retry logic (upload_manager.py) run again on this exact clip.
+        existing_id = _find_recent_upload_by_title(youtube, final_title)
+        if existing_id:
+            logger.warning(
+                "Upload request for %s raised (%s), but a video titled %r already exists on "
+                "the channel (id=%s) — treating this as the real success it apparently was, "
+                "not re-raising for a retry that would post it a second time.",
+                video_path.name, e, final_title, existing_id,
+            )
+            return existing_id
+        raise
 
     video_id = response["id"]
     logger.info("Uploaded %s to YouTube -> https://youtu.be/%s", video_path.name, video_id)

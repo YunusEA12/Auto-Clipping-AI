@@ -27,6 +27,7 @@ import pytest
 
 import upload
 import upload_instagram_playwright
+import upload_ledger
 
 
 class RealYouTubeCallBlocked(RuntimeError):
@@ -72,6 +73,21 @@ def _block_real_instagram_calls(monkeypatch):
             "tests/test_upload_manager.py's Instagram-gating tests for the pattern."
         )
     monkeypatch.setattr(upload_instagram_playwright, "upload_video", _raise)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_upload_ledger(tmp_path, monkeypatch):
+    """upload_ledger.py's LEDGER_PATH defaults to the real repo-root upload_ledger.json —
+    without this, tests across DIFFERENT files that happen to write the same placeholder video
+    bytes (e.g. b"fake video bytes", used in several test files) would hash to the exact same
+    content_hash and silently see each other's "done"/"pending" ledger entries, making one
+    test's clip look already-uploaded to another. Found live, 2026-08-21, the same day the
+    ledger was introduced: test_auto_pilot_deployment_gating.py's own
+    test_unconfirmed_upload_stays_in_output_for_retry started failing because an unrelated
+    test elsewhere in the suite had already marked that exact byte content as a "done" TikTok
+    upload in the shared real ledger file. tmp_path is unique per test function, so this
+    isolation is automatic and total — no test needs to think about it."""
+    monkeypatch.setattr(upload_ledger, "LEDGER_PATH", tmp_path / "upload_ledger.json")
 
 
 @pytest.fixture(autouse=True)
