@@ -1,8 +1,14 @@
-"""2026-08-19: dynamic layout switching — full_cam (single face filling most of the frame,
-e.g. Just-Chatting-style content), split_screen (a small corner webcam box over a much
-bigger gameplay area, still exactly one face), or blur_background (zero or multiple faces).
-Face count alone can't tell full_cam and split_screen apart since both are "one face" —
-face_area_ratio is the second signal that does."""
+"""2026-08-19: dynamic layout switching — full_cam (a face filling most of the frame, e.g.
+Just-Chatting-style content), split_screen (a small corner webcam box over a much bigger
+gameplay area), or blur_background (zero confident faces at all — nothing to crop toward).
+Face count alone can't tell full_cam and split_screen apart since both can have the SAME
+face_count — face_area_ratio is the second signal that does.
+
+2026-08-21: the full_cam/split_screen decision now runs off the primary (highest-scoring)
+face whenever face_count >= 1, not just when it's exactly 1 — see resolve_layout()'s own
+docstring for why (a real Fortnite clip's confident corner facecam plus a confident-enough
+kill-cam/character portrait used to land on face_count=2 and get discarded into
+blur_background instead of split_screen)."""
 
 from pathlib import Path
 
@@ -25,11 +31,26 @@ def test_resolve_layout_no_faces_falls_back_to_blur(monkeypatch):
     assert process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0) == process.LAYOUT_BLUR_BACKGROUND
 
 
-def test_resolve_layout_multiple_faces_falls_back_to_blur(monkeypatch):
+def test_resolve_layout_multiple_confident_faces_still_uses_the_primary_one(monkeypatch):
+    # 2026-08-21: changed from falling back to blur_background on any face_count != 1 — a
+    # second confident detection in this pipeline's actual content (solo Twitch gaming clips)
+    # is far more often a game-HUD/kill-cam false positive than a real second person, so a
+    # small off-center primary box now still resolves to split_screen instead of being
+    # discarded (found live: a real Fortnite clip's corner facecam plus a confident kill-cam
+    # portrait used to do exactly this).
+    box = (0, 0, 100, 100)  # small + off-center on a 1920x1080 frame -> split_screen
     monkeypatch.setattr(
-        process.vision, "detect_faces_for_layout", lambda *a, **k: (2, (0, 0, 100, 100), 1920, 1080),
+        process.vision, "detect_faces_for_layout", lambda *a, **k: (2, box, 1920, 1080),
     )
-    assert process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0) == process.LAYOUT_BLUR_BACKGROUND
+    assert process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0) == process.LAYOUT_SPLIT_SCREEN
+
+
+def test_resolve_layout_multiple_confident_faces_with_large_primary_is_full_cam(monkeypatch):
+    # Same face_count=2 scenario, other branch: a large/centered primary box still resolves
+    # to full_cam even with a second confident detection alongside it.
+    box = (0, 0, 600, 600)  # 0.36 of a 1000x1000 frame, above the default 0.28 threshold
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", lambda *a, **k: (2, box, 1000, 1000))
+    assert process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0) == process.LAYOUT_FULL_CAM
 
 
 def test_resolve_layout_one_face_large_ratio_is_full_cam(monkeypatch):

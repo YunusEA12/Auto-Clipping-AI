@@ -759,16 +759,27 @@ LAYOUT_RETRY_FRACTIONS = (1 / 3, 2 / 3)
 
 
 def resolve_layout(layout: str, video_path: Path, clip_start: float, clip_end: float | None = None) -> str:
-    """Three-way auto-layout decision (2026-08-19, replacing a plain face-present/absent
-    binary): zero or multiple faces both fall back to blur_background — zero because there's
-    nothing to crop toward, multiple because a single static crop can't represent several
-    people (guests present) without arbitrarily picking one. Exactly one face still needs a
-    second signal to choose between full_cam and split_screen, since a face can be "one face"
-    whether it's a close-up filling the whole frame or a small corner webcam box over a much
-    bigger gameplay area — face_area_ratio (how much of the SOURCE frame the raw box covers)
-    is that second signal.
+    """Three-way auto-layout decision: blur_background only when NO face clears
+    vision.FACE_COUNT_MIN_CONFIDENCE at all — there's nothing to crop toward. Any confident
+    face count >= 1 goes to the full_cam/split_screen decision below, keyed off the PRIMARY
+    (highest-scoring) detection's area/position; face_area_ratio (how much of the SOURCE frame
+    the raw box covers) and its horizontal centering tell a close-up/full-cam subject (a
+    Just-Chatting-style stream where the whole frame IS the person) apart from a small corner
+    webcam box over a separate gameplay feed (traditional split-screen streaming layout).
 
-    A face_count != 1 result is retried at a couple more timestamps within the clip (when
+    2026-08-21, changed from a strict face_count == 1 gate (found live: a real single-webcam
+    Fortnite clip has a confident corner facecam AND a confident-enough kill-cam/character
+    portrait alongside it — vision.py's 0.65 confidence floor already filters out weaker HUD
+    icons, but realistic in-game character faces can still clear that bar, landing on
+    face_count=2 and discarding a perfectly good corner-cam detection into blur_background).
+    Trade-off, accepted deliberately: a genuine multi-person stream (a real second guest, not
+    a game-content false positive) now also resolves off the single highest-scoring face
+    instead of falling back to blur_background — for this pipeline's actual content (solo
+    Twitch gaming clips), a confident non-webcam detection is far more often a game-HUD false
+    positive than a real second person, so biasing toward "use the best face found" rather
+    than "blur on any ambiguity" is the better default here.
+
+    A face_count == 0 result is retried at a couple more timestamps within the clip (when
     `clip_end` is given) before falling back to blur_background — see LAYOUT_RETRY_FRACTIONS.
     """
     if layout != LAYOUT_AUTO:
@@ -795,12 +806,12 @@ def resolve_layout(layout: str, video_path: Path, clip_start: float, clip_end: f
             logger.warning("Auto-layout at %.2fs: could not read frame at %.2fs (%s) — trying next timestamp", clip_start, ts, e)
             face_count, raw_box, frame_w, frame_h = 0, None, 0, 0
             continue
-        if face_count == 1:
+        if face_count >= 1:
             if attempt > 0:
-                logger.info("Auto-layout at %.2fs: face_count=1 found on retry at %.2fs", clip_start, ts)
+                logger.info("Auto-layout at %.2fs: face_count=%d found on retry at %.2fs", clip_start, face_count, ts)
             break
 
-    if face_count == 1:
+    if face_count >= 1:
         ratio = vision.face_area_ratio(raw_box, frame_w, frame_h)
         center_x_ratio = vision.face_center_x_ratio(raw_box, frame_w)
         is_centered = CENTRAL_FACE_X_MIN_RATIO <= center_x_ratio <= CENTRAL_FACE_X_MAX_RATIO
@@ -809,15 +820,15 @@ def resolve_layout(layout: str, video_path: Path, clip_start: float, clip_end: f
             else LAYOUT_SPLIT_SCREEN
         )
         logger.info(
-            "Auto-layout at %.2fs: face_count=1, face_area_ratio=%.3f (threshold %.2f), "
+            "Auto-layout at %.2fs: face_count=%d, face_area_ratio=%.3f (threshold %.2f), "
             "face_center_x_ratio=%.3f (centered=%s) -> %s",
-            clip_start, ratio, FULL_CAM_MIN_FACE_AREA_RATIO, center_x_ratio, is_centered, resolved,
+            clip_start, face_count, ratio, FULL_CAM_MIN_FACE_AREA_RATIO, center_x_ratio, is_centered, resolved,
         )
     else:
         resolved = LAYOUT_BLUR_BACKGROUND
         logger.info(
-            "Auto-layout at %.2fs: face_count=%d after %d attempt(s) -> %s",
-            clip_start, face_count, len(timestamps), resolved,
+            "Auto-layout at %.2fs: face_count=0 after %d attempt(s) -> %s",
+            clip_start, len(timestamps), resolved,
         )
 
     return resolved
