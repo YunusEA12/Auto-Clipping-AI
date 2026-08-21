@@ -16,8 +16,15 @@ import upload_manager
 
 
 class FakeHttpResponse:
-    def __init__(self, status):
+    def __init__(self, status, reason=""):
         self.status = status
+        # HttpError.__init__ -> _get_reason() unconditionally reads self.resp.reason before
+        # ever looking at the JSON content, real googleapiclient responses always have this
+        # (found in review, 2026-08-21: without it, HttpError's own constructor raised
+        # AttributeError before ever producing a usable HttpError, and every test using this
+        # fixture was silently passing for the wrong reason — any exception, not specifically
+        # a correctly-detected HttpError, still made the assertions' `success is False` true).
+        self.reason = reason
 
 
 def _make_http_error(status, message=b"error"):
@@ -142,6 +149,81 @@ def test_youtube_non_quota_http_error_does_not_raise(monkeypatch, fake_tiktok_su
     result = upload_manager.upload_clip_everywhere(Path("clip.mp4"), "Title", "desc", publish=True)
 
     assert result.youtube.success is False
+
+
+# --- uploadLimitExceeded backoff (2026-08-21, found live: this specific channel-level daily
+# cap error has HTTP status 400 and no "quota" substring in its message, so the existing
+# quota_exceeded check never matched it — every upload attempt (first try and every automatic
+# retry cycle, every few minutes) kept hammering the API with zero backoff) --------------------
+
+UPLOAD_LIMIT_ERROR = (
+    b'{"error": {"errors": [{"reason": "uploadLimitExceeded"}], '
+    b'"message": "The user has exceeded the number of videos they may upload."}}'
+)
+
+
+def test_upload_limit_exceeded_records_backoff_and_does_not_raise(monkeypatch, tmp_path, fake_tiktok_success):
+    monkeypatch.setattr(upload_manager, "UPLOAD_LIMIT_BACKOFF_PATH", tmp_path / "backoff.json")
+
+    def boom(*a, **k):
+        raise _make_http_error(400, UPLOAD_LIMIT_ERROR)
+    monkeypatch.setattr(youtube_uploader, "upload_clip", boom)
+
+    result = upload_manager.upload_clip_everywhere(Path("clip.mp4"), "Title", "desc", publish=True)
+
+    assert result.youtube.success is False
+    assert result.youtube.attempted is True
+    assert upload_manager._upload_limit_backoff_until() is not None
+
+
+def test_second_attempt_during_backoff_skips_the_real_api_call(monkeypatch, tmp_path, fake_tiktok_success):
+    monkeypatch.setattr(upload_manager, "UPLOAD_LIMIT_BACKOFF_PATH", tmp_path / "backoff.json")
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise _make_http_error(400, UPLOAD_LIMIT_ERROR)
+    monkeypatch.setattr(youtube_uploader, "upload_clip", boom)
+
+    upload_manager.upload_clip_everywhere(Path("clip_1.mp4"), "Title", "desc", publish=True)
+    assert len(calls) == 1  # first attempt: real call, hits the limit, records backoff
+
+    result = upload_manager.upload_clip_everywhere(Path("clip_2.mp4"), "Title", "desc", publish=True)
+    assert len(calls) == 1  # second attempt: skipped entirely, no new API call
+    assert result.youtube.attempted is False
+    assert result.youtube.success is False
+
+
+def test_backoff_clears_after_the_window_elapses(monkeypatch, tmp_path, fake_tiktok_success):
+    backoff_path = tmp_path / "backoff.json"
+    monkeypatch.setattr(upload_manager, "UPLOAD_LIMIT_BACKOFF_PATH", backoff_path)
+    stale_seen_at = upload_manager.datetime.now(upload_manager.timezone.utc) - upload_manager.timedelta(
+        minutes=upload_manager.UPLOAD_LIMIT_BACKOFF_MINUTES + 1
+    )
+    backoff_path.write_text(f'{{"seen_at": "{stale_seen_at.isoformat()}"}}', encoding="utf-8")
+
+    assert upload_manager._upload_limit_backoff_until() is None
+
+    monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-video-id")
+    result = upload_manager.upload_clip_everywhere(Path("clip.mp4"), "Title", "desc", publish=True)
+
+    assert result.youtube.attempted is True
+    assert result.youtube.success is True
+
+
+def test_quota_exceeded_and_upload_limit_exceeded_are_detected_distinctly(monkeypatch, tmp_path, fake_tiktok_success):
+    # A 403 quotaExceeded must NOT be mistaken for the 400 uploadLimitExceeded case -- they
+    # need different handling (quota resets are a Google Cloud project concern, not this
+    # channel's own daily cap) and must not share the same backoff state.
+    monkeypatch.setattr(upload_manager, "UPLOAD_LIMIT_BACKOFF_PATH", tmp_path / "backoff.json")
+
+    def boom(*a, **k):
+        raise _make_http_error(403, b'{"error": {"errors": [{"reason": "quotaExceeded"}]}}')
+    monkeypatch.setattr(youtube_uploader, "upload_clip", boom)
+
+    upload_manager.upload_clip_everywhere(Path("clip.mp4"), "Title", "desc", publish=True)
+
+    assert upload_manager._upload_limit_backoff_until() is None
 
 
 # --- MultiPlatformOutcome.any_success ----------------------------------------------------------

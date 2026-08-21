@@ -26,14 +26,17 @@ Design choices, and why:
   to YouTube afterward. Mirrors tiktok_uploader.try_upload_clip()'s own "never raises, always
   returns an outcome" contract, just one level up."""
 
+import json
 import logging
 import random
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, NamedTuple, Optional
 
 from googleapiclient.errors import HttpError
 
+import atomic_io
 import tiktok_uploader
 import upload as youtube_uploader
 
@@ -41,6 +44,46 @@ import logging_setup
 
 logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
+
+# YouTube's channel-level daily upload cap (HttpError 400, reason "uploadLimitExceeded") is a
+# completely different failure from the 403 API-quota case just below — it's an account-wide
+# ceiling on how many videos the channel may publish per rolling day, not a per-request rate
+# limit, and it doesn't clear by trying again a few minutes later. Found live, 2026-08-21:
+# with no detection for this specific reason, every upload attempt (first try AND every
+# automatic retry_missing_youtube_uploads() cycle, every ~3-7 minutes) kept hammering the API
+# and logging an undifferentiated generic error, with no backoff and no indication of when
+# it might actually clear.
+UPLOAD_LIMIT_BACKOFF_PATH = Path("youtube_upload_backoff.json")
+UPLOAD_LIMIT_BACKOFF_MINUTES = 60
+
+
+def _read_upload_limit_seen_at() -> Optional[datetime]:
+    if not UPLOAD_LIMIT_BACKOFF_PATH.exists():
+        return None
+    try:
+        data = json.loads(UPLOAD_LIMIT_BACKOFF_PATH.read_text(encoding="utf-8"))
+        return datetime.fromisoformat(data["seen_at"])
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def _record_upload_limit_hit() -> None:
+    atomic_io.atomic_write_json(
+        UPLOAD_LIMIT_BACKOFF_PATH, {"seen_at": datetime.now(timezone.utc).isoformat()}
+    )
+
+
+def _upload_limit_backoff_until() -> Optional[datetime]:
+    """None if we're clear to try YouTube uploads; otherwise the timestamp backoff clears at.
+    Best-effort: a corrupt/unreadable backoff file reads as "not backing off" rather than
+    permanently blocking uploads — same fail-open bias as this module's other state reads."""
+    seen_at = _read_upload_limit_seen_at()
+    if seen_at is None:
+        return None
+    clears_at = seen_at + timedelta(minutes=UPLOAD_LIMIT_BACKOFF_MINUTES)
+    if datetime.now(timezone.utc) >= clears_at:
+        return None
+    return clears_at
 
 # Random pacing delay between the TikTok and YouTube upload attempts (2026-08-20, explicit
 # account-owner request) — staggers the two platforms' API/network traffic instead of firing
@@ -83,15 +126,37 @@ def _upload_to_youtube(
         logger.info("publish=False — skipping YouTube upload for %s (same no-op as TikTok)", video_path.name)
         return YouTubeOutcome(attempted=False, success=False, detail="publish=False, skipped")
 
+    backoff_until = _upload_limit_backoff_until()
+    if backoff_until is not None:
+        logger.info(
+            "Skipping YouTube upload for %s — still backing off after hitting the channel's "
+            "daily upload cap (uploadLimitExceeded); next attempt after %s.",
+            video_path.name, backoff_until.isoformat(),
+        )
+        return YouTubeOutcome(attempted=False, success=False, detail="uploadLimitExceeded backoff")
+
     try:
         video_id = youtube_uploader.upload_clip(video_path, title, description, tags)
     except HttpError as e:
-        quota_exceeded = e.resp.status == 403 and "quota" in str(e).lower()
-        if quota_exceeded:
+        error_text = str(e)
+        upload_limit_exceeded = e.resp.status == 400 and "uploadLimitExceeded" in error_text
+        quota_exceeded = e.resp.status == 403 and "quota" in error_text.lower()
+        if upload_limit_exceeded:
+            _record_upload_limit_hit()
+            resumes_at = datetime.now(timezone.utc) + timedelta(minutes=UPLOAD_LIMIT_BACKOFF_MINUTES)
+            logger.error(
+                "YouTube channel daily upload cap hit for %s — an account-level limit "
+                "(uploadLimitExceeded), not a token/API-quota problem; YouTube's own docs "
+                "describe this as resetting on a rolling ~24h basis, not fixed to midnight. "
+                "Backing off further YouTube attempts until %s instead of retrying every "
+                "cycle (retries against this exact error already observed live, 2026-08-21).",
+                video_path.name, resumes_at.isoformat(),
+            )
+        elif quota_exceeded:
             logger.error("YouTube API quota exceeded — could not upload %s: %s", video_path.name, e)
         else:
             logger.error("YouTube upload failed for %s: %s", video_path.name, e)
-        return YouTubeOutcome(attempted=True, success=False, detail=str(e))
+        return YouTubeOutcome(attempted=True, success=False, detail=error_text)
     except Exception as e:
         # Anything else (OAuth/token problem, network failure, a missing client_secret.json)
         # — never let a YouTube-side problem take down the cycle that's also reporting the
