@@ -156,3 +156,71 @@ Hintergrundmusik wird jetzt direkt beim Rendern in `process.py` gemischt (ffmpeg
 `amix`/`volume`, siehe `build_audio_filter()`) — kein Browser, keine Google-Session-Cookies,
 kein Studio-UI-Risiko. Tracks liegen in `background_music/` (siehe dortige README); die
 Pipeline wählt bei jedem Render zufällig einen aus, sofern welche vorhanden sind.
+
+---
+
+# Instagram Reels Auto-Upload — config/instagram_cookies.json einrichten
+
+`upload_instagram_playwright.py` (und darüber `upload_manager.py`, `auto_pilot.py --instagram`)
+spiegelt exakt dieselbe Architektur wie `tiktok_uploader.py`: ein echter Browser (Playwright),
+authentifiziert per eingeschleuster Session-Cookies, statt der offiziellen Meta Graph API —
+deren App-Review-/Business-Verification-Aufwand für dieses Projekt als zu hoch eingestuft wurde
+(2026-08-21, explizite Entscheidung des Account-Besitzers).
+
+**⚠️ Wichtiger als bei TikTok:** Meta verfolgt automatisierte Session-Nutzung nachweislich
+aggressiver als die meisten Plattformen — dieselbe Abwägung, die bereits die YouTube-Studio-
+Automatisierung oben zu Fall gebracht hat (dort kamen die Cookies nicht einmal über Googles
+Login-Seite hinaus, vermutlich IP-Bindung). Ob Instagrams Session-Cookies sich genauso
+verhalten, ist **ungetestet** — das ist erst nach einem echten `--headed`-Testlauf bekannt, nicht
+vorher. `config/instagram_cookies.json` enthält echte Instagram-Session-Cookies — gleichbedeutend
+mit einem Passwort für den Account. Niemals committen (bereits in `.gitignore`), niemals teilen.
+
+## So bekommst du deine Cookies
+
+Genau wie `get_cookies.py` für TikTok — kein Playwright-Login-Fenster, keine automatisierte
+Anmeldung, nur ein Auslesen deiner bereits bestehenden, ganz normal erzeugten Session:
+
+```
+python setup_instagram_cookies.py
+```
+
+Voraussetzung: Du bist in Chrome, Edge oder Firefox bereits bei instagram.com eingeloggt.
+Schließe den jeweiligen Browser (oder zumindest den Instagram-Tab) vorher. Einen bestimmten
+Browser erzwingst du mit `python setup_instagram_cookies.py --browser edge`.
+
+## Testen — zwingend vor dem unbeaufsichtigten Einsatz
+
+Die Selektoren in `upload_instagram_playwright.py` wurden **noch nie gegen eine echte,
+laufende Instagram-Session getestet** (siehe UNVERIFIED SELECTORS im Modul-Docstring) — anders
+als `tiktok_uploader.py`, dessen Selektoren einmal live verifiziert wurden. Vor jedem
+Live-Einsatz zwingend:
+
+```
+python upload_instagram_playwright.py <CLIP.mp4> --description "..." --publish --headed
+```
+
+Gegen ein echtes (im Idealfall unwichtiges/löschbares) Test-Reel, mit sichtbarem Browserfenster
+— beobachte, ob der Upload-Dialog korrekt geöffnet wird, ob die Datei hochlädt, ob die Caption
+gefüllt wird und ob "Share" wirklich veröffentlicht. Erwarte, dass Selektoren angepasst werden
+müssen, bevor das zuverlässig funktioniert.
+
+## Aktivierung pro Streamer
+
+Instagram ist standardmäßig für **jeden** Streamer deaktiviert, auch wenn `publish: true`
+bereits gesetzt ist — ein separates, bewusstes Opt-in in `streamers.json`:
+
+```json
+{"name": "beispiel", "url": "...", "auto_upload": true, "publish": true, "instagram": true}
+```
+
+Erst nach einem erfolgreichen `--headed`-Testlauf setzen. `orchestrator.py` reicht `--instagram`
+nur durch, wenn sowohl `publish` als auch `instagram` gesetzt sind (siehe
+`build_auto_pilot_cmd()`).
+
+## Löschschutz
+
+Der Löschschutz in `metrics_tracker.py` (lokale Datei bleibt erhalten, bis alle aktivierten
+Plattformen wirklich hochgeladen haben — siehe dessen eigene Kommentare zur ursprünglichen
+YouTube-Version dieses Schutzes) gilt jetzt auch für Instagram: eine lokale Datei wird erst
+gelöscht, wenn YouTube (falls `publish: true`) UND Instagram (falls `instagram: true`)
+tatsächlich hochgeladen haben — nicht nur TikTok.

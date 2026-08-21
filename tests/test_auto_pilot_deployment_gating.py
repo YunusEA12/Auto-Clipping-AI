@@ -5,6 +5,8 @@ version of this codebase wrongly assumed the opposite). Phase 5 (Deployment) mus
 require an explicit publish=True, not just auto_upload=True, or it silently wastes every
 upload attempt for nothing."""
 
+import json
+
 import pytest
 
 import auto_pilot
@@ -91,3 +93,53 @@ def test_confirmed_upload_moves_to_uploaded_clips(tmp_path, monkeypatch):
     assert failed == 0
     assert not output_path.exists()
     assert (tmp_path / "uploaded_clips" / "clip_1_Test.mp4").exists()
+
+
+# --- Instagram integration (2026-08-21) — a separate opt-in from publish itself, since
+# upload_instagram_playwright.py's automation has never been verified against a live session
+# (see that module's own docstring); defaults off for every streamer regardless of publish. ---
+
+def test_instagram_not_attempted_when_flag_omitted(tmp_path, monkeypatch):
+    monkeypatch.setattr(auto_pilot, "UPLOADED_CLIPS_DIR", tmp_path / "uploaded_clips")
+    monkeypatch.setattr(
+        auto_pilot.tiktok_uploader, "try_upload_clip",
+        lambda *a, **k: auto_pilot.tiktok_uploader.UploadOutcome(success=True, confirmed=True),
+    )
+    called = []
+    monkeypatch.setattr(
+        upload_manager.instagram_uploader, "try_upload_clip",
+        lambda *a, **k: called.append(1),
+    )
+
+    output_path = tmp_path / "clip_1_Test.mp4"
+    output_path.write_bytes(b"fake video bytes")
+    clip = {"title": "Test", "description": "desc", "hashtags": ["#fyp"], "viral_score": 8}
+
+    auto_pilot.run_deployment_phase([(clip, output_path, 3)], publish=True)  # instagram defaults False
+
+    assert called == []
+    sidecar = json.loads((tmp_path / "uploaded_clips" / "clip_1_Test.json").read_text(encoding="utf-8"))
+    assert sidecar["instagram_enabled"] is False
+    assert sidecar["instagram_uploaded"] is False
+
+
+def test_instagram_attempted_and_recorded_when_flag_set(tmp_path, monkeypatch):
+    monkeypatch.setattr(auto_pilot, "UPLOADED_CLIPS_DIR", tmp_path / "uploaded_clips")
+    monkeypatch.setattr(
+        auto_pilot.tiktok_uploader, "try_upload_clip",
+        lambda *a, **k: auto_pilot.tiktok_uploader.UploadOutcome(success=True, confirmed=True),
+    )
+    monkeypatch.setattr(
+        upload_manager.instagram_uploader, "try_upload_clip",
+        lambda *a, **k: upload_manager.instagram_uploader.UploadOutcome(success=True, confirmed=True),
+    )
+
+    output_path = tmp_path / "clip_1_Test.mp4"
+    output_path.write_bytes(b"fake video bytes")
+    clip = {"title": "Test", "description": "desc", "hashtags": ["#fyp"], "viral_score": 8}
+
+    auto_pilot.run_deployment_phase([(clip, output_path, 3)], publish=True, instagram=True)
+
+    sidecar = json.loads((tmp_path / "uploaded_clips" / "clip_1_Test.json").read_text(encoding="utf-8"))
+    assert sidecar["instagram_enabled"] is True
+    assert sidecar["instagram_uploaded"] is True

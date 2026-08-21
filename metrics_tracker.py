@@ -584,14 +584,22 @@ def update_viral_memory(headless: bool = True) -> int:
             # (at the time) exhausted account upload quota, deleting the local .mp4 seconds
             # before a subsequent retry would otherwise have succeeded once that quota
             # cleared. Gated on youtube_uploaded now (or publish=False, meaning YouTube was
-            # never attempted for this clip at all) — found in review.
-            if updated.get("youtube_uploaded") or not updated.get("publish"):
+            # never attempted for this clip at all) — found in review. Extended the same
+            # day to Instagram (instagram_uploaded, or instagram_enabled=False meaning this
+            # streamer never had Instagram turned on for this clip) once that platform was
+            # added — same reasoning, same failure mode either platform's retry could
+            # otherwise be denied.
+            youtube_done = updated.get("youtube_uploaded") or not updated.get("publish")
+            instagram_done = updated.get("instagram_uploaded") or not updated.get("instagram_enabled")
+            if youtube_done and instagram_done:
                 newly_reconfirmed.append(clip_id)
             else:
+                pending = [
+                    name for name, done in (("YouTube", youtube_done), ("Instagram", instagram_done)) if not done
+                ]
                 logger.info(
-                    "'%s' reconfirmed on TikTok but YouTube hasn't succeeded yet — keeping "
-                    "the local file so retry_missing_youtube_uploads() can still backfill it.",
-                    clip_id,
+                    "'%s' reconfirmed on TikTok but %s hasn't succeeded yet — keeping the "
+                    "local file so it can still be backfilled.", clip_id, " and ".join(pending),
                 )
 
     pruned_memory = prune_viral_memory(memory)

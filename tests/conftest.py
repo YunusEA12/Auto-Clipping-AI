@@ -1,5 +1,6 @@
 """Global test safety net: no test may ever perform a real network/OAuth call to Google's
-YouTube API, or a real multi-second sleep, no matter which module ends up calling into them.
+YouTube API, a real Playwright-driven Instagram upload, or a real multi-second sleep, no
+matter which module ends up calling into them.
 
 Found live, 2026-08-20: two existing tests in test_auto_pilot_deployment_gating.py called
 run_deployment_phase(publish=True) without knowing that function had grown a new YouTube
@@ -9,20 +10,32 @@ video (literally the bytes b"fake video bytes") to the account owner's actual Yo
 channel — and, separately, each test blocked for a real 30-60s sleep (upload_manager's
 pacing delay between platforms) since that wasn't mocked either.
 
-These two autouse fixtures make both mistakes structurally impossible project-wide: real
-calls raise loudly (an immediate, obvious test failure) instead of silently doing something
-real. A test that genuinely needs to exercise the real function bodies overrides these
-explicitly and locally (see tests/test_upload.py's own fake_youtube fixture, and
+The Instagram block below (2026-08-21) is added proactively, before this same mistake has a
+chance to recur — upload_manager.py's Instagram leg is exactly the same shape (an
+upload_clip_everywhere(publish=True) call reaching a real browser-automation upload) that
+caused the YouTube incident above, and once config/instagram_cookies.json exists for real, an
+unmocked test here would attempt a real post to the account owner's actual Instagram account.
+
+These autouse fixtures make each mistake structurally impossible project-wide: real calls
+raise loudly (an immediate, obvious test failure) instead of silently doing something real. A
+test that genuinely needs to exercise the real function bodies overrides these explicitly and
+locally (see tests/test_upload.py's own fake_youtube fixture, and
 tests/test_upload_manager.py's _no_real_sleep fixture) — the local override always wins,
 since it's applied later in the same test's setup."""
 
 import pytest
 
 import upload
+import upload_instagram_playwright
 
 
 class RealYouTubeCallBlocked(RuntimeError):
     """Raised instead of ever performing a real Google OAuth/API call during tests."""
+
+
+class RealInstagramCallBlocked(RuntimeError):
+    """Raised instead of ever launching a real Playwright browser against Instagram during
+    tests."""
 
 
 class RealSleepBlocked(RuntimeError):
@@ -47,6 +60,18 @@ def _block_real_youtube_calls(monkeypatch):
             "genuinely needs to exercise that code path."
         )
     monkeypatch.setattr(upload, "get_stats_service", _raise_stats)
+
+
+@pytest.fixture(autouse=True)
+def _block_real_instagram_calls(monkeypatch):
+    def _raise(*args, **kwargs):
+        raise RealInstagramCallBlocked(
+            "A test tried to call upload_instagram_playwright.upload_video() for real. Mock "
+            "upload_instagram_playwright.try_upload_clip() (or .upload_video()) explicitly if "
+            "this test genuinely needs to exercise that code path — see "
+            "tests/test_upload_manager.py's Instagram-gating tests for the pattern."
+        )
+    monkeypatch.setattr(upload_instagram_playwright, "upload_video", _raise)
 
 
 @pytest.fixture(autouse=True)

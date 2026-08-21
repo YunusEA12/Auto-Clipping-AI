@@ -27,6 +27,7 @@ tiktok_client_secret.json
 tiktok_token.json
 tiktok_cookies.json
 cookies.json
+config/instagram_cookies.json
 uploaded_clips/
 gemini_call_budget.json
 youtube_upload_backoff.json

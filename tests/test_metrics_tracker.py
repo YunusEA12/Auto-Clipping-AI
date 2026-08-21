@@ -288,6 +288,93 @@ def test_update_viral_memory_deletes_when_publish_false_youtube_never_applicable
     assert not (uploaded_dir / "clip_1.json").exists()
 
 
+# --- same guard extended to Instagram (2026-08-21) — instagram_enabled distinguishes "this
+# streamer never had Instagram turned on for this clip" (deletion proceeds) from "Instagram
+# was enabled but hasn't succeeded yet" (keep the file), same reasoning as youtube_uploaded/
+# publish above ------------------------------------------------------------------------------
+
+def test_update_viral_memory_keeps_local_file_when_instagram_enabled_but_not_yet_uploaded(tmp_path, monkeypatch):
+    uploaded_dir = tmp_path / "uploaded_clips"
+    uploaded_dir.mkdir()
+    monkeypatch.setattr(metrics_tracker, "UPLOADED_CLIPS_DIR", uploaded_dir)
+    monkeypatch.setattr(metrics_tracker, "VIRAL_MEMORY_PATH", tmp_path / "viral_memory.json")
+    monkeypatch.setattr(metrics_tracker, "SCRAPE_HEALTH_PATH", tmp_path / "health.json")
+
+    (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
+    (uploaded_dir / "clip_1.json").write_text(
+        json.dumps({
+            "caption": "hello world #fyp", "publish": True, "youtube_uploaded": True,
+            "instagram_enabled": True, "instagram_uploaded": False,
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        metrics_tracker, "fetch_content_list",
+        lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
+    )
+
+    metrics_tracker.update_viral_memory()
+    metrics_tracker.update_viral_memory()
+
+    # YouTube done, but Instagram enabled and not yet uploaded -- must survive.
+    assert (uploaded_dir / "clip_1.mp4").exists()
+    assert (uploaded_dir / "clip_1.json").exists()
+
+
+def test_update_viral_memory_deletes_once_youtube_and_instagram_both_done(tmp_path, monkeypatch):
+    uploaded_dir = tmp_path / "uploaded_clips"
+    uploaded_dir.mkdir()
+    monkeypatch.setattr(metrics_tracker, "UPLOADED_CLIPS_DIR", uploaded_dir)
+    monkeypatch.setattr(metrics_tracker, "VIRAL_MEMORY_PATH", tmp_path / "viral_memory.json")
+    monkeypatch.setattr(metrics_tracker, "SCRAPE_HEALTH_PATH", tmp_path / "health.json")
+
+    (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
+    (uploaded_dir / "clip_1.json").write_text(
+        json.dumps({
+            "caption": "hello world #fyp", "publish": True, "youtube_uploaded": True,
+            "instagram_enabled": True, "instagram_uploaded": True,
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        metrics_tracker, "fetch_content_list",
+        lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
+    )
+
+    metrics_tracker.update_viral_memory()
+    metrics_tracker.update_viral_memory()
+
+    assert not (uploaded_dir / "clip_1.mp4").exists()
+    assert not (uploaded_dir / "clip_1.json").exists()
+
+
+def test_update_viral_memory_deletes_when_instagram_never_enabled_for_this_clip(tmp_path, monkeypatch):
+    # instagram_enabled missing/False means this streamer never had Instagram on for this
+    # clip -- exactly like publish=False for YouTube, that leg is simply not applicable and
+    # must not block deletion once the applicable legs (YouTube here) are done.
+    uploaded_dir = tmp_path / "uploaded_clips"
+    uploaded_dir.mkdir()
+    monkeypatch.setattr(metrics_tracker, "UPLOADED_CLIPS_DIR", uploaded_dir)
+    monkeypatch.setattr(metrics_tracker, "VIRAL_MEMORY_PATH", tmp_path / "viral_memory.json")
+    monkeypatch.setattr(metrics_tracker, "SCRAPE_HEALTH_PATH", tmp_path / "health.json")
+
+    (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
+    (uploaded_dir / "clip_1.json").write_text(
+        json.dumps({"caption": "hello world #fyp", "publish": True, "youtube_uploaded": True}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        metrics_tracker, "fetch_content_list",
+        lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
+    )
+
+    metrics_tracker.update_viral_memory()
+    metrics_tracker.update_viral_memory()
+
+    assert not (uploaded_dir / "clip_1.mp4").exists()
+    assert not (uploaded_dir / "clip_1.json").exists()
+
+
 def test_update_viral_memory_never_deletes_an_unmatched_clip(tmp_path, monkeypatch):
     uploaded_dir = tmp_path / "uploaded_clips"
     uploaded_dir.mkdir()

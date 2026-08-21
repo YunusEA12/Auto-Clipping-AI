@@ -12,6 +12,7 @@ from googleapiclient.errors import HttpError
 
 import tiktok_uploader
 import upload as youtube_uploader
+import upload_instagram_playwright as instagram_uploader
 import upload_manager
 
 
@@ -272,3 +273,93 @@ def test_add_background_sound_flag_passed_through_to_tiktok(monkeypatch, fake_ti
         Path("clip.mp4"), "Title", "desc", publish=False, add_background_sound=False,
     )
     assert calls[0]["add_background_sound"] is False
+
+
+# --- Instagram gating (2026-08-21) — a separate opt-in from publish itself, since
+# upload_instagram_playwright.py's automation has never been verified against a live session
+# (see that module's own docstring): instagram_enabled must default False and require BOTH
+# publish=True and instagram_enabled=True before the real automation is ever touched --------
+
+def test_instagram_not_attempted_when_disabled_even_with_publish_true(monkeypatch, fake_tiktok_success):
+    monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
+    called = []
+    monkeypatch.setattr(instagram_uploader, "try_upload_clip", lambda *a, **k: called.append(1))
+
+    result = upload_manager.upload_clip_everywhere(Path("clip.mp4"), "Title", "desc", publish=True)  # instagram_enabled defaults False
+
+    assert called == []
+    assert result.instagram.attempted is False
+    assert result.instagram.success is False
+
+
+def test_instagram_not_attempted_when_publish_false_even_if_enabled(monkeypatch, fake_tiktok_success):
+    called = []
+    monkeypatch.setattr(instagram_uploader, "try_upload_clip", lambda *a, **k: called.append(1))
+
+    result = upload_manager.upload_clip_everywhere(
+        Path("clip.mp4"), "Title", "desc", publish=False, instagram_enabled=True,
+    )
+
+    assert called == []
+    assert result.instagram.attempted is False
+
+
+def test_instagram_attempted_when_both_publish_and_enabled_true(monkeypatch, fake_tiktok_success):
+    monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
+    monkeypatch.setattr(
+        instagram_uploader, "try_upload_clip",
+        lambda *a, **k: instagram_uploader.UploadOutcome(success=True, confirmed=True),
+    )
+
+    result = upload_manager.upload_clip_everywhere(
+        Path("clip.mp4"), "Title", "desc", publish=True, instagram_enabled=True,
+    )
+
+    assert result.instagram.attempted is True
+    assert result.instagram.success is True
+    assert result.instagram.confirmed is True
+
+
+def test_instagram_exception_does_not_raise_or_block_other_platforms(monkeypatch, fake_tiktok_success):
+    monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
+
+    def boom(*a, **k):
+        raise RuntimeError("playwright blew up")
+    monkeypatch.setattr(instagram_uploader, "try_upload_clip", boom)
+
+    result = upload_manager.upload_clip_everywhere(
+        Path("clip.mp4"), "Title", "desc", publish=True, instagram_enabled=True,
+    )
+
+    assert result.instagram.success is False
+    assert "playwright blew up" in result.instagram.detail
+    assert result.tiktok.success is True
+    assert result.youtube.success is True
+
+
+def test_any_success_true_when_only_instagram_succeeds(monkeypatch, fake_tiktok_failure):
+    monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
+    monkeypatch.setattr(
+        instagram_uploader, "try_upload_clip",
+        lambda *a, **k: instagram_uploader.UploadOutcome(success=True, confirmed=True),
+    )
+
+    result = upload_manager.upload_clip_everywhere(
+        Path("clip.mp4"), "Title", "desc", publish=True, instagram_enabled=True,
+    )
+
+    assert result.any_success is True
+
+
+def test_any_success_false_when_instagram_succeeds_but_unconfirmed(monkeypatch, fake_tiktok_failure):
+    monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
+    monkeypatch.setattr(
+        instagram_uploader, "try_upload_clip",
+        lambda *a, **k: instagram_uploader.UploadOutcome(success=True, confirmed=False),
+    )
+
+    result = upload_manager.upload_clip_everywhere(
+        Path("clip.mp4"), "Title", "desc", publish=True, instagram_enabled=True,
+    )
+
+    assert result.any_success is False

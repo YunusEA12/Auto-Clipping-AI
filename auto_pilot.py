@@ -402,15 +402,23 @@ def should_deploy(auto_upload: bool, publish: bool, survivors: list) -> bool:
     return bool(auto_upload and publish and survivors)
 
 
-def run_deployment_phase(survivors: List[Tuple[dict, Path, Optional[int]]], publish: bool) -> Tuple[int, int]:
+def run_deployment_phase(
+    survivors: List[Tuple[dict, Path, Optional[int]]], publish: bool, instagram: bool = False,
+) -> Tuple[int, int]:
     """Phase 5 (Deployment): upload every clip that survived Phase 3's purge to every
-    configured platform via upload_manager.py (2026-08-20: TikTok + YouTube Shorts, was
-    TikTok-only through tiktok_uploader.py directly), then move successfully uploaded files
-    out of output/ into uploaded_clips/ to keep it clean. A failed upload just leaves that
-    clip in output/ for a future opportunity — it never stops the loop. A clip counts as
-    "uploaded" here based on TikTok's result alone (unchanged from before this file supported
-    multiple platforms) — see the metadata sidecar for the full per-platform breakdown,
-    including whether YouTube succeeded independently.
+    configured platform via upload_manager.py (2026-08-20: TikTok + YouTube Shorts, 2026-08-21:
+    + Instagram Reels, was TikTok-only through tiktok_uploader.py directly), then move
+    successfully uploaded files out of output/ into uploaded_clips/ to keep it clean. A failed
+    upload just leaves that clip in output/ for a future opportunity — it never stops the
+    loop. A clip counts as "uploaded" here based on TikTok's result alone (unchanged from
+    before this file supported multiple platforms) — see the metadata sidecar for the full
+    per-platform breakdown, including whether YouTube/Instagram succeeded independently.
+
+    `instagram`, unlike `publish`, defaults False and is a genuinely separate opt-in — see
+    upload_manager._upload_to_instagram()'s own docstring for why: this automation has never
+    been run against a live Instagram session, so it stays off for every streamer until
+    verified working and explicitly turned on in streamers.json (see orchestrator.py's
+    build_auto_pilot_cmd()).
 
     Only ever called with publish=True (see run_cycle()) — TikTok has no draft-save action
     anymore (confirmed 2026-08-18: an abandoned upload is discarded, not saved), so there is
@@ -431,7 +439,9 @@ def run_deployment_phase(survivors: List[Tuple[dict, Path, Optional[int]]], publ
         description = clip.get("description") or title
         caption = tiktok_uploader.build_caption_text(description, hashtags)
 
-        result = upload_manager.upload_clip_everywhere(output_path, title, description, hashtags, publish=publish)
+        result = upload_manager.upload_clip_everywhere(
+            output_path, title, description, hashtags, publish=publish, instagram_enabled=instagram,
+        )
         outcome = result.tiktok
         if not outcome.success:
             failed += 1
@@ -484,6 +494,13 @@ def run_deployment_phase(survivors: List[Tuple[dict, Path, Optional[int]]], publ
                 "confirmed": outcome.confirmed,
                 "youtube_uploaded": result.youtube.success,
                 "youtube_url": result.youtube.url,
+                # instagram_enabled records whether this streamer had Instagram turned on for
+                # THIS clip (distinct from result.instagram.success) — metrics_tracker.py's
+                # deletion guard needs to tell "Instagram wasn't applicable here" apart from
+                # "Instagram was applicable and hasn't succeeded yet", the same distinction
+                # `publish` already draws for the YouTube leg.
+                "instagram_enabled": instagram,
+                "instagram_uploaded": result.instagram.success and result.instagram.confirmed,
             }
             atomic_io.atomic_write_json(destination.with_suffix(".json"), metadata)
 
@@ -542,6 +559,7 @@ def run_cycle(
     auto_upload: bool,
     publish: bool,
     streamer_handle: Optional[str] = None,
+    instagram: bool = False,
 ) -> Tuple[int, int, int]:
     """Runs one full Collect -> Evaluate -> Purge -> (optionally) Deploy cycle, updating
     agent_state.json at each phase transition. Returns (kept, deleted, uploaded) for THIS
@@ -655,7 +673,7 @@ def run_cycle(
             deploy_batch = survivors + backlog
             if should_deploy(auto_upload, publish, deploy_batch):
                 update_agent_state(current_action=f"📤 Upload läuft ({len(deploy_batch)} Clip(s))", **common_state)
-                uploaded, upload_failed = run_deployment_phase(deploy_batch, publish)
+                uploaded, upload_failed = run_deployment_phase(deploy_batch, publish, instagram)
                 logger.info("📤 Deployment: %d hochgeladen, %d fehlgeschlagen", uploaded, upload_failed)
 
             # YouTube-only backlog: a clip already live on TikTok (hence already archived into
@@ -732,6 +750,13 @@ def main():
         "anything at all — there is no safer partial-upload mode anymore",
     )
     parser.add_argument(
+        "--instagram", action="store_true",
+        help="With --auto-upload and --publish: also post survivors to Instagram Reels via "
+        "upload_instagram_playwright.py. Separate opt-in from --publish, defaulting off — "
+        "this automation has never been verified against a live Instagram session (see that "
+        "module's own docstring); only turn this on after a manual --headed test succeeds",
+    )
+    parser.add_argument(
         "--streamer-name", default=None,
         help="Set by orchestrator.py when running as one of several concurrent streamer "
         "subprocesses — namespaces this process's agent_state file, rendered-clip output "
@@ -743,6 +768,8 @@ def main():
 
     if args.publish and not args.auto_upload:
         parser.error("--publish requires --auto-upload")
+    if args.instagram and not args.publish:
+        parser.error("--instagram requires --publish")
     if args.auto_upload and not args.publish:
         logger.warning(
             "--auto-upload was given without --publish — Phase 5 (Deployment) will be "
@@ -814,7 +841,7 @@ def main():
                     video_path, profile_dict, args.layout, args.video_format,
                     args.highlight_color, args.purge_threshold, args.critic_model,
                     cycle, target_streamer, kept_total, purged_total, uploaded_total,
-                    args.live, args.auto_upload, args.publish, streamer_handle,
+                    args.live, args.auto_upload, args.publish, streamer_handle, args.instagram,
                 )
                 kept_total += kept
                 purged_total += deleted

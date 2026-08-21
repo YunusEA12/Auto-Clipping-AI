@@ -122,6 +122,13 @@ def build_auto_pilot_cmd(entry: dict) -> List[str]:
         # when the streamer's own config explicitly opts into actually going live.
         if entry.get("publish"):
             cmd.append("--publish")
+            # Instagram is a separate opt-in from publish itself (2026-08-21) — this
+            # automation has never been verified against a live Instagram session (see
+            # upload_instagram_playwright.py's own docstring), so it stays off for every
+            # streamer, even ones already publishing to TikTok/YouTube, until explicitly
+            # turned on in streamers.json after a manual --headed verification succeeds.
+            if entry.get("instagram"):
+                cmd.append("--instagram")
     return cmd
 
 

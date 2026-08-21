@@ -39,6 +39,7 @@ from googleapiclient.errors import HttpError
 import atomic_io
 import tiktok_uploader
 import upload as youtube_uploader
+import upload_instagram_playwright as instagram_uploader
 
 import logging_setup
 
@@ -109,14 +110,28 @@ class YouTubeOutcome(NamedTuple):
         return f"https://youtu.be/{self.video_id}" if self.video_id else None
 
 
+class InstagramOutcome(NamedTuple):
+    """Same shape/reasoning as YouTubeOutcome above — `attempted` distinguishes "genuinely
+    not applicable" (publish=False, or this streamer never opted into Instagram) from a real
+    failure. Unlike YouTube's Data API, Instagram's Playwright automation has no persistent
+    ID to hand back on success, only success/confirmed (see
+    upload_instagram_playwright.UploadOutcome's own docstring)."""
+    attempted: bool
+    success: bool
+    confirmed: bool = False
+    detail: str = ""
+
+
 class MultiPlatformOutcome(NamedTuple):
     tiktok: tiktok_uploader.UploadOutcome
     youtube: YouTubeOutcome
+    instagram: InstagramOutcome
 
     @property
     def any_success(self) -> bool:
         tiktok_success = self.tiktok.success and self.tiktok.confirmed
-        return tiktok_success or self.youtube.success
+        instagram_success = self.instagram.success and self.instagram.confirmed
+        return tiktok_success or self.youtube.success or instagram_success
 
 
 def _upload_to_youtube(
@@ -172,6 +187,32 @@ def _upload_to_youtube(
     return YouTubeOutcome(attempted=True, success=True, video_id=video_id)
 
 
+def _upload_to_instagram(
+    video_path: Path, title: str, description: str, tags: Optional[List[str]], publish: bool, instagram_enabled: bool,
+) -> InstagramOutcome:
+    """instagram_enabled is a SEPARATE gate from publish, not folded into one flag the way
+    TikTok/YouTube share `publish` — Instagram's automation is unverified (see
+    upload_instagram_playwright.py's own module docstring: no selector has ever been run
+    against a live session), so it defaults OFF for every streamer until proven working,
+    opted into per-streamer via streamers.json's "instagram" field (see orchestrator.py's
+    build_auto_pilot_cmd()) rather than firing automatically the moment this integration
+    merges. publish=True alone is NOT sufficient to attempt Instagram — both must be true."""
+    if not publish or not instagram_enabled:
+        reason = "publish=False" if not publish else "instagram not enabled for this streamer"
+        logger.info("%s — skipping Instagram upload for %s", reason, video_path.name)
+        return InstagramOutcome(attempted=False, success=False, detail=reason)
+
+    try:
+        outcome = instagram_uploader.try_upload_clip(video_path, description, tags, publish=publish)
+    except Exception as e:
+        # Never let an Instagram-side problem take down a cycle that's also reporting TikTok
+        # and YouTube results — same reasoning as the YouTube try/except above.
+        logger.error("Instagram upload raised unexpectedly for %s: %s", video_path.name, e)
+        return InstagramOutcome(attempted=True, success=False, detail=str(e))
+
+    return InstagramOutcome(attempted=True, success=outcome.success, confirmed=outcome.confirmed)
+
+
 def upload_clip_everywhere(
     video_path: Path,
     title: str,
@@ -179,11 +220,15 @@ def upload_clip_everywhere(
     hashtags: Optional[List[str]] = None,
     publish: bool = False,
     add_background_sound: bool = True,
+    instagram_enabled: bool = False,
 ) -> MultiPlatformOutcome:
     """Uploads one rendered clip to TikTok, then — after a randomized pacing delay — to
-    YouTube Shorts. TikTok goes first since every existing caller already depends on its
-    outcome (moving the file into uploaded_clips/, the metadata sidecar); the delay sits
-    before YouTube specifically so the very first upload of a cycle never waits on nothing."""
+    YouTube Shorts, then — after another pacing delay, only if instagram_enabled — to
+    Instagram Reels. TikTok goes first since every existing caller already depends on its
+    outcome (moving the file into uploaded_clips/, the metadata sidecar); each delay sits
+    BEFORE the next platform so the very first upload of a cycle never waits on nothing.
+    instagram_enabled defaults to False — see _upload_to_instagram()'s own docstring for why
+    this is a separate, explicit per-streamer opt-in rather than firing automatically."""
     tiktok_outcome = tiktok_uploader.try_upload_clip(
         video_path, description, hashtags, publish=publish, add_background_sound=add_background_sound,
     )
@@ -195,4 +240,11 @@ def upload_clip_everywhere(
 
     youtube_outcome = _upload_to_youtube(video_path, title, description, hashtags, publish)
 
-    return MultiPlatformOutcome(tiktok=tiktok_outcome, youtube=youtube_outcome)
+    if publish and instagram_enabled:
+        delay = random.uniform(UPLOAD_DELAY_MIN_SECONDS, UPLOAD_DELAY_MAX_SECONDS)
+        logger.info("Waiting %.0fs before the Instagram upload (rate-limit/pacing buffer)", delay)
+        time.sleep(delay)
+
+    instagram_outcome = _upload_to_instagram(video_path, title, description, hashtags, publish, instagram_enabled)
+
+    return MultiPlatformOutcome(tiktok=tiktok_outcome, youtube=youtube_outcome, instagram=instagram_outcome)

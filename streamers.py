@@ -82,6 +82,12 @@ class StreamerEntry(BaseModel):
     profile: str = ""
     auto_upload: bool = False
     publish: bool = False
+    # CONFIRMED live (2026-08-21): adding "instagram": true to a streamers.json entry by hand
+    # silently had zero effect — pydantic's default behavior discards fields not declared on
+    # the model, so orchestrator.py's entry.get("instagram") always saw None/False regardless
+    # of what the config file actually said. Declaring the field here is what makes it survive
+    # StreamerEntry(**item).model_dump() and actually reach build_auto_pilot_cmd().
+    instagram: bool = False
 
 
 def load_streamers(path: Path = None) -> List[dict]:

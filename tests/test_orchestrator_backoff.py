@@ -33,6 +33,46 @@ def test_cmd_omits_publish_when_missing_from_entry_entirely():
     assert "--publish" not in cmd
 
 
+# --- build_auto_pilot_cmd's instagram threading (2026-08-21) — a separate opt-in from
+# publish itself, since upload_instagram_playwright.py's automation has never been verified
+# against a live session; must default off even for a streamer already publishing live -----
+
+def test_cmd_omits_instagram_when_publish_on_but_instagram_off():
+    cmd = orchestrator.build_auto_pilot_cmd(
+        {"name": "x", "url": "https://twitch.tv/x", "auto_upload": True, "publish": True, "instagram": False}
+    )
+    assert "--publish" in cmd
+    assert "--instagram" not in cmd
+
+
+def test_cmd_omits_instagram_when_missing_from_entry_entirely():
+    # Same backward-compatibility guarantee as publish above — an older streamers.json
+    # written before "instagram" existed must not silently start attempting it.
+    cmd = orchestrator.build_auto_pilot_cmd(
+        {"name": "x", "url": "https://twitch.tv/x", "auto_upload": True, "publish": True}
+    )
+    assert "--instagram" not in cmd
+
+
+def test_cmd_includes_instagram_only_when_publish_and_instagram_both_set():
+    cmd = orchestrator.build_auto_pilot_cmd(
+        {"name": "x", "url": "https://twitch.tv/x", "auto_upload": True, "publish": True, "instagram": True}
+    )
+    assert "--publish" in cmd
+    assert "--instagram" in cmd
+
+
+def test_cmd_omits_instagram_when_instagram_set_but_publish_off():
+    # instagram=True with publish=False must not sneak --instagram in without --publish —
+    # auto_pilot.py's own argparse would reject that combination outright (--instagram
+    # requires --publish), so orchestrator.py must never construct it.
+    cmd = orchestrator.build_auto_pilot_cmd(
+        {"name": "x", "url": "https://twitch.tv/x", "auto_upload": True, "publish": False, "instagram": True}
+    )
+    assert "--publish" not in cmd
+    assert "--instagram" not in cmd
+
+
 # --- --streamer-name always threaded through (2026-08-18: H-14 — without it, two streamers
 # live at once share agent_state.json, output/, and recording chunk filenames) -------------
 
