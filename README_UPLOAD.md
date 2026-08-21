@@ -138,3 +138,21 @@ Schalter in `app.py`.
 
 Meldet das Skript `"Not logged in (redirected to .../login)"`, sind deine Cookies abgelaufen
 oder ungültig — wiederhole den Export-Schritt oben mit einer frischen, aktiven TikTok-Sitzung.
+
+---
+
+# YouTube-Hintergrundmusik — jetzt via ffmpeg beim Rendern (nicht mehr Browser-Automation)
+
+Frühere Version dieses Abschnitts beschrieb `youtube_studio_uploader.py`: eine Playwright-
+Automatisierung des YouTube-Studio-Editors per eingeschleusten Google-Session-Cookies
+(`youtube_studio_cookies.json`). Verworfen am 2026-08-21 — die Cookies kamen nie über Googles
+Login-Seite hinaus (leeres, nicht-wiedererkanntes Login-Formular statt einer akzeptierten
+Session, vermutlich IP-Bindung dieser Session-Cookies auf Googles Seite), und jeder weitere
+Versuch hätte das Risiko erhöht, den Google-Account wegen automatisierter Session-Nutzung
+einzuschränken — was auch `upload.py`s echten, legitimen API-Upload beträfe, da beide am
+selben Account hängen.
+
+Hintergrundmusik wird jetzt direkt beim Rendern in `process.py` gemischt (ffmpeg
+`amix`/`volume`, siehe `build_audio_filter()`) — kein Browser, keine Google-Session-Cookies,
+kein Studio-UI-Risiko. Tracks liegen in `background_music/` (siehe dortige README); die
+Pipeline wählt bei jedem Render zufällig einen aus, sofern welche vorhanden sind.

@@ -24,7 +24,10 @@ OUTPUT_DIR = Path("output")
 CLIENT_SECRET_PATH = Path("client_secret.json")
 TOKEN_PATH = Path("token.json")
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.readonly",
+]
 DEFAULT_HASHTAGS = "#shorts #gaming"
 PRIVACY_STATUS = "private"
 
@@ -34,6 +37,18 @@ PRIVACY_STATUS = "private"
 # function's own (slightly smarter, "leave room for the tag") truncation.
 TITLE_MAX_LENGTH = 100
 SHORTS_TAG = "#shorts"
+
+
+def _missing_scopes(creds: Credentials) -> set:
+    """Credentials.from_authorized_user_file(path, SCOPES) reads the ACTUAL granted scopes
+    from the stored token file itself, not from the SCOPES passed in — that parameter only
+    matters for a brand-new interactive consent request. A stored token issued before SCOPES
+    grew a new entry keeps whatever it was originally granted forever; refresh() renews the
+    access token but can never add a scope that was never consented to. Without this check,
+    that mismatch only ever surfaces as a 403 from whatever API call needed the missing scope
+    — exactly what happened with youtube.readonly before this was added (found in review,
+    2026-08-21, after live-debugging that exact 403 earlier this session)."""
+    return set(SCOPES) - set(creds.scopes or [])
 
 
 def get_authenticated_service():
@@ -58,6 +73,14 @@ def get_authenticated_service():
 
         TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
         logger.info("Saved YouTube OAuth token to %s", TOKEN_PATH)
+
+    missing = _missing_scopes(creds)
+    if missing:
+        logger.warning(
+            "YouTube token in %s is missing scope(s) %s — API calls needing them will 403. "
+            "SCOPES was changed after this token was last issued; delete %s and re-run the "
+            "interactive OAuth flow to grant the current SCOPES.", TOKEN_PATH, missing, TOKEN_PATH,
+        )
 
     return build("youtube", "v3", credentials=creds)
 
@@ -96,6 +119,19 @@ def get_stats_service():
                 "real upload once to re-authenticate interactively.", TOKEN_PATH,
             )
             return None
+
+    missing = _missing_scopes(creds)
+    if missing:
+        # Same "nothing usable -> None, let the caller skip this cycle" contract as a missing
+        # token above — a scope-insufficient client isn't usable for what this function's
+        # callers need either, and returning it anyway would just trade a clear log line here
+        # for a 403 several calls downstream (found in review, 2026-08-21).
+        logger.warning(
+            "YouTube token in %s is missing scope(s) %s — treating as unusable. SCOPES was "
+            "changed after this token was last issued; delete %s and re-run the interactive "
+            "OAuth flow to grant the current SCOPES.", TOKEN_PATH, missing, TOKEN_PATH,
+        )
+        return None
 
     return build("youtube", "v3", credentials=creds)
 

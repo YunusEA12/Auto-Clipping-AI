@@ -48,9 +48,14 @@ def test_render_clip_writes_into_given_output_dir(tmp_path, monkeypatch):
     expected_path = output_dir / process.clip_output_filename(1, clip["title"])
     expected_path.write_bytes(b"fake video bytes")
 
+    # music_path=None: these tests are about output_dir behavior, not background-music
+    # selection — without this, render_clip()'s default ("unset" -> pick one automatically)
+    # would scan the real background_music/ directory and, since a track exists there, shell
+    # out to a real ffprobe against a source.mp4 that's never actually created here (found in
+    # review, 2026-08-21: ambient-repo-state-dependent, non-hermetic test behavior).
     result = process.render_clip(
         tmp_path / "source.mp4", clip, tmp_path / "subs.ass", 1, process.LAYOUT_BLUR_BACKGROUND,
-        1080, 1920, output_dir=output_dir,
+        1080, 1920, output_dir=output_dir, music_path=None,
     )
     assert result == expected_path
 
@@ -64,7 +69,7 @@ def test_render_clip_defaults_to_shared_output_dir_when_none_given(tmp_path, mon
 
     result = process.render_clip(
         tmp_path / "source.mp4", clip, tmp_path / "subs.ass", 1, process.LAYOUT_BLUR_BACKGROUND,
-        1080, 1920,
+        1080, 1920, music_path=None,
     )
     assert result == expected_path
 

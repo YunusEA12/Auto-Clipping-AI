@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import random
 import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +14,7 @@ from typing import Iterator, List, Optional, Tuple
 import cv2
 
 import atomic_io
+import optimization_engine
 import vision
 
 import logging_setup
@@ -22,6 +24,17 @@ logger = logging.getLogger(__name__)
 
 TEMP_DIR = Path("temp")
 OUTPUT_DIR = Path("output")
+
+# Royalty-free background tracks live here — see background_music/README.md for what belongs
+# in this folder and licensing expectations. One is picked at random per render (2026-08-21,
+# replacing the dropped YouTube Studio Playwright automation — see README_UPLOAD.md for why).
+MUSIC_DIR = Path("background_music")
+MUSIC_EXTENSIONS = {".mp3", ".m4a", ".aac", ".wav", ".ogg"}
+
+# Linear amplitude multiplier applied to the music track before mixing (~-18.4dB) — quiet
+# enough to sit under speech without masking it, audible enough to actually register. Starting
+# point, not measured against real speech levels; adjust after listening to a real render.
+BACKGROUND_MUSIC_VOLUME = 0.12
 
 # Supported output canvases, keyed by aspect ratio label.
 VIDEO_FORMATS = {
@@ -489,6 +502,72 @@ def build_filter_complex(
     raise ValueError(f"Unknown layout: {layout}")
 
 
+def pick_background_track() -> Optional[Path]:
+    """Random track from MUSIC_DIR, or None if the folder is missing/empty — the "randomly,
+    if any are configured" contract render_clip() relies on to fall back to the old
+    music-free render untouched.
+
+    Epsilon-greedy bias (2026-08-21, see optimization_engine.py): once enough real measured
+    uploads exist to name a preferred track, most picks still land on it, but
+    MUSIC_EXPLORATION_RATE of picks stay uniformly random regardless — every track keeps
+    accumulating real samples instead of the picker locking onto whichever one got lucky
+    first with too little data to trust."""
+    if not MUSIC_DIR.is_dir():
+        return None
+    tracks = [p for p in MUSIC_DIR.iterdir() if p.is_file() and p.suffix.lower() in MUSIC_EXTENSIONS]
+    if not tracks:
+        return None
+
+    preferred_name = optimization_engine.preferred_music_track()
+    if preferred_name and random.random() >= optimization_engine.MUSIC_EXPLORATION_RATE:
+        preferred_path = MUSIC_DIR / preferred_name
+        if preferred_path in tracks:
+            return preferred_path
+
+    return random.choice(tracks)
+
+
+def _has_audio_stream(video_path: Path) -> bool:
+    """ffprobe check so build_audio_filter() never references a [0:a] stream that doesn't
+    exist — a source clip with no audio track (rare, but seen from corrupted stream chunks)
+    would otherwise make ffmpeg fail outright instead of just skipping the mix. Assumes yes on
+    a probe failure: matches the old unconditional "-map 0:a?" behavior's own bias (let ffmpeg
+    itself decide at map time) rather than silently dropping audio on a probe hiccup."""
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", str(video_path)]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except (subprocess.TimeoutExpired, OSError):
+        return True
+    if result.returncode != 0:
+        # A real ffprobe failure (corrupted container, unreadable file) is exactly the
+        # "probe hiccup" case this function's docstring already says to assume yes on — found
+        # in review, 2026-08-21: the original version only checked for a raised exception,
+        # not a clean-but-nonzero exit, so a real failure here read as "confirmed no audio"
+        # and could silently drop a clip's real voice track in favor of music-only.
+        logger.warning("ffprobe failed checking audio streams in %s (exit %d): %s", video_path, result.returncode, result.stderr.strip())
+        return True
+    return bool(result.stdout.strip())
+
+
+def build_audio_filter(has_source_audio: bool, clip_duration: float) -> str:
+    """Audio half of the filter graph when a background track is in play: the source clip's
+    own audio (if any) at full volume, the (looped, via -stream_loop -1 on the music input so
+    it always covers clips longer than the track itself) music track well underneath it via
+    BACKGROUND_MUSIC_VOLUME, summed with normalize=0 (amix's default divide-by-input-count
+    normalization would quietly halve the voice track, not just the music) and capped with a
+    limiter as cheap insurance against the two signals summing past 0dBFS. duration=first trims
+    the mix to the voice track's length; without a voice track there's nothing to trim against,
+    so clip_duration does that job explicitly instead."""
+    if has_source_audio:
+        return (
+            "[0:a]volume=1.0[voice];"
+            f"[1:a]volume={BACKGROUND_MUSIC_VOLUME}[bg];"
+            "[voice][bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mixed];"
+            "[mixed]alimiter=limit=0.98[outa]"
+        )
+    return f"[1:a]volume={BACKGROUND_MUSIC_VOLUME},atrim=duration={clip_duration},alimiter=limit=0.98[outa]"
+
+
 # Intel Quick Sync hardware H.264 encoder — decode/filtering (crop/scale/vstack/subtitles)
 # still run on the CPU (subtitle burn-in has no QSV path), but the encode step, usually the
 # single most expensive part of rendering 15-20 clips per video, runs on the iGPU instead.
@@ -497,15 +576,28 @@ QSV_ENCODE_ARGS = ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality",
 CPU_ENCODE_ARGS = ["-c:v", "libx264", "-preset", "veryfast"]
 
 
-def _build_render_cmd(source_video: Path, start: float, end: float, filter_complex: str, encode_args: list, output_path: Path) -> list:
+def _build_render_cmd(
+    source_video: Path, start: float, end: float, filter_complex: str, encode_args: list,
+    output_path: Path, music_path: Optional[Path] = None, has_source_audio: bool = True,
+) -> list:
+    inputs = ["-ss", str(start), "-to", str(end), "-i", str(source_video)]
+    audio_map = "0:a?"
+
+    if music_path is not None:
+        # -stream_loop -1 on the music input (not the source) so a track shorter than the
+        # clip repeats instead of leaving the tail silent; amix's duration=first (or the
+        # explicit atrim in the no-source-audio case) trims the result back down regardless.
+        inputs += ["-stream_loop", "-1", "-i", str(music_path)]
+        audio_filter = build_audio_filter(has_source_audio, end - start)
+        filter_complex = f"{filter_complex};{audio_filter}"
+        audio_map = "[outa]"
+
     return [
         "ffmpeg", "-y",
-        "-ss", str(start),
-        "-to", str(end),
-        "-i", str(source_video),
+        *inputs,
         "-filter_complex", filter_complex,
         "-map", "[outv]",
-        "-map", "0:a?",
+        "-map", audio_map,
         *encode_args,
         "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
         str(output_path),
@@ -568,6 +660,8 @@ def render_clip(
     facecam_box: Tuple[int, int, int, int] | None = None,
     gameplay_box: Tuple[int, int, int, int] | None = None,
     output_dir: Path | None = None,
+    music_path: Path | None = "unset",  # type: ignore[assignment]
+    has_source_audio: bool | None = None,
 ) -> Path:
     # output_dir defaults to the shared OUTPUT_DIR (single-video/manual/Streamlit usage,
     # unchanged behavior) — auto_pilot.py passes a streamer-namespaced subdirectory instead
@@ -581,8 +675,24 @@ def render_clip(
 
     filter_complex = build_filter_complex(layout, ass_path, output_w, output_h, facecam_box, gameplay_box)
 
+    # music_path defaults to the sentinel "unset" (not None) so a caller can explicitly pass
+    # music_path=None to render silently even when tracks exist — distinct from "caller didn't
+    # know/care, pick one automatically" (the old, still-default behavior every existing
+    # caller/test relies on). process_clips_iter() below passes an explicit pre-picked track
+    # so it can record which one was actually used; picked once per clip either way (not once
+    # per encoder attempt) so a QSV->CPU fallback retries with the SAME track rather than
+    # silently swapping to a different random one mid-render.
+    if music_path == "unset":
+        music_path = pick_background_track()
+    # has_source_audio, when given, lets a caller that already knows the answer (e.g.
+    # process_clips_iter() below, which re-renders the SAME source_video across an entire
+    # batch) skip a redundant ffprobe subprocess per clip — found in review, 2026-08-21, the
+    # same pattern get_video_dimensions() already avoids by being hoisted outside that loop.
+    if has_source_audio is None:
+        has_source_audio = _has_audio_stream(source_video) if music_path else True
+
     logger.info("Rendering clip %d (layout=%s) via h264_qsv -> %s", index, layout, output_path)
-    cmd = _build_render_cmd(source_video, start, end, filter_complex, QSV_ENCODE_ARGS, output_path)
+    cmd = _build_render_cmd(source_video, start, end, filter_complex, QSV_ENCODE_ARGS, output_path, music_path, has_source_audio)
     result = _run_ffmpeg(cmd)
 
     if result.returncode != 0:
@@ -593,8 +703,18 @@ def render_clip(
             "h264_qsv failed for clip %d (exit code %d), falling back to libx264: %s",
             index, result.returncode, extract_ffmpeg_error_summary(result.stderr),
         )
-        cmd = _build_render_cmd(source_video, start, end, filter_complex, CPU_ENCODE_ARGS, output_path)
+        cmd = _build_render_cmd(source_video, start, end, filter_complex, CPU_ENCODE_ARGS, output_path, music_path, has_source_audio)
         result = _run_ffmpeg(cmd)
+
+        if result.returncode != 0 and music_path is not None:
+            # A bad/corrupt file in background_music/ shouldn't be able to take an otherwise
+            # good clip down — one more attempt with music dropped entirely before giving up.
+            logger.warning(
+                "Render failed for clip %d with background music (%s), retrying without it: %s",
+                index, music_path.name, extract_ffmpeg_error_summary(result.stderr),
+            )
+            cmd = _build_render_cmd(source_video, start, end, filter_complex, CPU_ENCODE_ARGS, output_path)
+            result = _run_ffmpeg(cmd)
 
         if result.returncode != 0:
             logger.error("FFmpeg failed for clip %d: %s", index, extract_ffmpeg_error_summary(result.stderr))
@@ -769,6 +889,11 @@ def process_clips_iter(
         # the zoomed-in facecam crop above it, so the two halves never duplicate.
         gameplay_box = (0, 0, video_w, video_h)
 
+    # Hoisted outside the per-clip loop below — video_path is the SAME source file for every
+    # clip in this batch, so whether it has an audio stream can't change per clip (same
+    # reasoning as get_video_dimensions() above, found in review 2026-08-21).
+    has_source_audio = _has_audio_stream(video_path)
+
     total = len(clips)
     for i, clip in enumerate(clips, start=1):
         effective_layout = resolve_layout(layout, video_path, clip["start_time"], clip["end_time"])
@@ -781,11 +906,31 @@ def process_clips_iter(
                 str(video_path), clip["start_time"], padding_factor=FULL_CAM_PADDING_FACTOR,
             )
 
+        # Picked once here (not inside render_clip) so it can be recorded below — see
+        # optimization_engine.py's module docstring for why this attribute is tracked. Passed
+        # into render_clip() explicitly so both are describing the SAME render, not two
+        # independent random picks.
+        music_path = pick_background_track()
+
         ass_path = build_ass_for_clip(clip, transcript, i, highlight_color, output_w, output_h, effective_layout)
         output_path = render_clip(
             video_path, clip, ass_path, i, effective_layout, output_w, output_h, facecam_box, gameplay_box,
-            output_dir=output_dir,
+            output_dir=output_dir, music_path=music_path, has_source_audio=has_source_audio,
         )
+
+        # Recorded onto the SAME dict object that lives inside clips_data["clips"] (clips is
+        # clips_data["clips"] by reference, not a copy) — clips_data is written back to
+        # clips_path below so train_loop.py's own independent re-read of that file a few
+        # seconds later (run_training_loop(), then purge_low_scoring_clips()) still has these
+        # fields on every surviving clip, all the way through to the uploaded_clips/ sidecar
+        # metadata dict (auto_pilot.run_deployment_phase()) that actually feeds
+        # viral_memory.json. Without this write-back, these fields would only ever have
+        # existed in this function's local, throwaway copy of the clip dict.
+        clip["layout"] = effective_layout
+        clip["music_track"] = music_path.name if music_path else None
+        clip["title_style"] = optimization_engine.classify_title_style(clip.get("title", ""))
+        atomic_io.atomic_write_json(clips_path, clips_data)
+
         _write_clip_metadata_sidecar(output_path, clip)
         yield i, total, clip, output_path
 

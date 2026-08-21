@@ -1,6 +1,5 @@
 import json
 import platform
-from pathlib import Path
 
 import pytest
 
@@ -24,7 +23,6 @@ def test_secure_file_permissions_never_raises_on_a_missing_file(tmp_path):
 
 @pytest.mark.skipif(platform.system() == "Windows", reason="chmod semantics are POSIX-specific")
 def test_secure_file_permissions_restricts_mode_on_posix(tmp_path):
-    import os
     target = tmp_path / "cookies.json"
     target.write_text("[]", encoding="utf-8")
     atomic_io.secure_file_permissions(target)

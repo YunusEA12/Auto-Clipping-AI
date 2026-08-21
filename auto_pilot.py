@@ -471,6 +471,14 @@ def run_deployment_phase(survivors: List[Tuple[dict, Path, Optional[int]]], publ
                 "viral_score": clip.get("viral_score"),
                 "energy_rating": clip.get("energy_rating"),
                 "reward_score": reward_score,
+                # Performance-feedback attributes (2026-08-21, see optimization_engine.py) —
+                # set by process.process_clips_iter() at render time and carried through
+                # clips.json's own on-disk round-trip (see that function's comment) all the
+                # way to here. None for clips rendered before this feature existed.
+                "layout": clip.get("layout"),
+                "music_track": clip.get("music_track"),
+                "hook_style": clip.get("hook_style"),
+                "title_style": clip.get("title_style"),
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
                 "publish": publish,
                 "confirmed": outcome.confirmed,

@@ -139,7 +139,7 @@ def test_backlog_and_fresh_survivors_both_get_uploaded(tmp_path, monkeypatch):
     fresh_path.write_bytes(b"fake video bytes")
     fresh_clip = {"title": "Fresh", "description": "d", "hashtags": ["#fyp"], "viral_score": 8}
 
-    backlog_path = _write_render(tmp_path, "clip_2_Backlog", {
+    _write_render(tmp_path, "clip_2_Backlog", {
         "title": "Backlog", "description": "d2", "hashtags": ["#fyp"], "reward_score": 3,
     })
     backlog = auto_pilot.find_backlog_clips(tmp_path, exclude={fresh_path})

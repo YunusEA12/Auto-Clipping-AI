@@ -5,7 +5,7 @@ import json
 import logging
 import wave
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Literal, Optional, Tuple
 
 import numpy as np
 from dotenv import load_dotenv
@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import atomic_io
 import llm_utils
+import optimization_engine
 
 import logging_setup
 
@@ -187,11 +188,30 @@ Rules:
 """
 
 
+# Fixed vocabulary for Clip.hook_style below (2026-08-21, part of the performance-feedback
+# loop — see optimization_engine.py) — a small, closed set rather than free text so clips can
+# actually be grouped/compared against real view/like performance later. Chosen from the
+# hook patterns already implicit in top_performers.json's few-shot examples rather than
+# invented from scratch.
+HOOK_STYLES = (
+    "curiosity_gap",   # opens on a mystery/question, payoff explained later
+    "shocking_visual",  # opens on a striking visual/moment with no explanation yet
+    "direct_quote",    # starts with the exact hook line/quote, no setup
+    "list_open_loop",  # numbered/list-style title creates an open loop
+    "in_media_res",    # drops straight into the action/payoff, immediate
+    "other",
+)
+
+
 class Clip(BaseModel):
     start_time: float = Field(description="Clip start time in seconds")
     end_time: float = Field(description="Clip end time in seconds")
     title: str = Field(description="Short, catchy title for the clip")
     hook_explanation: str = Field(description="Why this moment is a good/viral hook")
+    hook_style: Literal[HOOK_STYLES] = Field(
+        description="Which hook pattern this clip uses — pick the single closest match from "
+        "the fixed set of allowed values, not a description of your own"
+    )
     viral_score: int = Field(description="Viral potential score from 1 (low) to 10 (high)", ge=1, le=10)
     energy_rating: int = Field(
         description="Emotional/audio energy rating from 1 (calm) to 10 (explosive) — how much "
@@ -393,6 +413,19 @@ def load_ai_guidelines_section() -> str:
     )
 
 
+def load_optimization_preferences_section() -> str:
+    """Real, measured-performance-derived preferences from optimization_engine.py's daily
+    report — a quantitative counterpart to load_ai_guidelines_section()'s LLM-judged rules
+    above. Soft by design (see build_prompt_section()'s own docstring): unlike the AI
+    guidelines' hard PENALTIES, this never discards a candidate, only nudges among otherwise
+    equally-good ones."""
+    state = optimization_engine.load_optimization_state()
+    section = optimization_engine.build_prompt_section(state)
+    if section:
+        logger.info("Loaded performance-learned preferences from %s", optimization_engine.OPTIMIZATION_STATE_PATH)
+    return section
+
+
 def build_system_prompt(
     profile: Optional[dict] = None, streamer_name: Optional[str] = None, language: Optional[str] = None,
 ) -> str:
@@ -404,6 +437,7 @@ def build_system_prompt(
         + build_streamer_mention_section(streamer_name)
         + build_language_section(language)
         + load_ai_guidelines_section()
+        + load_optimization_preferences_section()
     )
 
 
@@ -714,6 +748,7 @@ def find_longest_segment_fallback(transcript: dict, streamer_name: Optional[str]
         end_time=segments[j]["end"],
         title="Highlight-Moment",
         hook_explanation="Automatisch ausgewählt: längstes verfügbares zusammenhängendes Segment (Fallback, da die KI keine passenden Clips fand).",
+        hook_style="other",
         viral_score=5,
         energy_rating=5,
         description=fallback_description,

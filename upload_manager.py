@@ -99,6 +99,11 @@ def _upload_to_youtube(
         logger.error("YouTube upload raised unexpectedly for %s: %s", video_path.name, e)
         return YouTubeOutcome(attempted=True, success=False, detail=str(e))
 
+    # Background music for YouTube is now mixed directly into the render (process.py's
+    # build_audio_filter(), via ffmpeg) before this upload ever runs — dropped the Playwright
+    # YouTube Studio automation this step used to call (youtube_studio_uploader.py), which
+    # never got past cookie-based login on this VPS (Google's session cookies appear to be
+    # IP-bound) and risked the account's OAuth token being flagged for scripted Studio access.
     return YouTubeOutcome(attempted=True, success=True, video_id=video_id)
 
 

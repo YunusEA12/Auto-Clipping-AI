@@ -1,5 +1,6 @@
 import streamers as streamers_module
 
+import optimization_engine
 import orchestrator
 
 
@@ -55,6 +56,11 @@ def test_run_orchestrator_default_streamers_path_respects_monkeypatch(tmp_path, 
     monkeypatch.setattr(streamers_module, "STREAMERS_PATH", fake_streamers_path)
     monkeypatch.setattr(orchestrator, "ORCHESTRATOR_STATE_PATH", fake_state_path)
     monkeypatch.setattr(orchestrator, "is_stream_live", lambda url: False)
+    # run_orchestrator() also calls optimization_engine.run_daily_report() every iteration
+    # (2026-08-21) — without this, a real run here would read/write the actual project's
+    # viral_memory.json/optimization_state.json instead of staying confined to tmp_path.
+    monkeypatch.setattr(optimization_engine, "VIRAL_MEMORY_PATH", tmp_path / "viral_memory.json")
+    monkeypatch.setattr(optimization_engine, "OPTIMIZATION_STATE_PATH", tmp_path / "optimization_state.json")
 
     seen_snapshots = []
     original_write = orchestrator.write_orchestrator_state

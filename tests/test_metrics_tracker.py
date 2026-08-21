@@ -206,6 +206,88 @@ def test_update_viral_memory_deletes_on_second_consecutive_match(tmp_path, monke
     assert "clip_1" in memory
 
 
+# --- YouTube-backfill guard on deletion (2026-08-21, found in review after a real clip was
+# lost this way: TikTok's own 2x-confirmation used to delete the local file regardless of
+# whether YouTube had succeeded yet, permanently stranding any clip whose YouTube retry was
+# still in flight — e.g. delayed by a transient quota error — when TikTok happened to
+# reconfirm first) ---------------------------------------------------------------------------
+
+def test_update_viral_memory_keeps_local_file_when_youtube_not_yet_uploaded(tmp_path, monkeypatch):
+    uploaded_dir = tmp_path / "uploaded_clips"
+    uploaded_dir.mkdir()
+    monkeypatch.setattr(metrics_tracker, "UPLOADED_CLIPS_DIR", uploaded_dir)
+    monkeypatch.setattr(metrics_tracker, "VIRAL_MEMORY_PATH", tmp_path / "viral_memory.json")
+    monkeypatch.setattr(metrics_tracker, "SCRAPE_HEALTH_PATH", tmp_path / "health.json")
+
+    (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
+    (uploaded_dir / "clip_1.json").write_text(
+        json.dumps({"caption": "hello world #fyp", "publish": True, "youtube_uploaded": False}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        metrics_tracker, "fetch_content_list",
+        lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
+    )
+
+    metrics_tracker.update_viral_memory()  # first pass: matched, not deleted
+    metrics_tracker.update_viral_memory()  # second pass: TikTok reconfirmed, YouTube still pending
+
+    # Must survive so retry_missing_youtube_uploads() can still backfill it.
+    assert (uploaded_dir / "clip_1.mp4").exists()
+    assert (uploaded_dir / "clip_1.json").exists()
+
+
+def test_update_viral_memory_deletes_once_youtube_also_uploaded(tmp_path, monkeypatch):
+    uploaded_dir = tmp_path / "uploaded_clips"
+    uploaded_dir.mkdir()
+    monkeypatch.setattr(metrics_tracker, "UPLOADED_CLIPS_DIR", uploaded_dir)
+    monkeypatch.setattr(metrics_tracker, "VIRAL_MEMORY_PATH", tmp_path / "viral_memory.json")
+    monkeypatch.setattr(metrics_tracker, "SCRAPE_HEALTH_PATH", tmp_path / "health.json")
+
+    (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
+    (uploaded_dir / "clip_1.json").write_text(
+        json.dumps({"caption": "hello world #fyp", "publish": True, "youtube_uploaded": True}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        metrics_tracker, "fetch_content_list",
+        lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
+    )
+
+    metrics_tracker.update_viral_memory()
+    metrics_tracker.update_viral_memory()
+
+    assert not (uploaded_dir / "clip_1.mp4").exists()
+    assert not (uploaded_dir / "clip_1.json").exists()
+
+
+def test_update_viral_memory_deletes_when_publish_false_youtube_never_applicable(tmp_path, monkeypatch):
+    # publish=False means YouTube was never attempted for this clip at all (see
+    # upload_manager._upload_to_youtube's own publish=False no-op) — the TikTok-only guard
+    # doesn't apply, deletion proceeds exactly as before this fix.
+    uploaded_dir = tmp_path / "uploaded_clips"
+    uploaded_dir.mkdir()
+    monkeypatch.setattr(metrics_tracker, "UPLOADED_CLIPS_DIR", uploaded_dir)
+    monkeypatch.setattr(metrics_tracker, "VIRAL_MEMORY_PATH", tmp_path / "viral_memory.json")
+    monkeypatch.setattr(metrics_tracker, "SCRAPE_HEALTH_PATH", tmp_path / "health.json")
+
+    (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
+    (uploaded_dir / "clip_1.json").write_text(
+        json.dumps({"caption": "hello world #fyp", "publish": False, "youtube_uploaded": False}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        metrics_tracker, "fetch_content_list",
+        lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
+    )
+
+    metrics_tracker.update_viral_memory()
+    metrics_tracker.update_viral_memory()
+
+    assert not (uploaded_dir / "clip_1.mp4").exists()
+    assert not (uploaded_dir / "clip_1.json").exists()
+
+
 def test_update_viral_memory_never_deletes_an_unmatched_clip(tmp_path, monkeypatch):
     uploaded_dir = tmp_path / "uploaded_clips"
     uploaded_dir.mkdir()

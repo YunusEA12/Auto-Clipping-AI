@@ -492,7 +492,13 @@ def _delete_confirmed_upload(clip_id: str) -> None:
     by a full poll interval, is a materially stronger, platform-verified signal — this is
     only ever called for a clip_id that was already in viral_memory.json from a previous
     pass (see update_viral_memory()), never on a clip's first sighting. Its view/like history
-    already recorded in viral_memory.json is untouched by this — only the local files go."""
+    already recorded in viral_memory.json is untouched by this — only the local files go.
+
+    Callers must additionally confirm youtube_uploaded (or publish=False) before calling this
+    — see update_viral_memory()'s own guard — since this local file is also the only way
+    retry_missing_youtube_uploads() can ever backfill YouTube for this clip; deleting it the
+    moment TikTok alone reconfirms can permanently strand a clip that's still mid-retry on
+    YouTube (real, 2026-08-21 — see that guard's comment for the full account)."""
     for suffix in (".mp4", ".json"):
         path = UPLOADED_CLIPS_DIR / f"{clip_id}{suffix}"
         try:
@@ -571,7 +577,22 @@ def update_viral_memory(headless: bool = True) -> int:
 
         matched += 1
         if tiktok_match is not None and clip_id in previously_confirmed:
-            newly_reconfirmed.append(clip_id)
+            # TikTok's own 2x-confirmation used to be sufficient on its own to delete the
+            # local file — but that file is also the only way retry_missing_youtube_uploads()
+            # can ever backfill YouTube for this clip. A real clip was lost this way,
+            # 2026-08-21: TikTok reconfirmed while YouTube's retries were still failing on an
+            # (at the time) exhausted account upload quota, deleting the local .mp4 seconds
+            # before a subsequent retry would otherwise have succeeded once that quota
+            # cleared. Gated on youtube_uploaded now (or publish=False, meaning YouTube was
+            # never attempted for this clip at all) — found in review.
+            if updated.get("youtube_uploaded") or not updated.get("publish"):
+                newly_reconfirmed.append(clip_id)
+            else:
+                logger.info(
+                    "'%s' reconfirmed on TikTok but YouTube hasn't succeeded yet — keeping "
+                    "the local file so retry_missing_youtube_uploads() can still backfill it.",
+                    clip_id,
+                )
 
     pruned_memory = prune_viral_memory(memory)
     if matched or len(pruned_memory) != len(memory):

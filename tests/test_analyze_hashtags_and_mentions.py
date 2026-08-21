@@ -13,7 +13,7 @@ import analyze
 def _clip(**overrides):
     base = dict(
         start_time=0.0, end_time=40.0, title="Titel", hook_explanation="Weil es lustig ist",
-        viral_score=7, energy_rating=6, description="Krasser Moment!",
+        hook_style="other", viral_score=7, energy_rating=6, description="Krasser Moment!",
         hashtags=["#gaming", "#viral"],
     )
     base.update(overrides)

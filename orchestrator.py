@@ -37,6 +37,7 @@ from typing import Dict, List, Optional
 import psutil
 
 import atomic_io
+import optimization_engine
 import streamers as streamers_module
 import stream_watcher
 
@@ -411,6 +412,16 @@ def run_orchestrator(
                 status_snapshot[name] = snapshot_entry(entry, live)
 
             write_orchestrator_state(status_snapshot, poll_interval)
+
+            # Self-gated to ~once/24h internally (see run_daily_report()'s own docstring) —
+            # called every poll iteration anyway since this is the only always-on loop in the
+            # pipeline (auto_pilot.py only runs while a streamer is live, so hooking the
+            # report there would silently skip entirely on a day nobody streamed). Never
+            # allowed to break the orchestrator's actual job over a report failure.
+            try:
+                optimization_engine.run_daily_report()
+            except Exception as e:
+                logger.error("Optimization report failed (non-fatal): %s", e)
 
             if max_iterations is None or iteration < max_iterations:
                 time.sleep(poll_interval)

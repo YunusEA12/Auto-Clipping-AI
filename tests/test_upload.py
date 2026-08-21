@@ -2,8 +2,6 @@
 new multi-platform pipeline (upload_manager.py) — distinct from the pre-existing manual/batch
 CLI (upload_video()/upload_all()), which stays untouched (still defaults to private)."""
 
-from pathlib import Path
-
 import pytest
 from googleapiclient.errors import HttpError
 
@@ -168,6 +166,7 @@ def test_upload_video_still_defaults_to_private():
 # restores it (a locally-requested fixture's monkeypatch.setattr() applies after the autouse
 # fixture's, same pattern fake_youtube already relies on for get_authenticated_service).
 _real_get_stats_service = upload.get_stats_service
+_real_get_authenticated_service = upload.get_authenticated_service
 
 
 @pytest.fixture
@@ -175,13 +174,23 @@ def real_get_stats_service(monkeypatch):
     monkeypatch.setattr(upload, "get_stats_service", _real_get_stats_service)
 
 
+@pytest.fixture
+def real_get_authenticated_service(monkeypatch):
+    monkeypatch.setattr(upload, "get_authenticated_service", _real_get_authenticated_service)
+
+
 class FakeCreds:
-    def __init__(self, valid, expired=False, refresh_token=None, raise_on_refresh=False):
+    def __init__(self, valid, expired=False, refresh_token=None, raise_on_refresh=False, scopes=None):
         self.valid = valid
         self.expired = expired
         self.refresh_token = refresh_token
         self.refreshed = False
         self._raise_on_refresh = raise_on_refresh
+        # Defaults to fully-scoped (matches real Credentials always having .scopes) — a real
+        # google.oauth2.credentials.Credentials always has this attribute, so a fixture that
+        # lacked it entirely didn't match reality; tests specifically about scope-mismatch
+        # pass scopes=[...] explicitly instead.
+        self.scopes = list(upload.SCOPES) if scopes is None else scopes
 
     def refresh(self, request):
         if self._raise_on_refresh:
@@ -235,6 +244,51 @@ def test_get_stats_service_refreshes_expired_token_non_interactively(tmp_path, m
     assert result is not None
     assert fake_creds.refreshed is True
     assert token_path.read_text(encoding="utf-8") == "{}"  # re-saved after refresh
+
+
+# --- scope-mismatch detection (2026-08-21, found in review after live-debugging this exact
+# 403 earlier the same session: a stored token issued before SCOPES grew a new entry keeps
+# whatever it was originally granted forever, and refresh() can't add a scope) --------------
+
+def test_get_stats_service_returns_none_when_token_missing_required_scope(tmp_path, monkeypatch, real_get_stats_service):
+    token_path = tmp_path / "token.json"
+    token_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(upload, "TOKEN_PATH", token_path)
+    # Only youtube.upload, missing youtube.readonly — exactly the pre-fix token.json shape.
+    stale_creds = FakeCreds(valid=True, scopes=["https://www.googleapis.com/auth/youtube.upload"])
+    monkeypatch.setattr(
+        upload.Credentials, "from_authorized_user_file",
+        classmethod(lambda cls, path, scopes: stale_creds),
+    )
+    monkeypatch.setattr(upload, "build", lambda *a, **k: object())
+
+    assert upload.get_stats_service() is None
+
+
+def test_get_authenticated_service_still_returns_a_client_when_scope_missing(tmp_path, monkeypatch, real_get_authenticated_service):
+    # get_authenticated_service() (the real upload path) warns but doesn't fail outright on a
+    # scope-insufficient token — forcing reauth here would hang on a headless VPS with no
+    # browser, the exact problem get_stats_service() was split out to avoid.
+    token_path = tmp_path / "token.json"
+    token_path.write_text("{}", encoding="utf-8")
+    client_secret_path = tmp_path / "client_secret.json"
+    client_secret_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(upload, "TOKEN_PATH", token_path)
+    monkeypatch.setattr(upload, "CLIENT_SECRET_PATH", client_secret_path)
+    stale_creds = FakeCreds(valid=True, scopes=["https://www.googleapis.com/auth/youtube.upload"])
+    monkeypatch.setattr(
+        upload.Credentials, "from_authorized_user_file",
+        classmethod(lambda cls, path, scopes: stale_creds),
+    )
+    sentinel = object()
+    monkeypatch.setattr(upload, "build", lambda *a, **k: sentinel)
+
+    assert upload.get_authenticated_service() is sentinel
+
+
+def test_missing_scopes_empty_when_all_scopes_present():
+    creds = FakeCreds(valid=True)  # defaults to fully-scoped
+    assert upload._missing_scopes(creds) == set()
 
 
 def test_get_stats_service_returns_none_when_expired_without_refresh_token(tmp_path, monkeypatch, real_get_stats_service):
