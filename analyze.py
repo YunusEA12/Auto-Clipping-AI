@@ -602,16 +602,23 @@ def select_clips(
     profile: Optional[dict] = None,
     streamer_name: Optional[str] = None,
     language: Optional[str] = None,
+    transcript_duration: Optional[float] = None,
 ) -> ClipSelection:
     client = genai.Client()
     system_prompt = build_system_prompt(profile, streamer_name, language)
     energy_section = build_energy_prompt_section(energy_spikes or [])
 
-    logger.info("Sending transcript to %s for scene selection", model)
+    # `model` (a caller override, or MODEL by default) always goes first; the rest of
+    # llm_utils.DEFAULT_MODEL_POOL follows as fallback if it's quota-exhausted for today (see
+    # llm_utils.call_with_fallback's own docstring — 2026-08-21, Google's free-tier quota is
+    # per-model-per-day, so a different model has its own independent budget).
+    model_pool = [model] + [m for m in llm_utils.DEFAULT_MODEL_POOL if m != model]
+
+    logger.info("Sending transcript to %s for scene selection (fallback pool: %s)", model, model_pool)
     try:
-        response = llm_utils.call_with_retry(
-            lambda: client.models.generate_content(
-                model=model,
+        response = llm_utils.call_with_fallback(
+            lambda m: client.models.generate_content(
+                model=m,
                 contents=[f"Transcript:\n{transcript_text}{energy_section}"],
                 config=genai_types.GenerateContentConfig(
                     system_instruction=system_prompt,
@@ -621,6 +628,7 @@ def select_clips(
                 ),
             ),
             description="analyze.select_clips",
+            model_pool=model_pool,
         )
     except Exception as e:
         logger.error("LLM API call failed: %s", llm_utils.redact_secrets(str(e)))
@@ -663,6 +671,29 @@ def select_clips(
     dropped = len(parsed.clips) - len(valid_clips)
     if dropped:
         logger.warning("Dropped %d clip(s) outside the %d-%ds duration bounds", dropped, MIN_CLIP_DURATION, MAX_CLIP_DURATION)
+
+    # The model is only given the transcript text and occasionally hallucinates a start_time/
+    # end_time past the end of it (small models drift on numeric fields more than on prose).
+    # Such a clip has no corresponding audio/video in this chunk: resolve_layout() and
+    # render_clip() would seek past the source file's actual duration, which either yields a
+    # blank/frozen render or an empty ffmpeg output — and whatever frames Whisper/OpenCV do
+    # manage to grab there don't match the transcript, so the vision critic reliably scores
+    # the result as incoherent and deletes it. Catching it here (where the real transcript
+    # span is known) is cheaper than losing the whole render+critic round-trip to it.
+    if transcript_duration is not None:
+        tolerance = 1.0  # small buffer for the LLM rounding a segment's end time
+        in_bounds = [
+            clip for clip in valid_clips
+            if clip.start_time >= 0 and clip.end_time <= transcript_duration + tolerance
+        ]
+        out_of_bounds = len(valid_clips) - len(in_bounds)
+        if out_of_bounds:
+            logger.warning(
+                "Dropped %d clip(s) with timestamps beyond the transcript's actual %.1fs duration "
+                "(LLM hallucinated a start_time/end_time past the end of this chunk)",
+                out_of_bounds, transcript_duration,
+            )
+        valid_clips = in_bounds
 
     if window_scores:
         valid_clips = [
@@ -793,8 +824,13 @@ def analyze(
         logger.info("No audio file available; skipping emotional-energy scoring")
 
     language = transcript.get("language")
+    segments = transcript.get("segments") or []
+    transcript_duration = segments[-1]["end"] if segments else None
     try:
-        selection = select_clips(transcript_text, energy_spikes, window_scores, model, profile, streamer_name, language)
+        selection = select_clips(
+            transcript_text, energy_spikes, window_scores, model, profile, streamer_name, language,
+            transcript_duration=transcript_duration,
+        )
     except LLMResponseIncomplete as e:
         logger.warning("%s; falling back to the longest available segment instead of failing.", e)
         selection = find_longest_segment_fallback(transcript, streamer_name)

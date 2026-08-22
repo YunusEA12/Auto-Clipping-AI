@@ -28,6 +28,7 @@ import pytest
 import upload
 import upload_instagram_playwright
 import upload_ledger
+import upload_manager
 
 
 class RealYouTubeCallBlocked(RuntimeError):
@@ -88,6 +89,22 @@ def _isolated_upload_ledger(tmp_path, monkeypatch):
     upload in the shared real ledger file. tmp_path is unique per test function, so this
     isolation is automatic and total — no test needs to think about it."""
     monkeypatch.setattr(upload_ledger, "LEDGER_PATH", tmp_path / "upload_ledger.json")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_youtube_upload_backoff(tmp_path, monkeypatch):
+    """Same isolation, same reasoning, as _isolated_upload_ledger above — upload_manager.py's
+    UPLOAD_LIMIT_BACKOFF_PATH also defaults to a real repo-root file
+    (youtube_upload_backoff.json). Found live, 2026-08-21: this had never mattered before,
+    because no real backoff had ever actually been recorded there — the day the live 429
+    detection fix in this same file started working, it recorded a REAL, hours-long backoff in
+    that real file for the first time, which then made every test in test_upload_manager.py
+    that didn't individually monkeypatch UPLOAD_LIMIT_BACKOFF_PATH silently read the live
+    backoff state and skip its YouTube upload attempt entirely, failing assertions that expect
+    a real attempt. tmp_path is unique per test function, so (as with the ledger) this is
+    automatic and total — individual tests' own local monkeypatch of this same attribute (a few
+    already do it explicitly) simply overrides this with their own tmp_path, harmlessly."""
+    monkeypatch.setattr(upload_manager, "UPLOAD_LIMIT_BACKOFF_PATH", tmp_path / "youtube_upload_backoff.json")
 
 
 @pytest.fixture(autouse=True)

@@ -47,8 +47,11 @@ DEFAULT_FORMAT = "9:16"
 LAYOUT_SPLIT_SCREEN = "split_screen"
 LAYOUT_BLUR_BACKGROUND = "blur_background"
 LAYOUT_FULL_CAM = "full_cam"
+LAYOUT_CENTER_CROP = "center_crop"
 LAYOUT_AUTO = "auto"
-SELECTABLE_LAYOUTS = (LAYOUT_SPLIT_SCREEN, LAYOUT_BLUR_BACKGROUND, LAYOUT_FULL_CAM, LAYOUT_AUTO)
+SELECTABLE_LAYOUTS = (
+    LAYOUT_SPLIT_SCREEN, LAYOUT_BLUR_BACKGROUND, LAYOUT_FULL_CAM, LAYOUT_CENTER_CROP, LAYOUT_AUTO,
+)
 
 # Facecam gets the top third of the canvas, gameplay the bottom two-thirds — TikTok's
 # standard "reaction on top, content below" reaction-cam layout.
@@ -446,15 +449,19 @@ def build_filter_complex(
             f"crop={output_w}:{face_zone_h},setsar=1,format=yuv420p[face]"
         )
 
-        # Gameplay: "contain" fit — scaled DOWN to fit inside the zone with the ENTIRE frame
-        # preserved (force_original_aspect_ratio=decrease, never cropped), then padded with
-        # black to exactly fill the zone. pad() bounds both width AND height in one step, so
-        # the result is always exactly output_w x game_zone_h — appears exactly once.
+        # Gameplay: "cover" fit — same technique as the facecam zone above, scaled UP with
+        # force_original_aspect_ratio=increase and the overhang cropped, so it fills its zone
+        # edge-to-edge with no black bars (2026-08-21, account-owner request: split_screen's
+        # gameplay zone previously used "contain" fit + black padding, which showed as visible
+        # letterbox bars around a typical 16:9 source squeezed into this narrower zone).
+        # Trade-off, accepted deliberately: unlike the old contain-fit, this DOES crop some of
+        # the source frame's left/right edges — a corner HUD element or minimap sitting right
+        # at the crop line can get clipped. Centered crop (the default -2 in crop=W:H with no
+        # explicit x/y offset) is the safest default for typical centered gameplay action.
         game_filter = (
             f"[0:v]crop={game_w}:{game_h}:{game_x}:{game_y},"
-            f"scale={output_w}:{game_zone_h}:force_original_aspect_ratio=decrease,"
-            f"pad={output_w}:{game_zone_h}:(ow-iw)/2:(oh-ih)/2:color=black,"
-            f"setsar=1,format=yuv420p[game]"
+            f"scale={output_w}:{game_zone_h}:force_original_aspect_ratio=increase,"
+            f"crop={output_w}:{game_zone_h},setsar=1,format=yuv420p[game]"
         )
 
         return (
@@ -475,6 +482,23 @@ def build_filter_complex(
             f"[0:v]crop={face_w}:{face_h}:{face_x}:{face_y},"
             f"scale={output_w}:{output_h}:force_original_aspect_ratio=increase,"
             f"crop={output_w}:{output_h},setsar=1,format=yuv420p[cropped];"
+            f"[cropped]subtitles='{subtitles}'[outv]"
+        )
+
+    if layout == LAYOUT_CENTER_CROP:
+        # No facecam detected -- smart/center-crop the gameplay footage to fill the ENTIRE
+        # canvas edge-to-edge (2026-08-21, account-owner request: no black bars/blur fallback
+        # when there's no facecam to split off). Same "cover" fit technique as full_cam's
+        # face-crop step above, just applied to the whole source frame with no pre-crop toward
+        # a detected face box -- crop=W:H with no explicit x/y offset centers on the frame's
+        # own middle, the standard assumption for gameplay content where the action tends to
+        # sit centered. Trade-off, accepted deliberately: unlike blur_background's contain-fit
+        # (which this now replaces as resolve_layout()'s own no-face fallback -- still
+        # available as an explicit manual choice), a HUD/minimap element sitting at a source
+        # frame's edge can get clipped by this crop.
+        return (
+            f"[0:v]setsar=1,scale={output_w}:{output_h}:force_original_aspect_ratio=increase,"
+            f"crop={output_w}:{output_h},format=yuv420p[cropped];"
             f"[cropped]subtitles='{subtitles}'[outv]"
         )
 
@@ -568,12 +592,18 @@ def build_audio_filter(has_source_audio: bool, clip_duration: float) -> str:
     return f"[1:a]volume={BACKGROUND_MUSIC_VOLUME},atrim=duration={clip_duration},alimiter=limit=0.98[outa]"
 
 
-# Intel Quick Sync hardware H.264 encoder — decode/filtering (crop/scale/vstack/subtitles)
-# still run on the CPU (subtitle burn-in has no QSV path), but the encode step, usually the
-# single most expensive part of rendering 15-20 clips per video, runs on the iGPU instead.
-# QSV has no CRF; -global_quality is its closest equivalent (ICQ mode, lower = better quality).
-QSV_ENCODE_ARGS = ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "25"]
-CPU_ENCODE_ARGS = ["-c:v", "libx264", "-preset", "veryfast"]
+# Intel Quick Sync hardware H.264 encoder — was tried as the encode step (usually the single
+# most expensive part of rendering 15-20 clips per video) to offload it to the iGPU. Disabled
+# 2026-08-22: confirmed /dev/dri does not exist on this VPS at all (no iGPU passed through),
+# so every single h264_qsv attempt failed (exit 234, or exit 0 with an unplayable 0-packet
+# file per _is_valid_render()'s own docstring) and every render paid for a wasted attempt
+# before falling back to CPU. Left defined (unused) in case a future box does have a working
+# iGPU — QSV has no CRF; -global_quality is its closest equivalent (ICQ mode, lower = better).
+# -movflags +faststart moves the MP4 moov atom to the front of the file — required for the
+# platforms this renders for (TikTok/YouTube/Instagram) to start playback/processing before
+# the full file downloads, instead of needing to seek to the end of the file first.
+QSV_ENCODE_ARGS = ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "25", "-movflags", "+faststart"]
+CPU_ENCODE_ARGS = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
 
 
 def _build_render_cmd(
@@ -649,6 +679,27 @@ def extract_ffmpeg_error_summary(stderr: Optional[str], max_lines: int = 3) -> s
     return "\n".join(lines[-max_lines:])
 
 
+def _is_valid_render(output_path: Path) -> bool:
+    """True if output_path is a real, decodable video — not just a nonempty file. Found live,
+    2026-08-21: h264_qsv on this VPS has been observed to exit 0 while writing a small,
+    nonzero-size container with zero actual video packets in it (no working iGPU/driver under
+    load — confirmed separately that /dev/dri doesn't exist on this box at all), which the old
+    exists()/size>0 check alone could not catch. The corrupt file then silently passed the
+    render guard and only surfaced three steps later as a best-effort-skipped warning in
+    extract_preview_frames() ("Could not determine duration ... Could not open video") — or,
+    for a clip that happened not to need preview frames, not at all, reaching the critic and
+    potentially upload as an unplayable video. Reuses get_video_properties()'s own cv2-backed
+    validation (the same check extract_preview_frames() already trusts as authoritative)
+    rather than a second, separate ffprobe-based check."""
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        return False
+    try:
+        get_video_properties(output_path)
+        return True
+    except RuntimeError:
+        return False
+
+
 def render_clip(
     source_video: Path,
     clip: dict,
@@ -691,22 +742,13 @@ def render_clip(
     if has_source_audio is None:
         has_source_audio = _has_audio_stream(source_video) if music_path else True
 
-    logger.info("Rendering clip %d (layout=%s) via h264_qsv -> %s", index, layout, output_path)
-    cmd = _build_render_cmd(source_video, start, end, filter_complex, QSV_ENCODE_ARGS, output_path, music_path, has_source_audio)
+    logger.info("Rendering clip %d (layout=%s) via libx264 -> %s", index, layout, output_path)
+    cmd = _build_render_cmd(source_video, start, end, filter_complex, CPU_ENCODE_ARGS, output_path, music_path, has_source_audio)
     result = _run_ffmpeg(cmd)
+    encode_ok = result.returncode == 0 and _is_valid_render(output_path)
 
-    if result.returncode != 0:
-        # QSV can fail for reasons unrelated to our command (no compatible iGPU/driver on
-        # this machine, session limits, etc.) — fall back to the CPU encoder rather than
-        # losing the clip entirely.
-        logger.warning(
-            "h264_qsv failed for clip %d (exit code %d), falling back to libx264: %s",
-            index, result.returncode, extract_ffmpeg_error_summary(result.stderr),
-        )
-        cmd = _build_render_cmd(source_video, start, end, filter_complex, CPU_ENCODE_ARGS, output_path, music_path, has_source_audio)
-        result = _run_ffmpeg(cmd)
-
-        if result.returncode != 0 and music_path is not None:
+    if not encode_ok:
+        if music_path is not None:
             # A bad/corrupt file in background_music/ shouldn't be able to take an otherwise
             # good clip down — one more attempt with music dropped entirely before giving up.
             logger.warning(
@@ -715,13 +757,17 @@ def render_clip(
             )
             cmd = _build_render_cmd(source_video, start, end, filter_complex, CPU_ENCODE_ARGS, output_path)
             result = _run_ffmpeg(cmd)
+            encode_ok = result.returncode == 0 and _is_valid_render(output_path)
 
-        if result.returncode != 0:
-            logger.error("FFmpeg failed for clip %d: %s", index, extract_ffmpeg_error_summary(result.stderr))
+        if not encode_ok:
+            detail = (
+                extract_ffmpeg_error_summary(result.stderr) if result.returncode != 0
+                else "produced an unplayable file (exits 0 but 0 usable video packets — the "
+                     "requested start/end time is likely past the source clip's actual "
+                     "duration; see analyze.py's select_clips() transcript_duration bound)"
+            )
+            logger.error("FFmpeg failed for clip %d: %s", index, detail)
             raise RuntimeError(f"FFmpeg failed for clip {index} (exit code {result.returncode})")
-
-    if not output_path.exists() or output_path.stat().st_size == 0:
-        raise RuntimeError(f"Render produced empty output for clip {index}: {output_path}")
 
     logger.info("Finished clip %d: %s", index, output_path)
     return output_path
@@ -758,8 +804,22 @@ def find_source_video(explicit: Path | None) -> Path:
 LAYOUT_RETRY_FRACTIONS = (1 / 3, 2 / 3)
 
 
-def resolve_layout(layout: str, video_path: Path, clip_start: float, clip_end: float | None = None) -> str:
-    """Three-way auto-layout decision: blur_background only when NO face clears
+def resolve_layout(
+    layout: str, video_path: Path, clip_start: float, clip_end: float | None = None,
+) -> tuple[str, float]:
+    """Returns (resolved_layout, detection_ts) — NOT just the layout string (2026-08-22 fix).
+    Previously process_clips_iter() always called vision.get_facecam_coordinates() at
+    clip_start regardless of which timestamp this function actually found a face at, so a
+    face found only on a LAYOUT_RETRY_FRACTIONS retry (clip_start was ambiguous/faceless) had
+    the layout decision say "split_screen"/"full_cam" while the real crop, detected
+    independently at clip_start, silently fell back to vision._fallback_box() — a static
+    corner box that may not contain the face at all. detection_ts is the exact timestamp this
+    function's own detection succeeded at (or clip_start, for a manual/non-auto layout or the
+    no-face fallback, where no successful detection exists to reuse); the caller now passes
+    this straight into get_facecam_coordinates() instead of re-deriving/guessing a timestamp,
+    so the crop is always keyed off the SAME frame the layout decision was actually made from.
+
+    Three-way auto-layout decision: center_crop only when NO face clears
     vision.FACE_COUNT_MIN_CONFIDENCE at all — there's nothing to crop toward. Any confident
     face count >= 1 goes to the full_cam/split_screen decision below, keyed off the PRIMARY
     (highest-scoring) detection's area/position; face_area_ratio (how much of the SOURCE frame
@@ -771,19 +831,24 @@ def resolve_layout(layout: str, video_path: Path, clip_start: float, clip_end: f
     Fortnite clip has a confident corner facecam AND a confident-enough kill-cam/character
     portrait alongside it — vision.py's 0.65 confidence floor already filters out weaker HUD
     icons, but realistic in-game character faces can still clear that bar, landing on
-    face_count=2 and discarding a perfectly good corner-cam detection into blur_background).
-    Trade-off, accepted deliberately: a genuine multi-person stream (a real second guest, not
-    a game-content false positive) now also resolves off the single highest-scoring face
-    instead of falling back to blur_background — for this pipeline's actual content (solo
-    Twitch gaming clips), a confident non-webcam detection is far more often a game-HUD false
-    positive than a real second person, so biasing toward "use the best face found" rather
-    than "blur on any ambiguity" is the better default here.
+    face_count=2 and discarding a perfectly good corner-cam detection into the no-face
+    fallback). Trade-off, accepted deliberately: a genuine multi-person stream (a real second
+    guest, not a game-content false positive) now also resolves off the single highest-scoring
+    face instead of falling back — for this pipeline's actual content (solo Twitch gaming
+    clips), a confident non-webcam detection is far more often a game-HUD false positive than
+    a real second person, so biasing toward "use the best face found" rather than "give up on
+    any ambiguity" is the better default here.
+
+    2026-08-21: no-face fallback changed from blur_background to center_crop (account-owner
+    request: fill the canvas edge-to-edge, no blur/letterbox bars, when there's no facecam to
+    split off) — blur_background itself is untouched and still available as an explicit manual
+    --layout choice, just no longer AUTO's own default.
 
     A face_count == 0 result is retried at a couple more timestamps within the clip (when
-    `clip_end` is given) before falling back to blur_background — see LAYOUT_RETRY_FRACTIONS.
+    `clip_end` is given) before falling back to center_crop — see LAYOUT_RETRY_FRACTIONS.
     """
     if layout != LAYOUT_AUTO:
-        return layout
+        return layout, clip_start
 
     timestamps = [clip_start]
     if clip_end is not None and clip_end > clip_start:
@@ -824,14 +889,20 @@ def resolve_layout(layout: str, video_path: Path, clip_start: float, clip_end: f
             "face_center_x_ratio=%.3f (centered=%s) -> %s",
             clip_start, face_count, ratio, FULL_CAM_MIN_FACE_AREA_RATIO, center_x_ratio, is_centered, resolved,
         )
+        # ts is the timestamp THIS detection actually succeeded at (clip_start, or a later
+        # LAYOUT_RETRY_FRACTIONS retry) — the caller reuses it for the real facecam crop
+        # instead of re-detecting at clip_start, which could miss a face this function only
+        # found on a retry. See this function's own docstring for the incident this fixes.
+        detection_ts = ts
     else:
-        resolved = LAYOUT_BLUR_BACKGROUND
+        resolved = LAYOUT_CENTER_CROP
+        detection_ts = clip_start
         logger.info(
             "Auto-layout at %.2fs: face_count=0 after %d attempt(s) -> %s",
             clip_start, len(timestamps), resolved,
         )
 
-    return resolved
+    return resolved, detection_ts
 
 
 def _write_clip_metadata_sidecar(output_path: Path, clip: dict) -> None:
@@ -907,14 +978,20 @@ def process_clips_iter(
 
     total = len(clips)
     for i, clip in enumerate(clips, start=1):
-        effective_layout = resolve_layout(layout, video_path, clip["start_time"], clip["end_time"])
+        effective_layout, detection_ts = resolve_layout(layout, video_path, clip["start_time"], clip["end_time"])
 
+        # detection_ts (not clip["start_time"]) — the exact frame resolve_layout()'s own
+        # detection succeeded at, which may be a LAYOUT_RETRY_FRACTIONS retry rather than
+        # clip_start. Re-detecting at clip["start_time"] here unconditionally used to be able
+        # to silently disagree with the layout decision above (face found on a retry, but
+        # clip_start itself faceless) and fall back to vision._fallback_box()'s static corner
+        # box instead of the real, just-confirmed face — see resolve_layout()'s own docstring.
         facecam_box = None
         if effective_layout == LAYOUT_SPLIT_SCREEN:
-            facecam_box = vision.get_facecam_coordinates(str(video_path), clip["start_time"])
+            facecam_box = vision.get_facecam_coordinates(str(video_path), detection_ts)
         elif effective_layout == LAYOUT_FULL_CAM:
             facecam_box = vision.get_facecam_coordinates(
-                str(video_path), clip["start_time"], padding_factor=FULL_CAM_PADDING_FACTOR,
+                str(video_path), detection_ts, padding_factor=FULL_CAM_PADDING_FACTOR,
             )
 
         # Picked once here (not inside render_clip) so it can be recorded below — see

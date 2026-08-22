@@ -14,6 +14,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
+import atomic_io
 import logging_setup
 
 logging_setup.configure_logging()
@@ -71,7 +72,8 @@ def get_authenticated_service():
             flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET_PATH), SCOPES)
             creds = flow.run_local_server(port=0)
 
-        TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
+        atomic_io.atomic_write_text(TOKEN_PATH, creds.to_json())
+        atomic_io.secure_file_permissions(TOKEN_PATH)
         logger.info("Saved YouTube OAuth token to %s", TOKEN_PATH)
 
     missing = _missing_scopes(creds)
@@ -112,7 +114,8 @@ def get_stats_service():
             except Exception as e:
                 logger.warning("Could not refresh YouTube OAuth token: %s", e)
                 return None
-            TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
+            atomic_io.atomic_write_text(TOKEN_PATH, creds.to_json())
+            atomic_io.secure_file_permissions(TOKEN_PATH)
         else:
             logger.warning(
                 "YouTube OAuth token in %s is invalid and has no refresh_token — re-run a "

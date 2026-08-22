@@ -79,7 +79,16 @@ BACKLOG_BATCH_LIMIT = BATCH_SIZE_MAX
 # with one minor quibble, scored -1 or -2) room to survive, while still purging anything the
 # critic actually considers bad (-3 and below) — a small, reversible nudge, not a removal of
 # the quality gate.
-DEFAULT_PURGE_THRESHOLD = -2
+#
+# 2026-08-22: nudged again, -2 -> -3. The critic was still marking down short, fast-paced
+# Twitch reaction/punchline clips for "lacking context" or "no resolved end" purely because it
+# was only ever shown the clip's own isolated transcript slice — genuinely fine short clips
+# were landing at -3/-4 for that reason alone. Now that build_critic_user_content() also feeds
+# the critic the lead-in transcript text before each clip (see train_loop.CRITIC_CONTEXT_
+# LOOKBACK_SECONDS) and CRITIC_SYSTEM_PROMPT explicitly tells it not to penalize brevity, most
+# of that false-negative mass should land closer to 0 anyway — this one more small step of
+# floor room is for whatever still lands slightly negative on a genuine but minor quibble.
+DEFAULT_PURGE_THRESHOLD = -3
 DEFAULT_COOLDOWN_SECONDS = 30
 DEFAULT_ERROR_COOLDOWN_SECONDS = 90
 
@@ -271,7 +280,7 @@ def _persist_reward_score(output_path: Path, score: Optional[int]) -> None:
 YOUTUBE_RETRY_BATCH_LIMIT = BATCH_SIZE_MAX
 
 
-def find_missing_youtube_uploads(uploaded_clips_dir: Path) -> List[Path]:
+def find_missing_youtube_uploads(uploaded_clips_dir: Path, streamer_name: Optional[str] = None) -> List[Path]:
     """upload_manager.upload_clip_everywhere() attempts TikTok and YouTube independently per
     clip (see its own module docstring: "a YouTube failure never crashes the calling cycle,
     and never blocks the TikTok result") — but only TikTok's outcome decides whether a clip
@@ -282,6 +291,15 @@ def find_missing_youtube_uploads(uploaded_clips_dir: Path) -> List[Path]:
     only ever looks at output/, never uploaded_clips/. This scans uploaded_clips/ for exactly
     that gap — clips whose sidecar shows `publish: true` (upload was genuinely intended, not
     e.g. a manual-mode/publish=False artifact) but `youtube_uploaded` isn't `true`.
+
+    `streamer_name`, when given, scopes the scan to clips whose sidecar's own `streamer_name`
+    either matches or is absent (2026-08-21: uploaded_clips/ is a single flat directory shared
+    by every concurrent streamer process — found in review, unlike output/<streamer>/, it was
+    never namespaced — so without this filter, every streamer's own retry cycle was scanning
+    and attempting the ENTIRE fleet's shared backlog, not just its own clips). A sidecar with
+    no `streamer_name` at all (archived before this field existed, or a manual/single-video run
+    with no --streamer-name) is treated as "unowned" and always included, rather than orphaned
+    by a filter that can't attribute it to anyone.
 
     Returns sidecar-having .mp4 paths only — a clip missing its metadata (a write failure at
     upload time) has no title/description/hashtags to retry with and is left for manual
@@ -297,22 +315,29 @@ def find_missing_youtube_uploads(uploaded_clips_dir: Path) -> List[Path]:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError):
             continue
+        clip_owner = data.get("streamer_name")
+        if streamer_name is not None and clip_owner is not None and clip_owner != streamer_name:
+            continue
         if data.get("publish") and not data.get("youtube_uploaded"):
             missing.append(mp4_path)
     return missing
 
 
-def retry_missing_youtube_uploads(uploaded_clips_dir: Path) -> Tuple[int, int]:
+def retry_missing_youtube_uploads(uploaded_clips_dir: Path, streamer_name: Optional[str] = None) -> Tuple[int, int]:
     """Retries ONLY the YouTube leg for clips found by find_missing_youtube_uploads() — never
     TikTok, since that already succeeded and re-running tiktok_uploader.try_upload_clip()
     would post a second, duplicate, publicly-visible copy of a clip that's already live.
     Uses upload_manager._upload_to_youtube() directly (not upload_clip_everywhere()) for
     exactly that reason — there's no TikTok leg to run here at all.
 
+    `streamer_name` is passed straight through to find_missing_youtube_uploads() — see its own
+    docstring for why this process should only retry its own streamer's clips out of the
+    shared uploaded_clips/ backlog, not the whole fleet's.
+
     Returns (retried_ok, retried_failed). Best-effort per clip: a sidecar write failure after
     a successful upload is logged, not raised — the YouTube upload already happened by then,
     so raising would make a real success look like a failure to the caller."""
-    candidates = find_missing_youtube_uploads(uploaded_clips_dir)[:YOUTUBE_RETRY_BATCH_LIMIT]
+    candidates = find_missing_youtube_uploads(uploaded_clips_dir, streamer_name)[:YOUTUBE_RETRY_BATCH_LIMIT]
     ok, failed = 0, 0
 
     for mp4_path in candidates:
@@ -404,6 +429,7 @@ def should_deploy(auto_upload: bool, publish: bool, survivors: list) -> bool:
 
 def run_deployment_phase(
     survivors: List[Tuple[dict, Path, Optional[int]]], publish: bool, instagram: bool = False,
+    streamer_name: Optional[str] = None,
 ) -> Tuple[int, int]:
     """Phase 5 (Deployment): upload every clip that survived Phase 3's purge to every
     configured platform via upload_manager.py (2026-08-20: TikTok + YouTube Shorts, 2026-08-21:
@@ -419,6 +445,14 @@ def run_deployment_phase(
     been run against a live Instagram session, so it stays off for every streamer until
     verified working and explicitly turned on in streamers.json (see orchestrator.py's
     build_auto_pilot_cmd()).
+
+    `streamer_name`, when known (run_cycle()'s own streamer_handle), is recorded in the
+    metadata sidecar so find_missing_youtube_uploads() can later scope its retry scan to only
+    this streamer's own clips — uploaded_clips/ is a single flat directory shared by every
+    concurrent streamer process (found in review, 2026-08-21: unlike output/<streamer>/, it
+    was never namespaced), so without this every streamer's cycle was retrying the ENTIRE
+    fleet's shared YouTube backlog, not just its own — N processes redundantly re-scanning and
+    racing upload_ledger's pending-lock over the same clips every cycle.
 
     Only ever called with publish=True (see run_cycle()) — TikTok has no draft-save action
     anymore (confirmed 2026-08-18: an abandoned upload is discarded, not saved), so there is
@@ -500,6 +534,15 @@ def run_deployment_phase(
                 "hook_style": clip.get("hook_style"),
                 "title_style": clip.get("title_style"),
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                # Which streamer this clip came from — uploaded_clips/ is a single flat
+                # directory shared by every concurrent streamer process (see this function's
+                # own docstring); find_missing_youtube_uploads() uses this to scope its retry
+                # scan to just this streamer's clips instead of the whole fleet's. None for a
+                # manual/single-video run with no --streamer-name, or for clips archived before
+                # this field existed (find_missing_youtube_uploads() treats a missing value as
+                # "unowned" and still includes it, so nothing already in uploaded_clips/ is
+                # orphaned by this change).
+                "streamer_name": streamer_name,
                 "publish": publish,
                 "confirmed": outcome.confirmed,
                 "youtube_uploaded": result.youtube.success,
@@ -683,7 +726,9 @@ def run_cycle(
             deploy_batch = survivors + backlog
             if should_deploy(auto_upload, publish, deploy_batch):
                 update_agent_state(current_action=f"📤 Upload läuft ({len(deploy_batch)} Clip(s))", **common_state)
-                uploaded, upload_failed = run_deployment_phase(deploy_batch, publish, instagram)
+                uploaded, upload_failed = run_deployment_phase(
+                    deploy_batch, publish, instagram, streamer_name=streamer_handle,
+                )
                 logger.info("📤 Deployment: %d hochgeladen, %d fehlgeschlagen", uploaded, upload_failed)
 
             # YouTube-only backlog: a clip already live on TikTok (hence already archived into
@@ -691,7 +736,7 @@ def run_cycle(
             # find_missing_youtube_uploads()'s own docstring. Runs every cycle regardless of
             # whether this cycle had its own survivors, same reasoning as the output/ backlog
             # scan above; never touches TikTok.
-            yt_ok, yt_failed = retry_missing_youtube_uploads(UPLOADED_CLIPS_DIR)
+            yt_ok, yt_failed = retry_missing_youtube_uploads(UPLOADED_CLIPS_DIR, streamer_name=streamer_handle)
             if yt_ok or yt_failed:
                 logger.info("📺 YouTube-Nachversuch: %d erfolgreich, %d fehlgeschlagen", yt_ok, yt_failed)
 

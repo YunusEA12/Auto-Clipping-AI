@@ -1,5 +1,6 @@
 import fnmatch
 import subprocess
+from pathlib import Path
 
 import process
 
@@ -40,6 +41,11 @@ def _fake_success(cmd, timeout=None):
 
 def test_render_clip_writes_into_given_output_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(process, "_run_ffmpeg", _fake_success)
+    # _fake_success's "fake video bytes" below isn't a real, decodable video — _is_valid_render()
+    # (2026-08-21) would correctly reject it, since these tests are about output_dir/filename
+    # placement, not video validity (see the _is_valid_render / QSV-fallback tests below for
+    # that behavior's own coverage).
+    monkeypatch.setattr(process, "_is_valid_render", lambda output_path: True)
     output_dir = tmp_path / "eliasn97"
     output_dir.mkdir()
     clip = {"title": "Test Clip", "start_time": 0.0, "end_time": 1.0}
@@ -60,8 +66,78 @@ def test_render_clip_writes_into_given_output_dir(tmp_path, monkeypatch):
     assert result == expected_path
 
 
+# --- encoder selection / _is_valid_render (2026-08-22: h264_qsv removed entirely — confirmed
+# /dev/dri doesn't exist on this VPS at all, so every QSV attempt failed (either a nonzero
+# exit, or exit 0 while writing a nonempty but undecodable file, which the old exists()/size>0
+# guard alone could not catch) and only ever wasted an attempt before the CPU fallback anyway.
+# render_clip() now goes straight to libx264.) -------------------------------------------------
+
+def test_render_clip_never_invokes_h264_qsv(tmp_path, monkeypatch):
+    calls = []
+
+    def _fake_run(cmd, timeout=None):
+        calls.append(cmd)
+        Path(cmd[-1]).write_bytes(b"valid")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(process, "_run_ffmpeg", _fake_run)
+    monkeypatch.setattr(process, "_is_valid_render", lambda output_path: True)
+
+    clip = {"title": "Test Clip", "start_time": 0.0, "end_time": 1.0}
+    process.render_clip(
+        tmp_path / "source.mp4", clip, tmp_path / "subs.ass", 1, process.LAYOUT_BLUR_BACKGROUND,
+        1080, 1920, output_dir=tmp_path, music_path=None,
+    )
+
+    assert len(calls) == 1  # succeeds on the first (and only) attempt
+    assert "h264_qsv" not in calls[0]
+    assert "libx264" in calls[0]
+
+
+def test_render_clip_retries_without_music_when_the_music_mix_is_unplayable(tmp_path, monkeypatch):
+    calls = []
+
+    def _fake_run(cmd, timeout=None):
+        has_music = "-stream_loop" in cmd
+        calls.append("music" if has_music else "no_music")
+        Path(cmd[-1]).write_bytes(b"corrupt" if has_music else b"valid")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(process, "_run_ffmpeg", _fake_run)
+    monkeypatch.setattr(process, "_is_valid_render", lambda output_path: output_path.read_bytes() == b"valid")
+
+    clip = {"title": "Test Clip", "start_time": 0.0, "end_time": 1.0}
+    result = process.render_clip(
+        tmp_path / "source.mp4", clip, tmp_path / "subs.ass", 1, process.LAYOUT_BLUR_BACKGROUND,
+        1080, 1920, output_dir=tmp_path, music_path=tmp_path / "track.mp3", has_source_audio=True,
+    )
+
+    assert calls == ["music", "no_music"]
+    assert result.read_bytes() == b"valid"
+
+
+def test_render_clip_raises_when_every_attempt_produces_an_unplayable_file(tmp_path, monkeypatch):
+    def _fake_run(cmd, timeout=None):
+        Path(cmd[-1]).write_bytes(b"corrupt")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(process, "_run_ffmpeg", _fake_run)
+    monkeypatch.setattr(process, "_is_valid_render", lambda output_path: False)
+
+    clip = {"title": "Test Clip", "start_time": 0.0, "end_time": 1.0}
+    try:
+        process.render_clip(
+            tmp_path / "source.mp4", clip, tmp_path / "subs.ass", 1, process.LAYOUT_BLUR_BACKGROUND,
+            1080, 1920, output_dir=tmp_path, music_path=None,
+        )
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert "FFmpeg failed for clip 1" in str(e)
+
+
 def test_render_clip_defaults_to_shared_output_dir_when_none_given(tmp_path, monkeypatch):
     monkeypatch.setattr(process, "_run_ffmpeg", _fake_success)
+    monkeypatch.setattr(process, "_is_valid_render", lambda output_path: True)
     monkeypatch.setattr(process, "OUTPUT_DIR", tmp_path)
     clip = {"title": "Test Clip", "start_time": 0.0, "end_time": 1.0}
     expected_path = tmp_path / process.clip_output_filename(1, clip["title"])

@@ -23,6 +23,18 @@ trusting this in headless/unattended mode — expect to have to adjust selectors
 whatever Instagram's actual current DOM turns out to be, exactly the same spot-check
 discipline tiktok_uploader.py's own docstring asks for after any UI change.
 
+2026-08-21: _select_9_16_aspect_ratio() (crop-tool + ratio selectors; named _select_original_
+aspect_ratio() until 2026-08-22) is new and carries the same UNVERIFIED status — added in
+response to an account-owner report of Reels arriving cropped top/bottom. 2026-08-22: now run
+against 6 real live sessions — the crop-tool click itself works, but the "Original" selection
+failed all 6 times (fails open safely). Switched the target from "Original" (ambiguous —
+defers to whatever ratio Instagram infers, which has caused BOTH the original over-crop report
+AND a later black-bars/letterboxing report on the same already-correct 1080x1920 source) to
+the explicit "9:16" option, plus a text-based selector swap (see that function's own updated
+docstring for the forensic detail) — itself still unverified. Check the
+selector_audit/05b_after_aspect_ratio_selection snapshot after the next real (--headed or
+live) run to confirm it actually clicked the right thing before trusting it further.
+
 SAFETY MODEL — same conservative default as tiktok_uploader.py until proven otherwise: this
 module does not know whether Instagram's web upload flow has a safe "save as draft" outcome.
 Rather than assume one exists (TikTok's own automation once assumed exactly that, wrongly —
@@ -190,6 +202,81 @@ def _dismiss_blocking_overlays(page) -> None:
             logger.info("Dismissed an overlay button labeled '%s'", name)
         except PlaywrightTimeoutError:
             continue
+
+
+def _select_9_16_aspect_ratio(page) -> bool:
+    """Best-effort: on Instagram's Crop step (see _dismiss_blocking_overlays' own docstring —
+    CONFIRMED live to exist, 2026-08-21), click the crop-tool icon and select "9:16" so
+    the source video — already correctly rendered at 9:16/1080x1920 edge-to-edge by process.py's
+    render pipeline (no black bars ever produced there — see build_filter_complex's cover-fit
+    crop for split_screen/full_cam/center_crop) — posts at its real aspect ratio instead of
+    whatever this wizard step defaults to. Account-owner report, 2026-08-21: Reels were arriving
+    visibly cropped at the top and bottom; account-owner report, 2026-08-22: Reels were instead
+    arriving letterboxed with black bars top/bottom, not filling the screen.
+
+    2026-08-22: switched from targeting "Original" to targeting "9:16" explicitly. "Original"
+    is ambiguous — it defers to whatever aspect ratio Instagram itself infers for the source
+    (from container/rotation metadata, which has already caused both the "too cropped" AND the
+    "black bars" symptom above on the SAME already-correctly-rendered 1080x1920 file), whereas
+    "9:16" is an explicit, unambiguous target that matches process.py's render output exactly
+    regardless of what Instagram infers. Forensic history: svg[aria-label="Select crop"] IS
+    confirmed live to open a real "Crop" dialog (role="dialog" aria-label="Crop", with a
+    "Back"/"Next" header) — that part works. The old svg[aria-label="Original"]/svg[aria-
+    label="9:16"] icon-based guess failed on 6/6 real runs; a saved selector_audit/05b_*
+    screenshot showed the ratio picker rendering as plain-text rows ("Original"/"1:1"/"9:16"/
+    "16:9"), not svg-icon labels, so the primary strategy here is a text-based locator scoped
+    to the Crop dialog, with the old icon-based locator kept as a second fallback in case a
+    different account/flow variant still uses it. STILL UNVERIFIED end-to-end for "9:16"
+    specifically (no live --headed session available to confirm the fix actually lands the
+    click) — check the next real run's selector_audit/05b_* pair before trusting this further,
+    same discipline as this module's own docstring already asks for. Never raises and never
+    blocks the upload either way: a missed fix here is strictly better than failing the whole
+    upload over it."""
+    crop_button = 'svg[aria-label="Select crop"]'
+    crop_dialog = page.get_by_role("dialog", name="Crop")
+
+    try:
+        page.locator(crop_button).first.click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
+    except PlaywrightTimeoutError:
+        logger.warning(
+            "Could not find the crop-tool button (selector drift, or this flow has no crop "
+            "step) — skipping explicit '9:16' aspect-ratio selection; Instagram's default "
+            "crop may add black bars or clip this clip's top/bottom. Run with --headed to "
+            "check the current DOM."
+        )
+        return False
+
+    # Text-based first (see 2026-08-22 note above — this is what the screenshot evidence
+    # actually shows), the old icon-label selector as a fallback for a possible other variant.
+    selected = False
+    for locator, description in (
+        (crop_dialog.get_by_text("9:16", exact=True), "text '9:16' inside the Crop dialog"),
+        (page.locator('svg[aria-label="9:16"]'), "svg[aria-label=\"9:16\"]"),
+    ):
+        try:
+            locator.first.click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
+            selected = True
+            logger.info("Clicked the aspect-ratio option via %s", description)
+            break
+        except PlaywrightTimeoutError:
+            continue
+
+    if not selected:
+        logger.warning(
+            "Crop tool opened but no '9:16' option was found (selector drift?) — the "
+            "wizard's default aspect ratio will be used instead."
+        )
+
+    # Close the crop popover the same way it was opened, regardless of whether "9:16" was
+    # found, so it never stays open over the "Next" button on the following step.
+    try:
+        page.locator(crop_button).first.click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
+    except PlaywrightTimeoutError:
+        pass
+
+    if selected:
+        logger.info("Selected '9:16' aspect ratio to avoid Instagram's default crop/letterboxing")
+    return selected
 
 
 def _open_create_reel_dialog(page) -> bool:
@@ -400,6 +487,13 @@ def upload_video(
             _wait_for_upload_processing(page)
             _dismiss_blocking_overlays(page)
             _save_snapshot(page, "05_after_upload_processing")
+
+            # Fix for clips arriving cropped top/bottom or letterboxed with black bars
+            # (account-owner reports, 2026-08-21 and 2026-08-22) — see
+            # _select_9_16_aspect_ratio's own docstring. Must run before the wizard "Next" loop
+            # below: the Crop step is the first screen after upload processing.
+            _select_9_16_aspect_ratio(page)
+            _save_snapshot(page, "05b_after_aspect_ratio_selection")
 
             # Instagram's upload dialog is commonly a multi-step wizard (crop -> filters ->
             # caption); a "Next" control between the file picker and the caption field is

@@ -111,7 +111,7 @@ def test_analyze_reads_transcript_language_and_passes_it_to_select_clips(tmp_pat
 
     captured = {}
 
-    def fake_select_clips(transcript_text, energy_spikes, window_scores, model, profile, streamer_name, language):
+    def fake_select_clips(transcript_text, energy_spikes, window_scores, model, profile, streamer_name, language, transcript_duration=None):
         captured["language"] = language
         return analyze.ClipSelection(clips=[])
 

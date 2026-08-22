@@ -177,17 +177,36 @@ def _upload_to_youtube(
     except HttpError as e:
         error_text = str(e)
         upload_limit_exceeded = e.resp.status == 400 and "uploadLimitExceeded" in error_text
+        # Distinct from uploadLimitExceeded above: this is the *project-level* Data API quota
+        # ("Video Uploads" / "Video Uploads per day", reason rateLimitExceeded) rather than the
+        # channel's own account-wide cap — a new/unverified OAuth client defaults to a very low
+        # daily upload allowance (commonly ~6/day) shared across every streamer this fleet
+        # publishes for. Found live, 2026-08-21: with no detection for this specific status/
+        # reason pair, it fell into the undifferentiated `else` below — no backoff got recorded,
+        # so every streamer's next cycle AND auto_pilot.retry_missing_youtube_uploads() (runs
+        # every ~3-7 minutes per streamer) kept resubmitting the exact same upload straight into
+        # the same 429, dozens of times a day across the fleet. That's the "flooding" a new
+        # channel's abuse heuristics are most likely to key on — fold it into the same backoff
+        # as uploadLimitExceeded so a hit here stops the fleet from hammering the endpoint too.
+        daily_video_quota_exceeded = (
+            e.resp.status == 429
+            and "quota exceeded" in error_text.lower()
+            and "video uploads" in error_text.lower()
+        )
         quota_exceeded = e.resp.status == 403 and "quota" in error_text.lower()
-        if upload_limit_exceeded:
+        if upload_limit_exceeded or daily_video_quota_exceeded:
             _record_upload_limit_hit()
             resumes_at = datetime.now(timezone.utc) + timedelta(minutes=UPLOAD_LIMIT_BACKOFF_MINUTES)
+            reason = (
+                "an account-level limit (uploadLimitExceeded)" if upload_limit_exceeded
+                else "the project's daily Data API 'Video Uploads' quota (429 rateLimitExceeded)"
+            )
             logger.error(
-                "YouTube channel daily upload cap hit for %s — an account-level limit "
-                "(uploadLimitExceeded), not a token/API-quota problem; YouTube's own docs "
-                "describe this as resetting on a rolling ~24h basis, not fixed to midnight. "
-                "Backing off further YouTube attempts until %s instead of retrying every "
-                "cycle (retries against this exact error already observed live, 2026-08-21).",
-                video_path.name, resumes_at.isoformat(),
+                "YouTube daily upload ceiling hit for %s — %s, not a transient error worth "
+                "retrying immediately. Backing off further YouTube attempts until %s instead of "
+                "retrying every cycle (retries against this exact error already observed live, "
+                "2026-08-21).",
+                video_path.name, reason, resumes_at.isoformat(),
             )
         elif quota_exceeded:
             logger.error("YouTube API quota exceeded — could not upload %s: %s", video_path.name, e)

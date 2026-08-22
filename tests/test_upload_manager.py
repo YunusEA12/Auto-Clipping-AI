@@ -236,6 +236,61 @@ def test_backoff_clears_after_the_window_elapses(monkeypatch, tmp_path, fake_tik
     assert result.youtube.success is True
 
 
+# --- daily "Video Uploads" Data API quota backoff (2026-08-21, found live: this is a THIRD,
+# distinct error shape from both cases above -- HTTP 429, reason rateLimitExceeded, message
+# naming the 'Video Uploads'/'Video Uploads per day' quota metric. Neither the 400
+# uploadLimitExceeded check nor the 403 quota_exceeded check matches it, so it fell into the
+# undifferentiated `else` branch with no backoff recorded: every streamer's next cycle AND
+# auto_pilot.retry_missing_youtube_uploads() (runs every ~3-7 minutes per streamer) kept
+# resubmitting straight into the same 429 across the whole fleet.) ------------------------------
+
+DAILY_VIDEO_QUOTA_ERROR = (
+    b'{"error": {"message": "Quota exceeded for quota metric \'Video Uploads\' and limit '
+    b'\'Video Uploads per day\' of service \'youtube.googleapis.com\' for consumer '
+    b'\'project_number:736355812141\'.", "errors": [{"reason": "rateLimitExceeded", '
+    b'"domain": "global", "message": "Quota exceeded for quota metric \'Video Uploads\' and '
+    b'limit \'Video Uploads per day\' of service \'youtube.googleapis.com\' for consumer '
+    b'\'project_number:736355812141\'."}]}}'
+)
+
+
+def test_daily_video_quota_429_records_backoff_and_does_not_raise(monkeypatch, tmp_path, fake_tiktok_success, clip_path):
+    monkeypatch.setattr(upload_manager, "UPLOAD_LIMIT_BACKOFF_PATH", tmp_path / "backoff.json")
+
+    def boom(*a, **k):
+        raise _make_http_error(429, DAILY_VIDEO_QUOTA_ERROR)
+    monkeypatch.setattr(youtube_uploader, "upload_clip", boom)
+
+    result = upload_manager.upload_clip_everywhere(clip_path, "Title", "desc", publish=True)
+
+    assert result.youtube.success is False
+    assert result.youtube.attempted is True
+    assert upload_manager._upload_limit_backoff_until() is not None
+
+
+def test_second_attempt_during_daily_video_quota_backoff_skips_the_real_api_call(monkeypatch, tmp_path, fake_tiktok_success):
+    monkeypatch.setattr(upload_manager, "UPLOAD_LIMIT_BACKOFF_PATH", tmp_path / "backoff.json")
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise _make_http_error(429, DAILY_VIDEO_QUOTA_ERROR)
+    monkeypatch.setattr(youtube_uploader, "upload_clip", boom)
+
+    clip_1 = tmp_path / "clip_1.mp4"
+    clip_1.write_bytes(b"clip one bytes")
+    clip_2 = tmp_path / "clip_2.mp4"
+    clip_2.write_bytes(b"clip two bytes, genuinely different content")
+
+    upload_manager.upload_clip_everywhere(clip_1, "Title", "desc", publish=True)
+    assert len(calls) == 1  # first attempt: real call, hits the 429, records backoff
+
+    result = upload_manager.upload_clip_everywhere(clip_2, "Title", "desc", publish=True)
+    assert len(calls) == 1  # second attempt: skipped entirely, no new API call
+    assert result.youtube.attempted is False
+    assert result.youtube.success is False
+
+
 def test_quota_exceeded_and_upload_limit_exceeded_are_detected_distinctly(monkeypatch, tmp_path, fake_tiktok_success, clip_path):
     # A 403 quotaExceeded must NOT be mistaken for the 400 uploadLimitExceeded case -- they
     # need different handling (quota resets are a Google Cloud project concern, not this

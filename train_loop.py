@@ -108,11 +108,25 @@ start, middle, near-end) plus real TikTok performance data for previously upload
 Score honestly — you are not the one who picked it, so you have no reason to defend a bad
 choice.
 
+When a clip's block includes a "Kontext DAVOR" section, that text is background ONLY — the
+few seconds spoken immediately before the clip's own start_time — not part of the clip and
+never itself judged. Use it purely to understand what a short clip is reacting to before you
+decide whether the clip itself lacks context; a clip that makes complete sense once you read
+that lead-in is NOT "confusing" or "missing context," even though its own isolated transcript
+slice would look that way in isolation.
+
 Evaluate TWO independent dimensions:
 
-1. NARRATIVE: Is the transcript text coherent and engaging? Does it have a clear beginning,
-   understandable context, and a resolved end? Does it start or end mid-sentence? Is there
-   an actual hook, or is it boring/rambling without a payoff?
+1. NARRATIVE: Judged with the "Kontext DAVOR" lead-in in mind (see above), is the clip
+   coherent and engaging? Does it start or end mid-sentence in a way that actually breaks
+   comprehension? Is there a real payoff, or is it boring/rambling with nothing happening?
+   Explicitly do NOT penalize a clip just for being SHORT or for skipping a long setup: a
+   quick reaction shot, a one-liner, a punchline, or a fast-paced Twitch-humor beat (laugh,
+   callback, chat reaction, sudden reveal) is a completely normal, good clip on its own —
+   score it on whether the moment itself lands, not on whether it has a full three-act
+   structure. Only mark it down for narrative if, even with the lead-in context, it's
+   genuinely unclear what's happening or the cut visibly cuts off the payoff itself
+   (not the setup).
 
 2. VISUAL COMPOSITION (only when screenshots are provided): This pipeline renders in
    whichever of three layouts actually fits the source footage — judge correctness against
@@ -132,11 +146,14 @@ Evaluate TWO independent dimensions:
    Judge purely from what's visible in the screenshots, not from the transcript.
 
 Score each clip's overall reward_score from -10 to +10, weighing both dimensions:
-- Negative scores (-10 to -1): bad on either dimension — boring/flat with no payoff,
-  mid-sentence cuts, no hook, confusing context, OR broken visual composition (wrong facecam
-  position, black bars, glitches, duplicated content).
-- Positive scores (+1 to +10): solid on both dimensions — coherent narrative with a real
-  hook AND (when screenshots are available) correct, clean visual composition.
+- Negative scores (-10 to -1): bad on either dimension — boring/flat with genuinely no payoff
+  even accounting for the lead-in context, the cut visibly severs the payoff itself (not just
+  a missing setup), OR broken visual composition (wrong facecam position, black bars,
+  glitches, duplicated content). Being short or being a quick reaction/punchline is NOT by
+  itself a reason to score negative.
+- Positive scores (+1 to +10): the moment itself lands — a real hook, laugh, or payoff,
+  understandable with its lead-in context — AND (when screenshots are available) correct,
+  clean visual composition.
 
 Rules for the four kinds of rules you can produce:
 - If reward_score is negative because of the NARRATIVE, you MUST set avoid_rule: a short,
@@ -360,6 +377,15 @@ def load_accepted_clips_section() -> str:
     )
 
 
+# How far back before a clip's own start_time to pull lead-in transcript text for the critic
+# (see extract_clip_context_text). A short reaction/punchline clip legitimately starts right
+# at the payoff with no setup of its own — judged on its own isolated transcript slice alone,
+# that reads to the critic as "confusing, no context, starts mid-conversation" even when it's
+# a perfectly good clip. 20s is enough to show what the reaction is reacting TO without
+# dumping in unrelated earlier material.
+CRITIC_CONTEXT_LOOKBACK_SECONDS = 20.0
+
+
 def extract_clip_transcript_text(transcript: Optional[dict], start: float, end: float) -> str:
     """The actual words spoken during a clip's time range, so the critic can judge
     mid-sentence cuts and missing hooks against the real transcript instead of guessing
@@ -371,6 +397,25 @@ def extract_clip_transcript_text(transcript: Optional[dict], start: float, end: 
     overlapping = [seg["text"] for seg in segments if seg["end"] > start and seg["start"] < end]
     text = " ".join(overlapping).strip()
     return text or "(kein Transkripttext in diesem Zeitbereich gefunden)"
+
+
+def extract_clip_context_text(
+    transcript: Optional[dict], start: float, lookback: float = CRITIC_CONTEXT_LOOKBACK_SECONDS,
+) -> str:
+    """The transcript text spoken in the `lookback` seconds immediately BEFORE a clip's own
+    start_time — background only, never part of the clip itself. Lets the critic tell "this
+    reaction has no setup because the AI cut it badly" apart from "this reaction has no setup
+    because it's a short, self-contained punchline reacting to something just before it" —
+    the latter is normal, common Twitch content and shouldn't be scored down for it."""
+    if not transcript:
+        return ""
+
+    segments = transcript.get("segments", [])
+    lead_in = [
+        seg["text"] for seg in segments
+        if seg["end"] > start - lookback and seg["start"] < start
+    ]
+    return " ".join(lead_in).strip()
 
 
 def _read_image_bytes(path: Path) -> Optional[bytes]:
@@ -440,9 +485,17 @@ def build_critic_user_content(
     for idx, clip in enumerate(clips, start=1):
         title = clip.get("title", "Untitled")
         feedback = feedback_by_title.get(title)
+        context_text = extract_clip_context_text(transcript, clip["start_time"])
         block = (
             f"\n--- Clip {idx}: {title} ---\n"
             f"Hook-Begründung (vom Auswahl-Modell): {clip.get('hook_explanation', '')}\n"
+        )
+        if context_text:
+            block += (
+                f"Kontext DAVOR (nicht Teil des Clips — nur zum Verständnis, was der Clip "
+                f"aufgreift): {context_text}\n"
+            )
+        block += (
             f"Transkript im Clip-Zeitbereich: "
             f"{extract_clip_transcript_text(transcript, clip['start_time'], clip['end_time'])}"
         )
@@ -466,9 +519,14 @@ def _call_critic(content: List[Union[str, "genai_types.Part"]], model: str) -> C
     if viral_section:
         content = content + [viral_section]
 
-    response = llm_utils.call_with_retry(
-        lambda: client.models.generate_content(
-            model=model,
+    # `model` (caller-chosen: vision_model or text_model, see run_critic() below) always goes
+    # first; the rest of llm_utils.DEFAULT_MODEL_POOL follows as fallback if it's quota-
+    # exhausted for today — see llm_utils.call_with_fallback's own docstring.
+    model_pool = [model] + [m for m in llm_utils.DEFAULT_MODEL_POOL if m != model]
+
+    response = llm_utils.call_with_fallback(
+        lambda m: client.models.generate_content(
+            model=m,
             contents=content,
             config=genai_types.GenerateContentConfig(
                 system_instruction=CRITIC_SYSTEM_PROMPT,
@@ -478,6 +536,7 @@ def _call_critic(content: List[Union[str, "genai_types.Part"]], model: str) -> C
             ),
         ),
         description=f"train_loop._call_critic({model})",
+        model_pool=model_pool,
     )
 
     candidate = response.candidates[0] if response.candidates else None

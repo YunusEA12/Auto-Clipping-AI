@@ -24,6 +24,24 @@ def transcription_path_for(audio_path: Path) -> Path:
     return TEMP_DIR / f"{audio_path.stem}_transcription.json"
 
 
+def _consume_segments(segments) -> list:
+    """Drains faster-whisper's lazy segment generator into plain dicts. Split out from
+    transcribe() so it can be called a second time on retry (see transcribe()'s IndexError
+    handler) without duplicating this shape-conversion logic."""
+    return [
+        {
+            "text": segment.text.strip(),
+            "start": segment.start,
+            "end": segment.end,
+            "words": [
+                {"text": word.word.strip(), "start": word.start, "end": word.end}
+                for word in (segment.words or [])
+            ],
+        }
+        for segment in segments
+    ]
+
+
 def transcribe(audio_path: Path, model_size: str = MODEL_SIZE) -> Path:
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
@@ -45,20 +63,31 @@ def transcribe(audio_path: Path, model_size: str = MODEL_SIZE) -> Path:
     # Plain list of dicts (start/end/text/words) rather than faster-whisper's own objects —
     # this is the editable contract: the Streamlit subtitle editor and process.py's renderer
     # both read/write this exact JSON shape instead of anything tied to the transcription lib.
-    result_segments = []
-    for segment in segments:
-        words = [
-            {"text": word.word.strip(), "start": word.start, "end": word.end}
-            for word in (segment.words or [])
-        ]
-        result_segments.append(
-            {
-                "text": segment.text.strip(),
-                "start": segment.start,
-                "end": segment.end,
-                "words": words,
-            }
+    try:
+        result_segments = _consume_segments(segments)
+    except IndexError as e:
+        if "boolean index" not in str(e):
+            raise
+        # Confirmed live, 2026-08-21 (crashed a whole cycle, zero clips produced from that
+        # 3-minute chunk) — a real bug in faster-whisper 1.2.1's own find_alignment()
+        # (site-packages/faster_whisper/transcribe.py): when the forced-alignment model
+        # returns zero (text, time) index pairs for a segment with >1 word token — plausible
+        # for noisy/non-speech-heavy stretches, common in a live gaming stream (crowd noise,
+        # game audio, laughter) — `time_indices` ends up shape (0,) while the derived boolean
+        # `jumps` mask ends up shape (1,), raising exactly this IndexError. `segments` is a
+        # lazy generator, so this can surface mid-iteration on ANY segment, not just the
+        # first — nothing in this codebase can fix the library's own alignment math, but
+        # word_timestamps=False skips that code path entirely. Every downstream consumer
+        # already tolerates a segment with no word-level timestamps (the `segment.words or []`
+        # inside _consume_segments, and process.py's own subtitle renderer), so this is a real
+        # quality tradeoff (no per-word caption timing for this chunk) rather than losing the
+        # whole chunk's clips over a library edge case.
+        logger.warning(
+            "faster-whisper's word-alignment step hit a known internal bug (%s) — retrying %s "
+            "without word-level timestamps.", e, audio_path,
         )
+        segments, info = model.transcribe(str(audio_path), word_timestamps=False)
+        result_segments = _consume_segments(segments)
 
     if not result_segments:
         raise RuntimeError(f"Transcription produced no segments for: {audio_path}")

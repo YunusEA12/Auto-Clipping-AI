@@ -95,6 +95,42 @@ def test_confirmed_upload_moves_to_uploaded_clips(tmp_path, monkeypatch):
     assert (tmp_path / "uploaded_clips" / "clip_1_Test.mp4").exists()
 
 
+def test_streamer_name_recorded_in_sidecar_for_backlog_scoping(tmp_path, monkeypatch):
+    # 2026-08-21: find_missing_youtube_uploads() uses this field to scope its retry scan to
+    # just this streamer's own clips out of the shared uploaded_clips/ directory.
+    monkeypatch.setattr(auto_pilot, "UPLOADED_CLIPS_DIR", tmp_path / "uploaded_clips")
+    monkeypatch.setattr(
+        auto_pilot.tiktok_uploader, "try_upload_clip",
+        lambda *a, **k: auto_pilot.tiktok_uploader.UploadOutcome(success=True, confirmed=True),
+    )
+
+    output_path = tmp_path / "clip_1_Test.mp4"
+    output_path.write_bytes(b"fake video bytes")
+    clip = {"title": "Test", "description": "desc", "hashtags": ["#fyp"], "viral_score": 8}
+
+    auto_pilot.run_deployment_phase([(clip, output_path, 3)], publish=True, streamer_name="alice")
+
+    sidecar = json.loads((tmp_path / "uploaded_clips" / "clip_1_Test.json").read_text(encoding="utf-8"))
+    assert sidecar["streamer_name"] == "alice"
+
+
+def test_streamer_name_defaults_to_none_when_not_given(tmp_path, monkeypatch):
+    monkeypatch.setattr(auto_pilot, "UPLOADED_CLIPS_DIR", tmp_path / "uploaded_clips")
+    monkeypatch.setattr(
+        auto_pilot.tiktok_uploader, "try_upload_clip",
+        lambda *a, **k: auto_pilot.tiktok_uploader.UploadOutcome(success=True, confirmed=True),
+    )
+
+    output_path = tmp_path / "clip_1_Test.mp4"
+    output_path.write_bytes(b"fake video bytes")
+    clip = {"title": "Test", "description": "desc", "hashtags": ["#fyp"], "viral_score": 8}
+
+    auto_pilot.run_deployment_phase([(clip, output_path, 3)], publish=True)
+
+    sidecar = json.loads((tmp_path / "uploaded_clips" / "clip_1_Test.json").read_text(encoding="utf-8"))
+    assert sidecar["streamer_name"] is None
+
+
 # --- Instagram integration (2026-08-21) — a separate opt-in from publish itself, since
 # upload_instagram_playwright.py's automation has never been verified against a live session
 # (see that module's own docstring); defaults off for every streamer regardless of publish. ---

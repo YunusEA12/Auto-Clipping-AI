@@ -41,9 +41,11 @@ def test_budget_raises_once_the_daily_ceiling_is_hit(tmp_path):
     with pytest.raises(llm_utils.DailyCallBudgetExceeded):
         llm_utils.check_and_increment_budget(max_calls_per_day=3, path=path)
 
-    # A rejected call must not itself count against the budget.
+    # A rejected call must not itself count against the budget. Attributed to the primary
+    # model (2026-08-21: per-model tracking, see check_and_increment_budget's own docstring)
+    # since no explicit model was given.
     state = json.loads(path.read_text(encoding="utf-8"))
-    assert state["calls"] == 3
+    assert state["calls"] == {llm_utils.DEFAULT_MODEL_POOL[0]: 3}
 
 
 def test_budget_resets_on_a_new_utc_day(tmp_path):
@@ -160,3 +162,214 @@ def test_call_with_retry_respects_daily_budget(isolated_budget_path):
 
     with pytest.raises(llm_utils.DailyCallBudgetExceeded):
         llm_utils.call_with_retry(lambda: "should never run", description="test", max_calls_per_day=1)
+
+
+# --- per-model budget isolation (2026-08-21: Google's free-tier quota is per-model-per-day,
+# not per-project -- confirmed live the same day gemini-3.5-flash-lite hit RESOURCE_EXHAUSTED
+# at exactly 500/day while gemini-3.5-flash, a completely different model, worked fine seconds
+# later) -------------------------------------------------------------------------------------
+
+def test_check_and_increment_budget_tracks_models_independently(tmp_path):
+    path = tmp_path / "budget.json"
+    for expected in (1, 2, 3):
+        assert llm_utils.check_and_increment_budget("model-a", max_calls_per_day=3, path=path) == expected
+    # model-a is now exhausted...
+    with pytest.raises(llm_utils.DailyCallBudgetExceeded):
+        llm_utils.check_and_increment_budget("model-a", max_calls_per_day=3, path=path)
+    # ...but model-b's own counter is completely unaffected.
+    assert llm_utils.check_and_increment_budget("model-b", max_calls_per_day=3, path=path) == 1
+
+
+def test_old_flat_int_budget_file_migrates_to_primary_model(tmp_path):
+    # A file written by the pre-2026-08-21 single-model code (or by check_and_increment_budget
+    # with no model, which still writes under the primary/default key).
+    path = tmp_path / "budget.json"
+    path.write_text(
+        json.dumps({"date": datetime.now(timezone.utc).date().isoformat(), "calls": 500}),
+        encoding="utf-8",
+    )
+    state = llm_utils._load_budget_state(path)
+    assert state["calls"] == {llm_utils.DEFAULT_MODEL_POOL[0]: 500}
+
+
+# --- _is_daily_quota_exhausted ---------------------------------------------------------------
+
+def test_daily_call_budget_exceeded_is_recognized_as_quota_exhaustion():
+    assert llm_utils._is_daily_quota_exhausted(llm_utils.DailyCallBudgetExceeded("x")) is True
+
+
+def test_real_per_day_quota_429_is_recognized():
+    from google.genai import errors as genai_errors
+    e = genai_errors.ClientError(code=429, response_json={"error": {
+        "message": "Quota exceeded for quota metric 'Video Uploads' and limit "
+                   "'Video Uploads per day' ... GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+    }})
+    assert llm_utils._is_daily_quota_exhausted(e) is True
+
+
+def test_generic_429_without_a_perday_marker_is_not_treated_as_daily_exhaustion():
+    # A genuinely transient rate limit (e.g. per-minute) must still go through the normal
+    # backoff-retry path on the same model, not immediately fail over.
+    assert llm_utils._is_daily_quota_exhausted(_client_error(429)) is False
+
+
+def test_non_429_client_error_is_not_daily_quota_exhaustion():
+    assert llm_utils._is_daily_quota_exhausted(_client_error(400)) is False
+
+
+def test_call_with_retry_does_not_retry_a_real_daily_quota_429(monkeypatch, isolated_budget_path):
+    from google.genai import errors as genai_errors
+
+    slept = []
+    monkeypatch.setattr(llm_utils.time, "sleep", lambda s: slept.append(s))
+    calls = {"count": 0}
+
+    def hits_daily_quota():
+        calls["count"] += 1
+        raise genai_errors.ClientError(code=429, response_json={"error": {
+            "message": "RESOURCE_EXHAUSTED ... GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+        }})
+
+    from google.genai import errors as genai_errors_mod
+    with pytest.raises(genai_errors_mod.ClientError):
+        llm_utils.call_with_retry(hits_daily_quota, description="test", max_retries=5, base_delay=0.01)
+
+    assert calls["count"] == 1  # no retries burned against a per-day quota
+    assert slept == []
+
+
+# --- call_with_fallback -----------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _no_real_sleep_in_fallback_tests(monkeypatch):
+    monkeypatch.setattr(llm_utils.time, "sleep", lambda _s: None)
+
+
+def test_call_with_fallback_uses_the_primary_model_when_it_works(isolated_budget_path):
+    calls = []
+
+    def make_request(model):
+        calls.append(model)
+        return f"response from {model}"
+
+    result = llm_utils.call_with_fallback(
+        make_request, description="test", model_pool=["model-a", "model-b"],
+    )
+
+    assert result == "response from model-a"
+    assert calls == ["model-a"]
+
+
+def test_call_with_fallback_advances_on_real_daily_quota_429(isolated_budget_path):
+    from google.genai import errors as genai_errors
+
+    calls = []
+
+    def make_request(model):
+        calls.append(model)
+        if model == "model-a":
+            raise genai_errors.ClientError(code=429, response_json={"error": {
+                "message": "RESOURCE_EXHAUSTED ... GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+            }})
+        return f"response from {model}"
+
+    result = llm_utils.call_with_fallback(
+        make_request, description="test", model_pool=["model-a", "model-b"],
+    )
+
+    assert result == "response from model-b"
+    assert calls == ["model-a", "model-b"]
+
+
+def test_call_with_fallback_advances_on_local_daily_budget_exhaustion(isolated_budget_path):
+    isolated_budget_path.write_text(
+        json.dumps({"date": datetime.now(timezone.utc).date().isoformat(), "calls": {"model-a": 5}}),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def make_request(model):
+        calls.append(model)
+        return f"response from {model}"
+
+    result = llm_utils.call_with_fallback(
+        make_request, description="test", model_pool=["model-a", "model-b"], max_calls_per_day=5,
+    )
+
+    assert result == "response from model-b"
+    assert calls == ["model-b"]  # model-a's local budget check failed before any real call
+
+
+def test_call_with_fallback_raises_all_models_exhausted_when_every_model_is_out(isolated_budget_path):
+    from google.genai import errors as genai_errors
+
+    def always_exhausted(model):
+        raise genai_errors.ClientError(code=429, response_json={"error": {
+            "message": "RESOURCE_EXHAUSTED ... GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+        }})
+
+    with pytest.raises(llm_utils.AllModelsExhausted):
+        llm_utils.call_with_fallback(
+            always_exhausted, description="test", model_pool=["model-a", "model-b"],
+        )
+
+
+def test_call_with_fallback_propagates_non_quota_errors_unchanged(isolated_budget_path):
+    calls = []
+
+    def make_request(model):
+        calls.append(model)
+        raise ValueError("a real bug, not a quota problem")
+
+    with pytest.raises(ValueError):
+        llm_utils.call_with_fallback(
+            make_request, description="test", model_pool=["model-a", "model-b"],
+        )
+
+    assert calls == ["model-a"]  # never masked into a failover -- this is a real bug
+
+
+def test_call_with_fallback_is_sticky_across_separate_calls(isolated_budget_path):
+    from google.genai import errors as genai_errors
+
+    def make_request(model):
+        if model == "model-a":
+            raise genai_errors.ClientError(code=429, response_json={"error": {
+                "message": "RESOURCE_EXHAUSTED ... GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+            }})
+        return f"response from {model}"
+
+    llm_utils.call_with_fallback(make_request, description="first", model_pool=["model-a", "model-b"])
+
+    # A second, independent call (simulating a different streamer process reading the same
+    # shared state file) must start directly at model-b -- not re-probe the already-known-
+    # exhausted model-a with another wasted API call.
+    calls = []
+
+    def make_request_2(model):
+        calls.append(model)
+        return f"response from {model}"
+
+    result = llm_utils.call_with_fallback(
+        make_request_2, description="second", model_pool=["model-a", "model-b"],
+    )
+    assert calls == ["model-b"]
+    assert result == "response from model-b"
+
+
+def test_call_with_fallback_resets_to_primary_on_a_new_utc_day(isolated_budget_path):
+    yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    isolated_budget_path.write_text(
+        json.dumps({"date": yesterday, "calls": {}, "active_model": "model-b"}), encoding="utf-8",
+    )
+    calls = []
+
+    def make_request(model):
+        calls.append(model)
+        return f"response from {model}"
+
+    result = llm_utils.call_with_fallback(
+        make_request, description="test", model_pool=["model-a", "model-b"],
+    )
+    assert calls == ["model-a"]  # yesterday's sticky choice does not carry over
+    assert result == "response from model-a"
