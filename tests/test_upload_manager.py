@@ -497,7 +497,14 @@ def test_instagram_retries_a_failure_and_succeeds_on_a_later_attempt(monkeypatch
     def flaky(*a, **k):
         calls.append(1)
         if len(calls) < upload_manager.INSTAGRAM_UPLOAD_MAX_RETRIES:
-            return instagram_uploader.UploadOutcome(success=False, detail="transient")
+            # instagram_uploader.UploadOutcome only has success/confirmed (no detail field) —
+            # a real, non-exception failure, exercising the exact retry-logging line that
+            # crashed live, 2026-08-24, by unconditionally accessing outcome.detail on this
+            # type. This test previously (wrongly) passed `detail=` here, which raised
+            # TypeError on construction — silently caught by _upload_to_instagram's own
+            # except Exception, masking this whole bug by always taking the "outcome is None"
+            # branch instead of the "outcome exists but failed" branch the crash lived in.
+            return instagram_uploader.UploadOutcome(success=False, confirmed=False)
         return instagram_uploader.UploadOutcome(success=True, confirmed=True)
     monkeypatch.setattr(instagram_uploader, "try_upload_clip", flaky)
 
@@ -515,7 +522,7 @@ def test_instagram_gives_up_after_max_retries_and_marks_failed(monkeypatch, fake
     calls = []
     monkeypatch.setattr(
         instagram_uploader, "try_upload_clip",
-        lambda *a, **k: (calls.append(1), instagram_uploader.UploadOutcome(success=False, detail="stuck"))[1],
+        lambda *a, **k: (calls.append(1), instagram_uploader.UploadOutcome(success=False, confirmed=False))[1],
     )
 
     result = upload_manager.upload_clip_everywhere(
@@ -576,6 +583,26 @@ def test_instagram_retries_across_repeated_exceptions_then_gives_up(monkeypatch,
     assert len(calls) == upload_manager.INSTAGRAM_UPLOAD_MAX_RETRIES
     assert result.instagram.success is False
     assert "playwright blew up" in result.instagram.detail
+
+
+def test_instagram_non_exception_failure_does_not_crash_the_retry_log(monkeypatch, fake_tiktok_success, clip_path):
+    """Found live, 2026-08-24: a real (non-exception) Instagram failure — try_upload_clip()
+    returns success=False without raising — crashed with 'UploadOutcome' object has no
+    attribute 'detail' inside the retry-logging line itself, which is OUTSIDE the try/except
+    that only guards the try_upload_clip() call. That AttributeError escaped
+    upload_clip_everywhere() entirely uncaught, taking down the calling auto_pilot.py cycle
+    into its 90s error cooldown (DEFAULT_ERROR_COOLDOWN_SECONDS)."""
+    monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
+    monkeypatch.setattr(
+        instagram_uploader, "try_upload_clip",
+        lambda *a, **k: instagram_uploader.UploadOutcome(success=False, confirmed=False),
+    )
+
+    result = upload_manager.upload_clip_everywhere(
+        clip_path, "Title", "desc", publish=True, instagram_enabled=True,
+    )  # must not raise
+
+    assert result.instagram.success is False
 
 
 def test_any_success_true_when_only_instagram_succeeds(monkeypatch, fake_tiktok_failure, clip_path):

@@ -383,10 +383,21 @@ def _upload_to_instagram(
                 INSTAGRAM_UPLOAD_MAX_DELAY_SECONDS,
                 INSTAGRAM_UPLOAD_BASE_DELAY_SECONDS * (2 ** (attempt - 1)),
             ) * (1 + random.random() * 0.25)
+            # instagram_uploader.UploadOutcome only carries success/confirmed, not a detail
+            # string (unlike upload_manager's own InstagramOutcome below) — a click that
+            # completed without raising but came back success=False has no further detail to
+            # report, same wording used for that exact state a few lines down
+            # (mark_failed(..., detail="upload_video returned success=False")). getattr() as a
+            # last-resort guard rather than a bare outcome.detail, which crashed live,
+            # 2026-08-24: an AttributeError here escapes this loop uncaught (the try/except
+            # above only wraps the try_upload_clip() call itself), taking out the whole
+            # upload_clip_everywhere() call and, from there, the calling auto_pilot.py cycle.
+            failure_detail = last_error or getattr(outcome, "detail", None) or (
+                "upload_video returned success=False" if outcome is not None else "unknown error"
+            )
             logger.warning(
                 "Instagram upload attempt %d/%d failed for %s (%s) — retrying in %.0fs",
-                attempt, INSTAGRAM_UPLOAD_MAX_RETRIES, video_path.name,
-                last_error or (outcome.detail if outcome else "unknown error"), delay,
+                attempt, INSTAGRAM_UPLOAD_MAX_RETRIES, video_path.name, failure_detail, delay,
             )
             time.sleep(delay)
 
