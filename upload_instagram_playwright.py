@@ -186,6 +186,22 @@ def _save_snapshot(page, label: str) -> None:
         logger.warning("Could not save snapshot '%s': %s", label, e)
 
 
+def _is_account_chooser_interstitial(page) -> bool:
+    """CONFIRMED live, 2026-08-24 (see the caller's own comment for the incident this closes):
+    Instagram's saved-login "choose an account" screen, distinguishable from both the real
+    home feed and an actual login-required redirect by these two aria-labels together — found
+    in a saved DOM snapshot from a live failing run, not guessed. Checked via .count() (never
+    raises) rather than a locator wait, since this only needs to know "is it on the page right
+    now", not wait for it to appear."""
+    try:
+        return (
+            page.locator('[aria-label="Use another profile"]').count() > 0
+            and page.locator('[aria-label="Create new account"]').count() > 0
+        )
+    except Exception:
+        return False
+
+
 def _dismiss_blocking_overlays(page) -> None:
     """Best-effort dismissal of Instagram's well-documented post-login interstitials ("Save
     your login info?", "Turn on Notifications", a cookie-consent banner) — which of these (if
@@ -445,115 +461,168 @@ def upload_video(
 
     caption = build_caption_text(description, list(hashtags or DEFAULT_HASHTAGS))
 
-    with browser_concurrency.browser_slot(), sync_playwright() as pw:
-        browser = None
-        context = None
-        try:
-            # Launch/context-setup kept inside this try (same fix tiktok_uploader.py needed,
-            # 2026-08-18): a rejected cookie must not raise straight out of this function and
-            # break its own documented "never raises" contract, or leak the browser process.
-            browser = pw.chromium.launch(headless=headless)
-            context = browser.new_context(viewport={"width": 1280, "height": 900})
-            context.set_default_timeout(NAV_TIMEOUT_MS)
-            context.add_cookies(cookies)
-            page = context.new_page()
+    try:
+        slot = browser_concurrency.browser_slot()
+        slot.__enter__()
+    except TimeoutError as e:
+        # Same reasoning as tiktok_uploader.upload_video()'s identical guard (2026-08-24):
+        # browser_slot() now bounds its own wait, and that must not raise straight out of this
+        # function — same "never raises" contract the launch/context-setup try below exists for.
+        logger.error("Could not get a browser slot for %s: %s", video_path, e)
+        return UploadOutcome(success=False, confirmed=False)
 
-            logger.info("Opening Instagram...")
-            page.goto(HOME_URL, wait_until="domcontentloaded")
-            _save_snapshot(page, "01_after_goto")
+    try:
+        with sync_playwright() as pw:
+            browser = None
+            context = None
+            try:
+                # Launch/context-setup kept inside this try (same fix tiktok_uploader.py needed,
+                # 2026-08-18): a rejected cookie must not raise straight out of this function and
+                # break its own documented "never raises" contract, or leak the browser process.
+                browser = pw.chromium.launch(headless=headless)
+                context = browser.new_context(viewport={"width": 1280, "height": 900})
+                context.set_default_timeout(NAV_TIMEOUT_MS)
+                context.add_cookies(cookies)
+                page = context.new_page()
 
-            if "accounts/login" in page.url:
-                logger.error(
-                    "Not logged in (redirected to %s). Cookies in %s are likely expired or "
-                    "never authenticated from this machine's IP — re-run "
-                    "setup_instagram_cookies.py with a fresh export.", page.url, COOKIES_PATH,
+                logger.info("Opening Instagram...")
+                page.goto(HOME_URL, wait_until="domcontentloaded")
+                _save_snapshot(page, "01_after_goto")
+
+                if "accounts/login" in page.url:
+                    logger.error(
+                        "Not logged in (redirected to %s). Cookies in %s are likely expired or "
+                        "never authenticated from this machine's IP — re-run "
+                        "setup_instagram_cookies.py with a fresh export.", page.url, COOKIES_PATH,
+                    )
+                    _save_snapshot(page, "01b_login_redirect")
+                    return UploadOutcome(success=False, confirmed=False)
+
+                # Found live, 2026-08-24: every Instagram upload for 2+ hours failed at
+                # _open_create_reel_dialog() below with "Could not find the 'New post' nav
+                # icon" — but the saved snapshot showed neither a login redirect nor the real
+                # home feed. It was Instagram's saved-login "choose an account"/one-tap chooser
+                # interstitial (aria-labels "Use another profile" / "Create new account" —
+                # CONFIRMED present in that snapshot's DOM), which a fresh browser context with
+                # injected cookies apparently lands on instead of the feed directly. NOT a
+                # login/cookie-expiry problem (session cookies were valid; "accounts/login"
+                # never matched) and NOT the create-icon selector breaking — a third page state
+                # this code had no detection for at all.
+                #
+                # No safe way to auto-select an account here without a known username to match
+                # against (this codebase deliberately keeps zero configured Instagram username —
+                # see COOKIES_PATH's own docstring) — guessing which cached account row to click
+                # risks posting to the WRONG account, a worse failure than just not posting.
+                # One plain reload IS safe to try (never clicks anything) since this exact
+                # interstitial is commonly transient on real accounts; if it persists, fail
+                # loudly with a distinct, correctly-attributed error instead of the misleading
+                # "create icon not found" every prior run logged for what was actually this.
+                if _is_account_chooser_interstitial(page):
+                    logger.warning(
+                        "Landed on Instagram's account-chooser interstitial instead of the "
+                        "home feed — retrying once with a plain reload before giving up."
+                    )
+                    _save_snapshot(page, "01c_account_chooser_interstitial")
+                    page.goto(HOME_URL, wait_until="domcontentloaded")
+                    _save_snapshot(page, "01d_after_interstitial_reload")
+                    if _is_account_chooser_interstitial(page):
+                        logger.error(
+                            "Still on the account-chooser interstitial after a reload — this "
+                            "is not a selector break or an expired session, it's Instagram "
+                            "presenting a 'choose an account' screen this automation has no "
+                            "safe way to click through blindly (see this function's own "
+                            "comment). Needs a one-time --headed run to see what's actually "
+                            "happening and confirm the safe way to get past it."
+                        )
+                        _save_snapshot(page, "01e_account_chooser_persisted")
+                        return UploadOutcome(success=False, confirmed=False)
+                    logger.info("Reload cleared the interstitial — continuing.")
+
+                _dismiss_blocking_overlays(page)
+                _save_snapshot(page, "02_after_dismiss_overlays")
+
+                if not _open_create_reel_dialog(page):
+                    _save_snapshot(page, "03b_create_dialog_not_found")
+                    return UploadOutcome(success=False, confirmed=False)
+                _save_snapshot(page, "03_create_dialog_open")
+
+                logger.info("Uploading file: %s", video_path)
+                file_input = page.locator("input[type='file']").first
+                file_input.set_input_files(str(video_path.resolve()))
+                _save_snapshot(page, "04_file_selected")
+
+                logger.info("Waiting for upload to process...")
+                _wait_for_upload_processing(page)
+                _dismiss_blocking_overlays(page)
+                _save_snapshot(page, "05_after_upload_processing")
+
+                # Fix for clips arriving cropped top/bottom or letterboxed with black bars
+                # (account-owner reports, 2026-08-21 and 2026-08-22) — see
+                # _select_9_16_aspect_ratio's own docstring. Must run before the wizard "Next" loop
+                # below: the Crop step is the first screen after upload processing.
+                _select_9_16_aspect_ratio(page)
+                _save_snapshot(page, "05b_after_aspect_ratio_selection")
+
+                # Instagram's upload dialog is commonly a multi-step wizard (crop -> filters ->
+                # caption); a "Next" control between the file picker and the caption field is
+                # expected but UNVERIFIED — best-effort, not required if the flow is actually
+                # single-step for Reels specifically.
+                for step in range(2):
+                    try:
+                        page.get_by_role("button", name="Next").first.click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
+                        logger.info("Clicked 'Next' to advance the upload wizard")
+                        page.wait_for_timeout(500)
+                        _save_snapshot(page, f"06_wizard_next_{step}")
+                    except PlaywrightTimeoutError:
+                        break
+
+                logger.info("Filling in caption...")
+                caption_box = page.get_by_role("textbox").first
+                caption_box.click()
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Delete")
+                caption_box.type(caption, delay=15)
+                _save_snapshot(page, "07_caption_filled")
+
+                start_url = page.url
+                logger.info("Clicking Share (publishing live)...")
+                # exact=True is load-bearing (CONFIRMED live, 2026-08-21): a non-exact match for
+                # "Share" also matches the "Share to" section header on this same screen (Facebook
+                # cross-post toggle) — get_by_role's default substring matching would otherwise
+                # make this locator resolve to 2 elements and raise a strict-mode violation instead
+                # of clicking the actual Share button.
+                share_button = page.get_by_role("button", name="Share", exact=True)
+                share_button.wait_for(state="visible", timeout=UPLOAD_PROCESSING_TIMEOUT_MS)
+                _save_snapshot(page, "08_before_share_click")
+                share_button.click()
+                _save_snapshot(page, "09_after_share_click")
+
+                confirmed = _wait_for_post_confirmation(page, start_url)
+                _save_snapshot(page, "10_after_confirmation_wait")
+
+                logger.info(
+                    "Instagram upload finished for %s (publish=%s, confirmed=%s)",
+                    video_path.name, publish, confirmed,
                 )
-                _save_snapshot(page, "01b_login_redirect")
+                return UploadOutcome(success=True, confirmed=confirmed)
+
+            except PlaywrightTimeoutError as e:
+                logger.error("Instagram upload timed out for %s: %s", video_path, e)
+                if 'page' in locals():
+                    _save_snapshot(page, "99_timeout")
                 return UploadOutcome(success=False, confirmed=False)
-
-            _dismiss_blocking_overlays(page)
-            _save_snapshot(page, "02_after_dismiss_overlays")
-
-            if not _open_create_reel_dialog(page):
-                _save_snapshot(page, "03b_create_dialog_not_found")
+            except Exception as e:
+                logger.error("Instagram upload failed for %s: %s", video_path, e)
+                if 'page' in locals():
+                    _save_snapshot(page, "99_exception")
                 return UploadOutcome(success=False, confirmed=False)
-            _save_snapshot(page, "03_create_dialog_open")
-
-            logger.info("Uploading file: %s", video_path)
-            file_input = page.locator("input[type='file']").first
-            file_input.set_input_files(str(video_path.resolve()))
-            _save_snapshot(page, "04_file_selected")
-
-            logger.info("Waiting for upload to process...")
-            _wait_for_upload_processing(page)
-            _dismiss_blocking_overlays(page)
-            _save_snapshot(page, "05_after_upload_processing")
-
-            # Fix for clips arriving cropped top/bottom or letterboxed with black bars
-            # (account-owner reports, 2026-08-21 and 2026-08-22) — see
-            # _select_9_16_aspect_ratio's own docstring. Must run before the wizard "Next" loop
-            # below: the Crop step is the first screen after upload processing.
-            _select_9_16_aspect_ratio(page)
-            _save_snapshot(page, "05b_after_aspect_ratio_selection")
-
-            # Instagram's upload dialog is commonly a multi-step wizard (crop -> filters ->
-            # caption); a "Next" control between the file picker and the caption field is
-            # expected but UNVERIFIED — best-effort, not required if the flow is actually
-            # single-step for Reels specifically.
-            for step in range(2):
-                try:
-                    page.get_by_role("button", name="Next").first.click(timeout=OVERLAY_DISMISS_TIMEOUT_MS)
-                    logger.info("Clicked 'Next' to advance the upload wizard")
-                    page.wait_for_timeout(500)
-                    _save_snapshot(page, f"06_wizard_next_{step}")
-                except PlaywrightTimeoutError:
-                    break
-
-            logger.info("Filling in caption...")
-            caption_box = page.get_by_role("textbox").first
-            caption_box.click()
-            page.keyboard.press("Control+A")
-            page.keyboard.press("Delete")
-            caption_box.type(caption, delay=15)
-            _save_snapshot(page, "07_caption_filled")
-
-            start_url = page.url
-            logger.info("Clicking Share (publishing live)...")
-            # exact=True is load-bearing (CONFIRMED live, 2026-08-21): a non-exact match for
-            # "Share" also matches the "Share to" section header on this same screen (Facebook
-            # cross-post toggle) — get_by_role's default substring matching would otherwise
-            # make this locator resolve to 2 elements and raise a strict-mode violation instead
-            # of clicking the actual Share button.
-            share_button = page.get_by_role("button", name="Share", exact=True)
-            share_button.wait_for(state="visible", timeout=UPLOAD_PROCESSING_TIMEOUT_MS)
-            _save_snapshot(page, "08_before_share_click")
-            share_button.click()
-            _save_snapshot(page, "09_after_share_click")
-
-            confirmed = _wait_for_post_confirmation(page, start_url)
-            _save_snapshot(page, "10_after_confirmation_wait")
-
-            logger.info(
-                "Instagram upload finished for %s (publish=%s, confirmed=%s)",
-                video_path.name, publish, confirmed,
-            )
-            return UploadOutcome(success=True, confirmed=confirmed)
-
-        except PlaywrightTimeoutError as e:
-            logger.error("Instagram upload timed out for %s: %s", video_path, e)
-            if 'page' in locals():
-                _save_snapshot(page, "99_timeout")
-            return UploadOutcome(success=False, confirmed=False)
-        except Exception as e:
-            logger.error("Instagram upload failed for %s: %s", video_path, e)
-            if 'page' in locals():
-                _save_snapshot(page, "99_exception")
-            return UploadOutcome(success=False, confirmed=False)
-        finally:
-            if context is not None:
-                context.close()
-            if browser is not None:
-                browser.close()
+            finally:
+                if context is not None:
+                    context.close()
+                if browser is not None:
+                    browser.close()
+    finally:
+        slot.__exit__(None, None, None)
 
 
 def try_upload_clip(

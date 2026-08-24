@@ -24,6 +24,12 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 import upload_instagram_playwright as igp
 
+# Captured before any test's autouse fixtures run (tests/conftest.py's _block_real_instagram_calls
+# patches igp.upload_video to raise, project-wide, so no test accidentally fires a real post) —
+# tests below that genuinely need to exercise upload_video() itself restore this real reference
+# locally rather than disabling the guard globally.
+_real_upload_video = igp.upload_video
+
 
 class _FakeLocator:
     def __init__(self, page, key):
@@ -41,6 +47,9 @@ class _FakeLocator:
         if self._key in self._page.missing_selectors:
             raise PlaywrightTimeoutError(f"{self._key} not found")
         self._page.clicked.append(self._key)
+
+    def count(self):
+        return 0 if self._key in self._page.missing_selectors else 1
 
 
 class FakePage:
@@ -84,3 +93,56 @@ def test_still_attempts_to_close_crop_tool_when_both_ratio_locators_are_missing(
     page = FakePage(missing_selectors=[RATIO_TEXT, RATIO_SVG_FALLBACK])
     assert igp._select_9_16_aspect_ratio(page) is False
     assert page.clicked == [CROP_BUTTON, CROP_BUTTON]
+
+
+# --- 2026-08-24: account-chooser interstitial detection ----------------------------------------
+# See _is_account_chooser_interstitial()'s own docstring for the live incident this closes —
+# every Instagram upload failed for 2+ hours because this page state (neither the real home
+# feed nor an actual login redirect) had no detection at all.
+
+USE_ANOTHER_PROFILE = '[aria-label="Use another profile"]'
+CREATE_NEW_ACCOUNT = '[aria-label="Create new account"]'
+
+
+def test_detects_the_interstitial_when_both_markers_present():
+    page = FakePage()  # neither selector missing -> both .count() calls return 1
+    assert igp._is_account_chooser_interstitial(page) is True
+
+
+def test_does_not_flag_the_real_home_feed():
+    page = FakePage(missing_selectors=[USE_ANOTHER_PROFILE, CREATE_NEW_ACCOUNT])
+    assert igp._is_account_chooser_interstitial(page) is False
+
+
+def test_requires_both_markers_not_just_one():
+    # A page with only one of the two present isn't confidently the interstitial -- avoids a
+    # false positive off a single coincidentally-matching element elsewhere on a real page.
+    page = FakePage(missing_selectors=[CREATE_NEW_ACCOUNT])
+    assert igp._is_account_chooser_interstitial(page) is False
+
+
+def test_never_raises_if_the_page_locator_call_itself_fails():
+    class _ExplodingPage:
+        def locator(self, selector):
+            raise RuntimeError("page closed mid-check")
+
+    assert igp._is_account_chooser_interstitial(_ExplodingPage()) is False
+
+
+def test_upload_video_returns_failed_outcome_when_browser_slot_times_out(tmp_path, monkeypatch):
+    """Same fix, same reasoning, as tiktok_uploader's identical test — see there."""
+    monkeypatch.setattr(igp, "upload_video", _real_upload_video)  # see module-level comment
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"fake video bytes")
+    monkeypatch.setattr(igp, "load_cookies", lambda: [{"name": "sessionid", "value": "x"}])
+
+    def _raise(*a, **k):
+        raise TimeoutError("no browser slot freed up in time")
+    monkeypatch.setattr(igp.browser_concurrency, "browser_slot", _raise)
+    monkeypatch.setattr(
+        igp, "sync_playwright", lambda: (_ for _ in ()).throw(AssertionError("must not be reached"))
+    )
+
+    outcome = igp.upload_video(video_path, "desc", publish=True)
+
+    assert outcome == igp.UploadOutcome(success=False, confirmed=False)

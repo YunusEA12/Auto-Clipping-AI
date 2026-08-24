@@ -40,18 +40,29 @@ BROWSER_MAX_CONCURRENCY = int(os.environ.get("BROWSER_MAX_CONCURRENCY", "2"))
 _SLOT_DIR = Path("browser_slots")
 _SLOT_POLL_SECONDS = 1.0
 
+# 2026-08-24 dashboard-stall hardening: every current call site now passes this explicit cap
+# (see each one's own try/except TimeoutError) instead of waiting forever — with
+# BROWSER_MAX_CONCURRENCY=2 shared fleet-wide, a single genuinely-stuck Playwright session
+# (a hung driver/launch, not reproduced today but structurally possible — see this module's
+# own top-of-file incident note) would otherwise starve every OTHER streamer's uploads
+# indefinitely, one poll-loop iteration at a time, with nothing in the log distinguishing
+# "briefly busy" from "permanently wedged."
+DEFAULT_SLOT_TIMEOUT_SECONDS = 120
+
 
 @contextmanager
-def browser_slot(timeout: Optional[float] = None):
+def browser_slot(timeout: Optional[float] = DEFAULT_SLOT_TIMEOUT_SECONDS):
     """Blocks until one of BROWSER_MAX_CONCURRENCY slots is free, then holds it until the
     `with` block exits. Wrap the entire Playwright session (launch through close), not just
     the launch() call itself — the memory pressure comes from the browser running, not from
     starting it.
 
-    `timeout=None` (the default) waits indefinitely, matching every existing upload call site's
-    own "never gives up, just retries/backs off" posture — a permanently-full slot pool would
-    mean BROWSER_MAX_CONCURRENCY genuinely-stuck browsers, which is a real bug to go fix, not a
-    condition an upload should quietly skip past."""
+    Raises TimeoutError if no slot frees up within `timeout` seconds (pass `timeout=None` to
+    wait indefinitely instead — not recommended for an unattended pipeline; see
+    DEFAULT_SLOT_TIMEOUT_SECONDS above for why). Every current call site catches this and
+    treats it exactly like any other platform failure (log, return a failed outcome, retried
+    next cycle) rather than letting it propagate — see e.g. tiktok_uploader.upload_video()'s
+    own try/except around this call."""
     _SLOT_DIR.mkdir(exist_ok=True)
     locks = [FileLock(str(_SLOT_DIR / f"slot_{i}.lock")) for i in range(BROWSER_MAX_CONCURRENCY)]
     deadline = None if timeout is None else time.monotonic() + timeout

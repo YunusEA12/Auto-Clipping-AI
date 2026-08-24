@@ -344,10 +344,13 @@ def retry_missing_youtube_uploads(uploaded_clips_dir: Path, streamer_name: Optio
     candidates = find_missing_youtube_uploads(uploaded_clips_dir, streamer_name)[:YOUTUBE_RETRY_BATCH_LIMIT]
     ok, failed = 0, 0
 
-    for mp4_path in candidates:
+    for i, mp4_path in enumerate(candidates, start=1):
         sidecar_path = mp4_path.with_suffix(".json")
         with open(sidecar_path, "r", encoding="utf-8") as f:
             data = json.load(f)
+
+        # Heartbeat (2026-08-24 dashboard-stall fix) — see run_deployment_phase's own comment.
+        update_agent_state(current_action=f"📺 YouTube-Nachversuch ({i}/{len(candidates)}): {mp4_path.name}")
 
         outcome = upload_manager._upload_to_youtube(
             mp4_path, data.get("title", mp4_path.stem), data.get("description", ""),
@@ -425,10 +428,15 @@ def retry_missing_instagram_uploads(uploaded_clips_dir: Path, streamer_name: Opt
     candidates = find_missing_instagram_uploads(uploaded_clips_dir, streamer_name)[:INSTAGRAM_RETRY_BATCH_LIMIT]
     ok, failed = 0, 0
 
-    for mp4_path in candidates:
+    for i, mp4_path in enumerate(candidates, start=1):
         sidecar_path = mp4_path.with_suffix(".json")
         with open(sidecar_path, "r", encoding="utf-8") as f:
             data = json.load(f)
+
+        # Heartbeat (2026-08-24 dashboard-stall fix, same reasoning as run_deployment_phase's
+        # own): _upload_to_instagram()'s internal retry-with-backoff can run 1-2+ minutes per
+        # clip on its own.
+        update_agent_state(current_action=f"📸 Instagram-Nachversuch ({i}/{len(candidates)}): {mp4_path.name}")
 
         outcome = upload_manager._upload_to_instagram(
             mp4_path, data.get("title", mp4_path.stem), data.get("description", ""),
@@ -550,9 +558,20 @@ def run_deployment_phase(
     real TikTok view/like counts to build viral_memory.json."""
     UPLOADED_CLIPS_DIR.mkdir(exist_ok=True)
     uploaded, failed = 0, 0
+    total = len(survivors)
 
-    for clip, output_path, reward_score in survivors:
+    for i, (clip, output_path, reward_score) in enumerate(survivors, start=1):
         title = clip.get("title", output_path.name)
+        # Heartbeat (2026-08-24 dashboard-stall fix): the caller only sets current_action once,
+        # before this whole loop starts. A single clip's own upload can legitimately run
+        # 1-4+ minutes (pacing waits on 2+ platforms, Instagram's own up to-3-attempt retry
+        # backoff) — with several clips in one batch, agent_state's last_updated could go
+        # stale past app.py's STALE_THRESHOLD_SECONDS (300s) while genuinely, correctly busy,
+        # falsely flagging a healthy agent "offline" on the dashboard. update_agent_state()
+        # merges into the existing state (state.update(updates)), so passing only
+        # current_action here is safe — it never clobbers target_streamer/cycle counts/etc.
+        # that the caller already set.
+        update_agent_state(current_action=f"📤 Upload läuft ({i}/{total}): {title}")
         hashtags = clip.get("hashtags") or tiktok_uploader.DEFAULT_HASHTAGS
         description = clip.get("description") or title
         caption = tiktok_uploader.build_caption_text(description, hashtags)

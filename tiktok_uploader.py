@@ -780,111 +780,125 @@ def upload_video(
     tag_list = list(hashtags or DEFAULT_HASHTAGS)
     caption = build_caption_text(description, tag_list)
 
-    with browser_concurrency.browser_slot(), sync_playwright() as pw:
-        browser = None
-        context = None
-        try:
-            # Launching/context-setup used to sit outside this try, so a rejected cookie
-            # (e.g. add_cookies() rejecting a sameSite value a browser-extension export used
-            # that isn't exactly "Strict"/"Lax"/"None") would raise straight out of
-            # upload_video(), breaking its own documented "never raises" contract and
-            # leaking the browser process (found in review, 2026-08-18).
-            browser = pw.chromium.launch(headless=headless)
-            context = browser.new_context(viewport={"width": 1280, "height": 900})
-            context.set_default_timeout(NAV_TIMEOUT_MS)
-            context.add_cookies(cookies)
-            page = context.new_page()
+    try:
+        slot = browser_concurrency.browser_slot()
+        slot.__enter__()
+    except TimeoutError as e:
+        # 2026-08-24: browser_slot() now bounds its own wait (DEFAULT_SLOT_TIMEOUT_SECONDS) —
+        # this must be caught here, not left to propagate, for the exact same reason the
+        # launch/context-setup below was already moved inside the try (see that comment): a
+        # raise straight out of upload_video() breaks its documented "never raises" contract.
+        logger.error("Could not get a browser slot for %s: %s", video_path, e)
+        return UploadOutcome(success=False, confirmed=False)
 
-            logger.info("Opening TikTok upload page...")
-            page.goto(UPLOAD_URL, wait_until="domcontentloaded")
+    try:
+        with sync_playwright() as pw:
+            browser = None
+            context = None
+            try:
+                # Launching/context-setup used to sit outside this try, so a rejected cookie
+                # (e.g. add_cookies() rejecting a sameSite value a browser-extension export used
+                # that isn't exactly "Strict"/"Lax"/"None") would raise straight out of
+                # upload_video(), breaking its own documented "never raises" contract and
+                # leaking the browser process (found in review, 2026-08-18).
+                browser = pw.chromium.launch(headless=headless)
+                context = browser.new_context(viewport={"width": 1280, "height": 900})
+                context.set_default_timeout(NAV_TIMEOUT_MS)
+                context.add_cookies(cookies)
+                page = context.new_page()
 
-            if "login" in page.url:
-                logger.error(
-                    "Not logged in (redirected to %s). The cookies in %s are likely "
-                    "expired — re-export a fresh set (see README_UPLOAD.md).", page.url, COOKIES_PATH,
-                )
-                return UploadOutcome(success=False, confirmed=False)
+                logger.info("Opening TikTok upload page...")
+                page.goto(UPLOAD_URL, wait_until="domcontentloaded")
 
-            # The cookie-consent banner shows up on page load, before the upload even starts —
-            # dismiss it now so it can't be sitting there intercepting clicks later.
-            _dismiss_blocking_overlays(page)
+                if "login" in page.url:
+                    logger.error(
+                        "Not logged in (redirected to %s). The cookies in %s are likely "
+                        "expired — re-export a fresh set (see README_UPLOAD.md).", page.url, COOKIES_PATH,
+                    )
+                    return UploadOutcome(success=False, confirmed=False)
 
-            logger.info("Uploading file: %s", video_path)
-            file_input = page.locator("input[type='file']").first
-            file_input.set_input_files(str(video_path.resolve()))
+                # The cookie-consent banner shows up on page load, before the upload even starts —
+                # dismiss it now so it can't be sitting there intercepting clicks later.
+                _dismiss_blocking_overlays(page)
 
-            logger.info("Waiting for upload to reach 100%%...")
-            _wait_for_upload_complete(page)
+                logger.info("Uploading file: %s", video_path)
+                file_input = page.locator("input[type='file']").first
+                file_input.set_input_files(str(video_path.resolve()))
 
-            # The "New editing features added" onboarding tooltip was observed appearing
-            # only after the upload finished (2026-08-18) — dismiss again here, right before
-            # the caption box needs a real click, not just after page load.
-            _dismiss_blocking_overlays(page)
+                logger.info("Waiting for upload to reach 100%%...")
+                _wait_for_upload_complete(page)
 
-            if add_background_sound:
-                logger.info("Adding background sound from the royalty-free library...")
-                _add_background_sound(page)
+                # The "New editing features added" onboarding tooltip was observed appearing
+                # only after the upload finished (2026-08-18) — dismiss again here, right before
+                # the caption box needs a real click, not just after page load.
+                _dismiss_blocking_overlays(page)
 
-            logger.info("Filling in caption...")
-            caption_box = page.locator("[data-e2e='caption_container'] div[contenteditable='true']").first
-            caption_box.click()
-            page.keyboard.press("Control+A")
-            page.keyboard.press("Delete")
-            caption_box.type(description.strip(), delay=15)
-            _dismiss_mention_suggestions(page)
+                if add_background_sound:
+                    logger.info("Adding background sound from the royalty-free library...")
+                    _add_background_sound(page)
 
-            tokenized = sum(1 for tag in tag_list if _tokenize_hashtag(page, caption_box, tag))
-            logger.info("Tokenized %d/%d hashtag(s) as real TikTok tags", tokenized, len(tag_list))
+                logger.info("Filling in caption...")
+                caption_box = page.locator("[data-e2e='caption_container'] div[contenteditable='true']").first
+                caption_box.click()
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Delete")
+                caption_box.type(description.strip(), delay=15)
+                _dismiss_mention_suggestions(page)
 
-            _wait_for_caption_filled(page, caption_box, caption)
+                tokenized = sum(1 for tag in tag_list if _tokenize_hashtag(page, caption_box, tag))
+                logger.info("Tokenized %d/%d hashtag(s) as real TikTok tags", tokenized, len(tag_list))
 
-            # publish=False already returned before ever opening the browser (see above) —
-            # everything past this point only ever runs with publish=True.
-            #
-            # Dismiss overlays once more right before this click: caption typing plus one
-            # suggestion-click per hashtag takes several seconds, long enough (confirmed
-            # live 2026-08-18) for the "New editing features added" onboarding tooltip to
-            # appear *after* the two earlier dismissal calls already found nothing — left
-            # unhandled, its react-joyride overlay silently intercepts the Post click for
-            # the full click timeout.
-            _dismiss_blocking_overlays(page)
+                _wait_for_caption_filled(page, caption_box, caption)
 
-            logger.info("Clicking Veröffentlichen (Post, publishing live)...")
-            button = page.locator("[data-e2e='post_video_button']")
-            button.wait_for(state="visible", timeout=PROCESSING_TIMEOUT_MS)
-            button.click()
-            _confirm_publish_despite_pending_review(page)
+                # publish=False already returned before ever opening the browser (see above) —
+                # everything past this point only ever runs with publish=True.
+                #
+                # Dismiss overlays once more right before this click: caption typing plus one
+                # suggestion-click per hashtag takes several seconds, long enough (confirmed
+                # live 2026-08-18) for the "New editing features added" onboarding tooltip to
+                # appear *after* the two earlier dismissal calls already found nothing — left
+                # unhandled, its react-joyride overlay silently intercepts the Post click for
+                # the full click timeout.
+                _dismiss_blocking_overlays(page)
 
-            if not headless:
-                # Diagnostic only (see POST_CLICK_INSPECTION_DELAY_MS above) — never reached
-                # with headless=True, which every automated caller always passes.
-                _save_post_click_snapshot(page, "post_click_immediate")
+                logger.info("Clicking Veröffentlichen (Post, publishing live)...")
+                button = page.locator("[data-e2e='post_video_button']")
+                button.wait_for(state="visible", timeout=PROCESSING_TIMEOUT_MS)
+                button.click()
+                _confirm_publish_despite_pending_review(page)
+
+                if not headless:
+                    # Diagnostic only (see POST_CLICK_INSPECTION_DELAY_MS above) — never reached
+                    # with headless=True, which every automated caller always passes.
+                    _save_post_click_snapshot(page, "post_click_immediate")
+                    logger.info(
+                        "Headed mode: pausing %ds right after the click, before any confirmation "
+                        "check runs, so you can see exactly what TikTok does — a toast, a "
+                        "captcha, an error, or nothing at all.", POST_CLICK_INSPECTION_DELAY_MS // 1000,
+                    )
+                    page.wait_for_timeout(POST_CLICK_INSPECTION_DELAY_MS)
+                    _save_post_click_snapshot(page, "post_click_after_wait")
+
+                confirmed = _wait_for_post_confirmation(page)
+
                 logger.info(
-                    "Headed mode: pausing %ds right after the click, before any confirmation "
-                    "check runs, so you can see exactly what TikTok does — a toast, a "
-                    "captcha, an error, or nothing at all.", POST_CLICK_INSPECTION_DELAY_MS // 1000,
+                    "TikTok upload finished for %s (publish=%s, confirmed=%s)", video_path.name, publish, confirmed,
                 )
-                page.wait_for_timeout(POST_CLICK_INSPECTION_DELAY_MS)
-                _save_post_click_snapshot(page, "post_click_after_wait")
+                return UploadOutcome(success=True, confirmed=confirmed)
 
-            confirmed = _wait_for_post_confirmation(page)
-
-            logger.info(
-                "TikTok upload finished for %s (publish=%s, confirmed=%s)", video_path.name, publish, confirmed,
-            )
-            return UploadOutcome(success=True, confirmed=confirmed)
-
-        except PlaywrightTimeoutError as e:
-            logger.error("TikTok upload timed out for %s: %s", video_path, e)
-            return UploadOutcome(success=False, confirmed=False)
-        except Exception as e:
-            logger.error("TikTok upload failed for %s: %s", video_path, e)
-            return UploadOutcome(success=False, confirmed=False)
-        finally:
-            if context is not None:
-                context.close()
-            if browser is not None:
-                browser.close()
+            except PlaywrightTimeoutError as e:
+                logger.error("TikTok upload timed out for %s: %s", video_path, e)
+                return UploadOutcome(success=False, confirmed=False)
+            except Exception as e:
+                logger.error("TikTok upload failed for %s: %s", video_path, e)
+                return UploadOutcome(success=False, confirmed=False)
+            finally:
+                if context is not None:
+                    context.close()
+                if browser is not None:
+                    browser.close()
+    finally:
+        slot.__exit__(None, None, None)
 
 
 def try_upload_clip(

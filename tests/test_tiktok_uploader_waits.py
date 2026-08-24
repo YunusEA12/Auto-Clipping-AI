@@ -503,3 +503,24 @@ def test_dismiss_mention_suggestions_presses_escape():
 def test_dismiss_mention_suggestions_never_raises():
     page = FakeMentionPage(raise_on_press=True)
     tiktok_uploader._dismiss_mention_suggestions(page)  # must not raise
+
+
+def test_upload_video_returns_failed_outcome_when_browser_slot_times_out(tmp_path, monkeypatch):
+    """2026-08-24: browser_slot() now bounds its own wait and raises TimeoutError when no
+    slot frees up in time — this must not propagate out of upload_video()/try_upload_clip(),
+    breaking their documented 'never raises' contract, the same class of bug already fixed
+    once for the launch/context-setup a few lines further in (see that comment)."""
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"fake video bytes")
+    monkeypatch.setattr(tiktok_uploader, "load_cookies", lambda: [{"name": "sessionid", "value": "x"}])
+
+    def _raise(*a, **k):
+        raise TimeoutError("no browser slot freed up in time")
+    monkeypatch.setattr(tiktok_uploader.browser_concurrency, "browser_slot", _raise)
+    monkeypatch.setattr(
+        tiktok_uploader, "sync_playwright", lambda: (_ for _ in ()).throw(AssertionError("must not be reached"))
+    )
+
+    outcome = tiktok_uploader.upload_video(video_path, "desc", publish=True)
+
+    assert outcome == tiktok_uploader.UploadOutcome(success=False, confirmed=False)

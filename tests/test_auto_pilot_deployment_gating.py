@@ -185,3 +185,40 @@ def test_instagram_attempted_and_recorded_when_flag_set(tmp_path, monkeypatch):
 # upload_ledger.py — see tests/test_upload_manager.py and tests/test_upload_ledger.py for that
 # coverage. This file's own tests above stay focused on run_deployment_phase's archiving
 # logic (confirmed vs. unconfirmed vs. failed) rather than duplicating dedup coverage here.
+
+
+# --- 2026-08-24 dashboard-stall fix: per-clip heartbeat inside run_deployment_phase ------------
+# See auto_pilot.run_deployment_phase()'s own comment for the incident this closes — a batch of
+# several clips (each with its own pacing waits / Instagram retry backoff) could run past
+# app.py's STALE_THRESHOLD_SECONDS between the ONE update_agent_state() call the caller makes
+# before this loop starts and the next one after it (and any backlog sweeps) finish, falsely
+# flagging a genuinely-busy agent "offline" on the dashboard.
+
+def test_heartbeat_updates_once_per_clip_in_the_batch(tmp_path, monkeypatch):
+    monkeypatch.setattr(auto_pilot, "UPLOADED_CLIPS_DIR", tmp_path / "uploaded_clips")
+    monkeypatch.setattr(auto_pilot, "_agent_state_path_override", tmp_path / "agent_state_test.json")
+    monkeypatch.setattr(
+        auto_pilot.tiktok_uploader, "try_upload_clip",
+        lambda *a, **k: auto_pilot.tiktok_uploader.UploadOutcome(success=True, confirmed=True),
+    )
+
+    clips = []
+    for i in range(1, 4):
+        output_path = tmp_path / f"clip_{i}_Test.mp4"
+        output_path.write_bytes(b"fake video bytes")
+        clips.append(({"title": f"Test {i}", "description": "desc", "hashtags": ["#fyp"]}, output_path, 3))
+
+    actions_seen = []
+    real_update = auto_pilot.update_agent_state
+
+    def _spy(**updates):
+        if "current_action" in updates:
+            actions_seen.append(updates["current_action"])
+        return real_update(**updates)
+    monkeypatch.setattr(auto_pilot, "update_agent_state", _spy)
+
+    auto_pilot.run_deployment_phase(clips, publish=True)
+
+    assert len(actions_seen) == 3  # one heartbeat write per clip, not just once for the batch
+    assert "1/3" in actions_seen[0] and "Test 1" in actions_seen[0]
+    assert "3/3" in actions_seen[2] and "Test 3" in actions_seen[2]
