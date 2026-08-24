@@ -60,6 +60,7 @@ from typing import List, NamedTuple, Optional, Tuple
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
+import browser_concurrency
 import logging_setup
 
 logging_setup.configure_logging()
@@ -444,7 +445,7 @@ def upload_video(
 
     caption = build_caption_text(description, list(hashtags or DEFAULT_HASHTAGS))
 
-    with sync_playwright() as pw:
+    with browser_concurrency.browser_slot(), sync_playwright() as pw:
         browser = None
         context = None
         try:

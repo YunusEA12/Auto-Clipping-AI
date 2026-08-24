@@ -28,11 +28,14 @@ Design choices, and why:
 
 import json
 import logging
+import os
 import random
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, NamedTuple, Optional
+
+from filelock import FileLock
 
 from googleapiclient.errors import HttpError
 
@@ -93,6 +96,62 @@ def _upload_limit_backoff_until() -> Optional[datetime]:
 # to either platform, so there is nothing to pace out).
 UPLOAD_DELAY_MIN_SECONDS = 30
 UPLOAD_DELAY_MAX_SECONDS = 60
+
+# 2026-08-24 incident remediation (see the 2026-08-23 forensic audit): on 2026-08-23, TikTok's
+# per-account "Content check lite" daily review quota was exhausted by 13:47 and YouTube's
+# channel daily upload cap (uploadLimitExceeded, see above) was hit for good by 16:16 — both
+# well before the day's streamers had finished producing clips. Nothing previously limited how
+# FAST clips could be pushed to either platform, so a burst of simultaneously-live streamers
+# front-loaded each platform's entire daily budget into the first half of the day, leaving nine
+# more hours of newly-rendered clips with nowhere confirmed to go on those two platforms.
+#
+# This is a GLOBAL (fleet-wide, cross-process) minimum spacing between successive real upload
+# ATTEMPTS on the same platform — not the UPLOAD_DELAY_* stagger above, which only spaces out
+# the platforms relative to EACH OTHER within one clip's upload. Enforced in
+# _upload_to_tiktok()/_upload_to_youtube() right before the actual network call, i.e. only once
+# every other skip condition (already done, duplicate in-flight, YouTube backoff) has been
+# ruled out — a call that was going to no-op anyway shouldn't eat into another process's wait.
+# Instagram has no known daily cap (see this module's own docstring on why it isn't gated the
+# same way as TikTok/YouTube) so it isn't paced here.
+#
+# Defaults picked to spread roughly the volume seen on 2026-08-23 (151 TikTok, 101 YouTube
+# uploads) across a ~16h active-streaming day instead of the first ~6h of it. Tune per platform
+# via env var once the real daily quota for each account is better known.
+TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS = float(os.environ.get("TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS", "300"))
+YOUTUBE_MIN_UPLOAD_INTERVAL_SECONDS = float(os.environ.get("YOUTUBE_MIN_UPLOAD_INTERVAL_SECONDS", "300"))
+
+UPLOAD_PACING_STATE_PATH = Path("upload_pacing_state.json")
+UPLOAD_PACING_LOCK_TIMEOUT_SECONDS = 10
+
+
+def _wait_for_upload_pacing(platform: str, min_interval_seconds: float) -> None:
+    """Blocks until at least `min_interval_seconds` have passed since the last real upload
+    attempt on `platform`, fleet-wide (every auto_pilot.py process shares this one state file).
+    Reserves the slot for `now` BEFORE sleeping, under the same lock as the read — otherwise
+    two streamer processes waking up at the same instant would both see the slot as free and
+    both proceed together, defeating the point of a cross-process pacing gate."""
+    if min_interval_seconds <= 0:
+        return
+    wait_seconds = 0.0
+    with FileLock(str(UPLOAD_PACING_STATE_PATH) + ".lock", timeout=UPLOAD_PACING_LOCK_TIMEOUT_SECONDS):
+        try:
+            state = json.loads(UPLOAD_PACING_STATE_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            state = {}
+        now = datetime.now(timezone.utc)
+        last_attempt = state.get(platform)
+        if last_attempt:
+            try:
+                elapsed = (now - datetime.fromisoformat(last_attempt)).total_seconds()
+                wait_seconds = max(0.0, min_interval_seconds - elapsed)
+            except ValueError:
+                wait_seconds = 0.0
+        state[platform] = (now + timedelta(seconds=wait_seconds)).isoformat()
+        atomic_io.atomic_write_json(UPLOAD_PACING_STATE_PATH, state)
+
+    if wait_seconds > 0:
+        logger.info("Waiting %.0fs before the %s upload (daily-quota pacing budget)", wait_seconds, platform)
+        time.sleep(wait_seconds)
 
 # 2026-08-22 upload-parity audit: in-call retry for a genuinely failed Instagram attempt
 # (Playwright crash, navigation timeout, an unhandled dialog) — up to 3 total tries with
@@ -183,6 +242,8 @@ def _upload_to_youtube(
             video_path.name, content_hash[:12],
         )
         return YouTubeOutcome(attempted=False, success=False, detail="duplicate upload blocked by ledger (pending)")
+
+    _wait_for_upload_pacing("youtube", YOUTUBE_MIN_UPLOAD_INTERVAL_SECONDS)
 
     try:
         video_id = youtube_uploader.upload_clip(video_path, title, description, tags)
@@ -371,6 +432,8 @@ def _upload_to_tiktok(
             video_path.name, content_hash[:12],
         )
         return tiktok_uploader.UploadOutcome(success=False, confirmed=False)
+
+    _wait_for_upload_pacing("tiktok", TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS)
 
     outcome = tiktok_uploader.try_upload_clip(
         video_path, description, hashtags, publish=publish, add_background_sound=add_background_sound,

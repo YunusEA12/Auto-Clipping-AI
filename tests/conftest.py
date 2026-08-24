@@ -108,6 +108,18 @@ def _isolated_youtube_upload_backoff(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_upload_pacing_state(tmp_path, monkeypatch):
+    """Same isolation, same reasoning, as _isolated_youtube_upload_backoff above —
+    upload_manager.py's UPLOAD_PACING_STATE_PATH (2026-08-24, the per-platform daily-quota
+    pacing gate) also defaults to a real repo-root file (upload_pacing_state.json). Without
+    this, one test's real "last attempt" timestamp would make every later test in the same run
+    see TikTok/YouTube as recently attempted and sleep out the configured pacing interval for
+    real (guarded against exceeding 1s by _block_real_sleep below, but still wrong: a test
+    asserting "waited once" would see extra, unrelated pacing sleeps mixed in)."""
+    monkeypatch.setattr(upload_manager, "UPLOAD_PACING_STATE_PATH", tmp_path / "upload_pacing_state.json")
+
+
+@pytest.fixture(autouse=True)
 def _block_real_sleep(monkeypatch):
     real_sleep = __import__("time").sleep
 

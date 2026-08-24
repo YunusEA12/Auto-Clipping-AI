@@ -57,6 +57,7 @@ from typing import Dict, List, Optional, Tuple
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 import atomic_io
+import browser_concurrency
 import tiktok_uploader
 import upload as youtube_uploader
 import upload_ledger
@@ -269,7 +270,7 @@ def fetch_content_list(headless: bool = True) -> List[dict]:
 
     rows: List[dict] = []
     try:
-        with sync_playwright() as pw:
+        with browser_concurrency.browser_slot(), sync_playwright() as pw:
             browser = None
             context = None
             try:

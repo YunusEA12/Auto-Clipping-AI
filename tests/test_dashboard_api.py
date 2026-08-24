@@ -273,3 +273,17 @@ def test_tiktok_cookies_status_returns_a_tuple(tmp_path, monkeypatch):
 def test_default_hashtags_matches_tiktok_uploader():
     import tiktok_uploader
     assert dashboard_api.DEFAULT_HASHTAGS == tiktok_uploader.DEFAULT_HASHTAGS
+
+
+def test_get_stale_pending_uploads_delegates_to_upload_ledger(monkeypatch):
+    import upload_ledger
+    calls = []
+    monkeypatch.setattr(
+        upload_ledger, "stale_pending_counts",
+        lambda stale_minutes=upload_ledger.PENDING_STALE_MINUTES: calls.append(stale_minutes) or {"tiktok": 3},
+    )
+    assert dashboard_api.get_stale_pending_uploads() == {"tiktok": 3}
+    assert calls == [upload_ledger.PENDING_STALE_MINUTES]
+
+    assert dashboard_api.get_stale_pending_uploads(stale_minutes=5) == {"tiktok": 3}
+    assert calls == [upload_ledger.PENDING_STALE_MINUTES, 5]

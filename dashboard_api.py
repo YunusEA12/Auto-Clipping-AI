@@ -33,6 +33,7 @@ import tiktok_uploader
 import train_loop
 import transcribe
 import upload as upload_module
+import upload_ledger
 
 # --- Paths the dashboard reads directly (written by the background processes) -------------
 AGENT_STATE_PATH = auto_pilot.AGENT_STATE_PATH
@@ -182,6 +183,15 @@ def load_streamers() -> List[dict]:
 
 def load_streamers_diagnostics() -> dict:
     return streamers_module.load_streamers_diagnostics()
+
+
+def get_stale_pending_uploads(stale_minutes: int = upload_ledger.PENDING_STALE_MINUTES) -> Dict[str, int]:
+    """2026-08-24 incident remediation — per-platform count of upload_ledger.json entries
+    stuck in "pending" longer than `stale_minutes` (default: the same PENDING_STALE_MINUTES
+    the ledger itself uses to decide a pending entry is abandoned, not fresh-in-flight). See
+    upload_ledger.stale_pending_counts()'s own docstring for why this counts, rather than
+    reclaims, stale entries."""
+    return upload_ledger.stale_pending_counts(stale_minutes)
 
 
 def add_streamer(

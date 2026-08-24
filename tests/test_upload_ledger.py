@@ -120,3 +120,34 @@ class _RaisingLock:
 
     def __exit__(self, *args):
         return False
+
+
+# --- 2026-08-24 incident remediation: stale_pending_counts() -----------------------------------
+
+def test_stale_pending_counts_ignores_fresh_pending():
+    upload_ledger.try_mark_pending("hash1", "tiktok")
+    assert upload_ledger.stale_pending_counts() == {}
+
+
+def test_stale_pending_counts_counts_entries_older_than_the_threshold(monkeypatch):
+    upload_ledger.try_mark_pending("hash1", "tiktok")
+    upload_ledger.try_mark_pending("hash2", "tiktok")
+    upload_ledger.try_mark_pending("hash3", "youtube")
+
+    assert upload_ledger.stale_pending_counts(stale_minutes=0) == {"tiktok": 2, "youtube": 1}
+
+
+def test_stale_pending_counts_ignores_done_and_failed_entries():
+    upload_ledger.mark_done("hash1", "tiktok")
+    upload_ledger.mark_failed("hash2", "tiktok", detail="boom")
+
+    assert upload_ledger.stale_pending_counts(stale_minutes=0) == {}
+
+
+def test_stale_pending_counts_treats_an_unparseable_timestamp_as_stale():
+    upload_ledger.try_mark_pending("hash1", "tiktok")
+    ledger = upload_ledger._load_ledger()
+    ledger["hash1"]["tiktok"]["updated_at"] = "not-a-timestamp"
+    upload_ledger._save_ledger(ledger)
+
+    assert upload_ledger.stale_pending_counts() == {"tiktok": 1}

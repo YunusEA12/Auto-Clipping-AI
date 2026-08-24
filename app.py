@@ -423,6 +423,35 @@ with tab_radar:
         st.error("🔴 Keine Cookies gefunden. Führe `python get_cookies.py` aus.")
     st.caption(tiktok_detail)
 
+    st.divider()
+    st.markdown("#### 📦 Publishing-Backlog")
+    st.caption(
+        "2026-08-23-Incident-Nachwirkung: rechtzeitige Warnung, falls ein Plattform-Quota "
+        "wieder still Uploads schluckt, statt es erst am nächsten Morgen im Ledger zu finden."
+    )
+    backlog_col1, backlog_col2, backlog_col3 = st.columns(3)
+    stale_pending = dashboard_api.get_stale_pending_uploads()
+    backlog_col1.metric(
+        "⏳ TikTok unbestätigt (>30min)", stale_pending.get("tiktok", 0),
+        help="Uploads, die versucht wurden, aber seit über 30 Minuten weder als 'done' noch "
+             "als 'failed' im upload_ledger.json aufgelöst sind — typisches Bild einer "
+             "erschöpften TikTok-Quota (siehe 2026-08-23-Audit).",
+    )
+    other_stale = {p: c for p, c in stale_pending.items() if p != "tiktok"}
+    if other_stale:
+        backlog_col2.metric(
+            "⏳ Andere Plattformen unbestätigt (>30min)", sum(other_stale.values()),
+            help=", ".join(f"{p}: {c}" for p, c in sorted(other_stale.items())),
+        )
+    else:
+        backlog_col2.metric("⏳ Andere Plattformen unbestätigt (>30min)", 0)
+    unconsumed_clips = len(list(OUTPUT_DIR.rglob("*.mp4"))) if OUTPUT_DIR.exists() else 0
+    backlog_col3.metric(
+        "🎬 Unveröffentlichte Clips in output/", unconsumed_clips,
+        help="Fertig gerenderte Clips, die noch nicht nach uploaded_clips/ verschoben wurden "
+             "— wächst, wenn Rendering schneller läuft als das Publizieren hinterherkommt.",
+    )
+
 # --- Tab 2: Streamer Verwaltung & Fleet ------------------------------------------------------
 
 with tab_fleet:

@@ -135,6 +135,57 @@ def test_publish_false_never_sleeps(monkeypatch, fake_tiktok_failure, clip_path)
     assert sleep_calls == []
 
 
+# --- 2026-08-24: global per-platform daily-quota pacing gate -----------------------------------
+# See upload_manager._wait_for_upload_pacing()'s own docstring for why this exists (the
+# 2026-08-23 incident: TikTok/YouTube's daily quotas were front-loaded into the first half of
+# the day instead of being spread across it). Isolated from the real state file by
+# tests/conftest.py's autouse _isolated_upload_pacing_state fixture.
+
+def test_second_tiktok_attempt_within_interval_waits_the_remainder(monkeypatch, tmp_path):
+    monkeypatch.setattr(upload_manager, "UPLOAD_PACING_STATE_PATH", tmp_path / "pacing.json")
+    monkeypatch.setattr(upload_manager, "TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS", 100)
+
+    fake_now = upload_manager.datetime(2026, 1, 1, tzinfo=upload_manager.timezone.utc)
+
+    class _FakeDateTime(upload_manager.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fake_now
+
+    monkeypatch.setattr(upload_manager, "datetime", _FakeDateTime)
+    sleep_calls = []
+    monkeypatch.setattr(upload_manager.time, "sleep", lambda s: sleep_calls.append(s))
+
+    upload_manager._wait_for_upload_pacing("tiktok", upload_manager.TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS)
+    assert sleep_calls == []  # first-ever attempt: nothing to wait out
+
+    fake_now = fake_now + upload_manager.timedelta(seconds=40)
+    upload_manager._wait_for_upload_pacing("tiktok", upload_manager.TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS)
+    assert sleep_calls == [60]  # 100s interval - 40s elapsed = 60s remaining
+
+
+def test_pacing_is_tracked_independently_per_platform(monkeypatch, tmp_path):
+    monkeypatch.setattr(upload_manager, "UPLOAD_PACING_STATE_PATH", tmp_path / "pacing.json")
+    sleep_calls = []
+    monkeypatch.setattr(upload_manager.time, "sleep", lambda s: sleep_calls.append(s))
+
+    upload_manager._wait_for_upload_pacing("tiktok", 300)
+    upload_manager._wait_for_upload_pacing("youtube", 300)  # a fresh platform, not tiktok's slot
+
+    assert sleep_calls == []
+
+
+def test_zero_interval_never_waits(monkeypatch, tmp_path):
+    monkeypatch.setattr(upload_manager, "UPLOAD_PACING_STATE_PATH", tmp_path / "pacing.json")
+    sleep_calls = []
+    monkeypatch.setattr(upload_manager.time, "sleep", lambda s: sleep_calls.append(s))
+
+    upload_manager._wait_for_upload_pacing("tiktok", 0)
+    upload_manager._wait_for_upload_pacing("tiktok", 0)
+
+    assert sleep_calls == []
+
+
 # --- a YouTube failure never propagates past this module ---------------------------------------
 
 def test_youtube_generic_exception_does_not_raise(monkeypatch, fake_tiktok_success, clip_path):

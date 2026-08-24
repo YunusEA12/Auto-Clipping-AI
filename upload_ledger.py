@@ -43,7 +43,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from filelock import FileLock, Timeout
 
@@ -104,6 +104,33 @@ def get_entry(content_hash: str, platform: str) -> Optional[dict]:
 def is_done(content_hash: str, platform: str) -> bool:
     entry = get_entry(content_hash, platform)
     return bool(entry) and entry.get("status") == "done"
+
+
+def stale_pending_counts(stale_minutes: int = PENDING_STALE_MINUTES) -> Dict[str, int]:
+    """2026-08-24 incident remediation (see the 2026-08-23 forensic audit): a per-platform
+    count of entries stuck in "pending" for longer than `stale_minutes` right now — i.e.
+    upload attempts that were made but never resolved to done/failed, the exact shape the
+    2026-08-23 TikTok quota exhaustion left behind (66 TikTok entries still pending the next
+    morning). A single stale entry isn't itself alarming (see try_mark_pending's own docstring
+    — a crashed process leaves one behind routinely, and it self-heals on the next attempt);
+    a growing COUNT of them is the actual signal something downstream (a platform quota, a
+    broken selector) is silently swallowing uploads. Read-only — never touches the ledger,
+    unlike try_mark_pending()'s own stale handling which reclaims the slot for a retry."""
+    ledger = _load_ledger()
+    now = datetime.now(timezone.utc)
+    counts: Dict[str, int] = {}
+    for platform_entries in ledger.values():
+        for platform, entry in platform_entries.items():
+            if entry.get("status") != "pending":
+                continue
+            updated_at_raw = entry.get("updated_at")
+            try:
+                updated_at = datetime.fromisoformat(updated_at_raw) if updated_at_raw else None
+            except ValueError:
+                updated_at = None
+            if updated_at is None or (now - updated_at) >= timedelta(minutes=stale_minutes):
+                counts[platform] = counts.get(platform, 0) + 1
+    return counts
 
 
 def try_mark_pending(content_hash: str, platform: str, title: str = "") -> bool:

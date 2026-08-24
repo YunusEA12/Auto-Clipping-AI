@@ -33,6 +33,9 @@ gemini_call_budget.json
 youtube_upload_backoff.json
 upload_ledger.json
 upload_ledger.json.lock
+upload_pacing_state.json
+upload_pacing_state.json.lock
+browser_slots/
 selector_audit/
 metrics_scrape_health.json
 .tiktok_browser_profile/
