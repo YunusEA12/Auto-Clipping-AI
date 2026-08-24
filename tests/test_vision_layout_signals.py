@@ -140,3 +140,109 @@ def test_get_facecam_coordinates_uses_highest_scoring_box(monkeypatch):
     box = vision.get_facecam_coordinates("video.mp4", 1.0)
     # Crops toward the higher-confidence detection, not just boxes[0].
     assert box[:2] != (10, 20)
+
+
+# --- padding_factor_from_margin -------------------------------------------------------------
+
+def test_padding_factor_from_margin_zero_margin_is_identity():
+    assert vision.padding_factor_from_margin(0.0) == 1.0
+
+
+def test_padding_factor_from_margin_quarter_margin():
+    # 25% extra margin on each side -> padding_factor 1.5 (pad = size * (1.5-1)/2 = 0.25*size).
+    assert vision.padding_factor_from_margin(0.25) == 1.5
+
+
+# --- get_facecam_coordinates temporal smoothing (clip_end given) ---------------------------
+
+def test_get_facecam_coordinates_smooths_across_multiple_samples(monkeypatch):
+    # A single outlier sample (far off from the rest, simulating a blink/motion-blur/HUD-
+    # glitch frame) must not drag the whole clip's crop box toward it -- the median of several
+    # samples should land on the well-agreed-upon position instead.
+    per_ts_boxes = {
+        0.0: (100, 100, 200, 200),
+        2.5: (105, 98, 200, 200),
+        5.0: (900, 900, 20, 20),  # outlier
+        7.5: (102, 101, 200, 200),
+        10.0: (98, 103, 200, 200),
+    }
+
+    def fake_detect_faces(video_path, timestamp):
+        box = per_ts_boxes[timestamp]
+        return [box], [0.9], 1920, 1080
+
+    monkeypatch.setattr(vision, "_detect_faces", fake_detect_faces)
+
+    box = vision.get_facecam_coordinates("video.mp4", 0.0, clip_end=10.0, sample_count=5)
+    # Padded box should still be centered near the agreed-upon ~(100,100,200,200) cluster, not
+    # anywhere near the (900,900) outlier.
+    assert 900 not in box
+
+
+def test_get_facecam_coordinates_without_clip_end_uses_single_frame(monkeypatch):
+    calls = []
+
+    def fake_detect_faces(video_path, timestamp):
+        calls.append(timestamp)
+        return [(10, 20, 300, 300)], [0.9], 1920, 1080
+
+    monkeypatch.setattr(vision, "_detect_faces", fake_detect_faces)
+    vision.get_facecam_coordinates("video.mp4", 1.0)
+    assert calls == [1.0]
+
+
+def test_get_facecam_coordinates_with_clip_end_samples_multiple_frames(monkeypatch):
+    calls = []
+
+    def fake_detect_faces(video_path, timestamp):
+        calls.append(timestamp)
+        return [(10, 20, 300, 300)], [0.9], 1920, 1080
+
+    monkeypatch.setattr(vision, "_detect_faces", fake_detect_faces)
+    vision.get_facecam_coordinates("video.mp4", 0.0, clip_end=8.0, sample_count=4)
+    assert calls == [0.0, 8.0 / 3, 16.0 / 3, 8.0]
+
+
+# --- get_facecam_coordinates streamer override (low-confidence fallback) -------------------
+
+def test_get_facecam_coordinates_uses_override_below_confidence_threshold(monkeypatch):
+    monkeypatch.setattr(
+        vision, "_detect_faces",
+        # 0.3 is below MediaPipe's own ~0.5 baseline floor, so this score can't occur with the
+        # real detector -- it only exists here to exercise the low-confidence override branch.
+        lambda video_path, timestamp: ([(10, 20, 300, 300)], [0.3], 1920, 1080),  # below 0.50
+    )
+    box = vision.get_facecam_coordinates(
+        "video.mp4", 1.0, override_box_ratio=[0.5, 0.0, 1.0, 0.5],
+    )
+    assert box == (960, 0, 960, 540)
+
+
+def test_get_facecam_coordinates_ignores_override_at_or_above_confidence_threshold(monkeypatch):
+    # 0.50 is DYNAMIC_DETECTION_MIN_CONFIDENCE itself (inclusive boundary) -- a streamer who
+    # moved/resized their cam still has a genuine, if marginal, detection at this score, and
+    # that real detection must win over the stale static override.
+    monkeypatch.setattr(
+        vision, "_detect_faces",
+        lambda video_path, timestamp: ([(10, 20, 300, 300)], [0.5], 1920, 1080),
+    )
+    box = vision.get_facecam_coordinates(
+        "video.mp4", 1.0, override_box_ratio=[0.5, 0.0, 1.0, 0.5],
+    )
+    # Dynamic detection wins -- override box (960, 0, 960, 540) was not used.
+    assert box != (960, 0, 960, 540)
+
+
+def test_get_facecam_coordinates_uses_override_when_no_face_detected(monkeypatch):
+    monkeypatch.setattr(vision, "_detect_faces", lambda video_path, timestamp: ([], [], 1920, 1080))
+    box = vision.get_facecam_coordinates(
+        "video.mp4", 1.0, override_box_ratio=[0.5, 0.0, 1.0, 0.5],
+    )
+    assert box == (960, 0, 960, 540)
+
+
+def test_get_facecam_coordinates_falls_back_to_generic_box_without_override(monkeypatch):
+    # No override configured -- unchanged behavior, generic quarter-frame corner fallback.
+    monkeypatch.setattr(vision, "_detect_faces", lambda video_path, timestamp: ([], [], 1920, 1080))
+    box = vision.get_facecam_coordinates("video.mp4", 1.0)
+    assert box == (960, 0, 960, 540)

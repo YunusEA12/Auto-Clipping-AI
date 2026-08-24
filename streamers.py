@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from filelock import FileLock, Timeout
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 import atomic_io
 
@@ -89,6 +89,43 @@ class StreamerEntry(BaseModel):
     # StreamerEntry(**item).model_dump() and actually reach build_auto_pilot_cmd().
     instagram: bool = False
 
+    # Loose last-resort static facecam fallback for this streamer's known layout: [x1, y1, x2,
+    # y2] as fractions (0..1) of frame width/height, resolution-independent since a chunk's
+    # actual capture resolution can vary. process.py/vision.py use this ONLY when a given
+    # clip's dynamic face detection finds nothing at all (or drops below
+    # vision.DYNAMIC_DETECTION_MIN_CONFIDENCE) — a genuine detection always wins over this box,
+    # since streamers move/resize their webcam overlay between streams and a rigid override
+    # would otherwise keep cropping toward a stale position. None (the default) means "no
+    # override, dynamic detection only" — unchanged behavior for every streamer that hasn't set
+    # one.
+    facecam_box: Optional[List[float]] = None
+
+    # Padding margin around this streamer's detected/overridden facecam box, as a fraction of
+    # the box's own size added on each side (e.g. 0.25 for the account-owner spec's "20-30%
+    # extra margin around head/shoulders") — see vision.padding_factor_from_margin(). None (the
+    # default) means "use the pipeline's own tuned default" (vision.PADDING_FACTOR /
+    # process.FULL_CAM_PADDING_FACTOR), unchanged for every streamer that hasn't set one.
+    facecam_padding: Optional[float] = None
+
+    @field_validator("facecam_box")
+    @classmethod
+    def _validate_facecam_box(cls, v):
+        if v is None:
+            return v
+        if len(v) != 4:
+            raise ValueError("facecam_box must be [x1, y1, x2, y2]")
+        x1, y1, x2, y2 = v
+        if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
+            raise ValueError("facecam_box values must satisfy 0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1")
+        return v
+
+    @field_validator("facecam_padding")
+    @classmethod
+    def _validate_facecam_padding(cls, v):
+        if v is not None and not (0 <= v <= 2):
+            raise ValueError("facecam_padding must be between 0 and 2 (a 0-200% margin fraction)")
+        return v
+
 
 def load_streamers(path: Path = None) -> List[dict]:
     # `path: Path = None`, resolved to STREAMERS_PATH dynamically below, not bound as a
@@ -137,6 +174,41 @@ def load_streamers(path: Path = None) -> List[dict]:
         seen_names.add(entry["name"])
         entries.append(entry)
     return entries
+
+
+def load_streamers_diagnostics(path: Path = None) -> dict:
+    """{"unreadable": bool, "raw_count": int, "loaded_count": int} — lets a caller (app.py's
+    "Konfigurierte Streamer" panel) tell a genuine read/parse failure (permission error,
+    corrupt JSON, wrong top-level type) apart from an actually-empty fleet, and surface a
+    partial load (some entries dropped as invalid/duplicate — already logged loudly by
+    load_streamers() above, but otherwise invisible from the UI itself) instead of silently
+    rendering "no streamers configured" for either case.
+
+    Found live, 2026-08-23: streamers.json ended up owned by a different user than the
+    autoclip services expect (an out-of-band edit as root, outside atomic_io's normal
+    autoclip-owned write path) — every load_streamers() call failed with PermissionError,
+    caught internally, and returned [] exactly the same as a real empty fleet would, so the
+    dashboard's "Noch keine Streamer konfiguriert" message was indistinguishable from "the
+    file couldn't be read at all" without checking server logs. `unreadable=True` is exactly
+    that case: the file exists, but load_streamers() couldn't get past reading/parsing it.
+
+    `raw_count` is None (rather than 0) when `unreadable` is True, since there's no parsed
+    list to count in that case."""
+    if path is None:
+        path = STREAMERS_PATH
+    if not path.exists():
+        return {"unreadable": False, "raw_count": 0, "loaded_count": 0}
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {"unreadable": True, "raw_count": None, "loaded_count": 0}
+
+    if not isinstance(raw, list):
+        return {"unreadable": True, "raw_count": None, "loaded_count": 0}
+
+    return {"unreadable": False, "raw_count": len(raw), "loaded_count": len(load_streamers(path))}
 
 
 def _read_live_status_by_slug(root: Path) -> dict:

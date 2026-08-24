@@ -175,6 +175,61 @@ def test_add_streamer_publish_defaults_false_even_with_auto_upload(tmp_path):
     assert entries[0]["publish"] is False
 
 
+# --- facecam_box / facecam_padding: a streamer's known, static facecam layout, used by
+# process.py/vision.py as a high-confidence fallback when a given clip's own dynamic face
+# detection is missing or low-confidence -----------------------------------------------------
+
+def test_facecam_box_and_padding_default_to_none():
+    entry = streamers.StreamerEntry(name="x", url="https://twitch.tv/x")
+    assert entry.facecam_box is None
+    assert entry.facecam_padding is None
+
+
+def test_facecam_box_roundtrips_through_save_and_load(tmp_path):
+    path = tmp_path / "streamers.json"
+    streamers.save_streamers([
+        {"name": "elias", "url": "https://twitch.tv/elias", "facecam_box": [0.6, 0.0, 1.0, 0.35], "facecam_padding": 0.25},
+    ], path=path)
+    entry = streamers.load_streamers(path)[0]
+    assert entry["facecam_box"] == [0.6, 0.0, 1.0, 0.35]
+    assert entry["facecam_padding"] == 0.25
+
+
+@pytest.mark.parametrize("bad_box", [
+    [0.1, 0.1, 0.1],           # wrong length
+    [1.0, 0.0, 0.5, 1.0],      # x1 >= x2
+    [0.0, 1.0, 1.0, 0.5],      # y1 >= y2
+    [-0.1, 0.0, 1.0, 1.0],     # x1 out of 0..1
+    [0.0, 0.0, 1.5, 1.0],      # x2 out of 0..1
+])
+def test_facecam_box_rejects_invalid_coordinates(bad_box):
+    with pytest.raises(Exception):
+        streamers.StreamerEntry(name="x", url="https://twitch.tv/x", facecam_box=bad_box)
+
+
+def test_facecam_box_accepts_full_frame_extremes():
+    entry = streamers.StreamerEntry(name="x", url="https://twitch.tv/x", facecam_box=[0.0, 0.0, 1.0, 1.0])
+    assert entry.facecam_box == [0.0, 0.0, 1.0, 1.0]
+
+
+def test_facecam_padding_rejects_negative_value():
+    with pytest.raises(Exception):
+        streamers.StreamerEntry(name="x", url="https://twitch.tv/x", facecam_padding=-0.1)
+
+
+def test_load_streamers_skips_entry_with_invalid_facecam_box(tmp_path):
+    # load_streamers() already skips-and-logs any entry that fails StreamerEntry validation
+    # (see its own try/except) -- a malformed hand-edited facecam_box shouldn't crash the
+    # whole load, just drop that one entry.
+    path = tmp_path / "streamers.json"
+    path.write_text(json.dumps([
+        {"name": "good", "url": "https://twitch.tv/good"},
+        {"name": "bad", "url": "https://twitch.tv/bad", "facecam_box": [1.0, 0.0, 0.0, 1.0]},
+    ]), encoding="utf-8")
+    entries = streamers.load_streamers(path)
+    assert [e["name"] for e in entries] == ["good"]
+
+
 # --- load_streamers duplicate-name hardening (2026-08-19: add_streamer()'s own uniqueness
 # check, plus the M-15 filelock, only guard the API path — a hand-edited streamers.json can
 # still contain a literal duplicate name, the same class of bug that produced the dashboard's
@@ -385,6 +440,54 @@ def test_purge_leaves_unparseable_timestamp_alone(tmp_path):
 
     assert deleted == []
     assert ambiguous.exists()
+
+
+# --- load_streamers_diagnostics ------------------------------------------------------------
+
+def test_diagnostics_missing_file_is_not_unreadable(tmp_path):
+    # A missing file is a legitimately empty fleet (e.g. first run), not a read failure.
+    path = tmp_path / "streamers.json"
+    diag = streamers.load_streamers_diagnostics(path)
+    assert diag == {"unreadable": False, "raw_count": 0, "loaded_count": 0}
+
+
+def test_diagnostics_detects_unreadable_file(tmp_path):
+    # Found live, 2026-08-23: streamers.json ended up owned by a different user than the
+    # autoclip services expect, so every load_streamers() call failed with PermissionError,
+    # caught internally, and returned [] -- indistinguishable from a real empty fleet without
+    # this diagnostic. A directory in place of the file exercises the same OSError branch
+    # load_streamers()/load_streamers_diagnostics() both catch, without this test depending on
+    # running as a non-root user -- a real chmod 000 doesn't block root's own reads, and this
+    # suite runs as root in some environments.
+    path = tmp_path / "streamers.json"
+    path.mkdir()
+    diag = streamers.load_streamers_diagnostics(path)
+    assert diag == {"unreadable": True, "raw_count": None, "loaded_count": 0}
+
+
+def test_diagnostics_detects_corrupt_json(tmp_path):
+    path = tmp_path / "streamers.json"
+    path.write_text("{not valid json", encoding="utf-8")
+    diag = streamers.load_streamers_diagnostics(path)
+    assert diag == {"unreadable": True, "raw_count": None, "loaded_count": 0}
+
+
+def test_diagnostics_counts_entries_skipped_as_invalid(tmp_path):
+    path = tmp_path / "streamers.json"
+    path.write_text(json.dumps([
+        {"name": "papaplatte", "url": "https://twitch.tv/papaplatte"},
+        {"name": "papaplatte", "url": "https://twitch.tv/papaplatte-dup"},  # duplicate name
+        {"name": "bad", "url": "https://twitch.tv/bad", "facecam_box": [0.1]},  # invalid shape
+    ]), encoding="utf-8")
+    diag = streamers.load_streamers_diagnostics(path)
+    assert diag == {"unreadable": False, "raw_count": 3, "loaded_count": 1}
+
+
+def test_diagnostics_clean_file_reports_no_skips(tmp_path):
+    path = tmp_path / "streamers.json"
+    streamers.save_streamers([{"name": "papaplatte", "url": "https://twitch.tv/papaplatte"}], path=path)
+    diag = streamers.load_streamers_diagnostics(path)
+    assert diag == {"unreadable": False, "raw_count": 1, "loaded_count": 1}
 
 
 def test_purge_never_raises_on_corrupt_json(tmp_path):

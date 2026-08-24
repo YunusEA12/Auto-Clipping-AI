@@ -35,6 +35,26 @@ def test_resolve_layout_no_faces_falls_back_to_center_crop(monkeypatch):
     assert detection_ts == 1.0
 
 
+def test_resolve_layout_no_faces_with_static_override_uses_split_screen(monkeypatch):
+    # A streamer with a known, hand-picked facecam_box in streamers.json shouldn't fall back
+    # to center_crop just because THIS clip's dynamic detection came up empty — their webcam
+    # position is known independently of any single clip's own detection.
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", lambda *a, **k: (0, None, 1920, 1080))
+    resolved, detection_ts = process.resolve_layout(
+        process.LAYOUT_AUTO, Path("x.mp4"), 1.0, has_static_override=True,
+    )
+    assert resolved == process.LAYOUT_SPLIT_SCREEN
+    assert detection_ts == 1.0
+
+
+def test_resolve_layout_no_faces_without_static_override_still_center_crops(monkeypatch):
+    # has_static_override defaults to False -- unchanged behavior for every streamer without
+    # a configured override.
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", lambda *a, **k: (0, None, 1920, 1080))
+    resolved, _ = process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0, has_static_override=False)
+    assert resolved == process.LAYOUT_CENTER_CROP
+
+
 def test_resolve_layout_multiple_confident_faces_still_uses_the_primary_one(monkeypatch):
     # 2026-08-21: changed from falling back to blur_background on any face_count != 1 — a
     # second confident detection in this pipeline's actual content (solo Twitch gaming clips)
@@ -218,6 +238,98 @@ def test_process_clips_iter_crops_at_resolve_layouts_detection_ts_not_clip_start
     assert captured_timestamps == [3.33]
 
 
+def _process_clips_iter_common_mocks(monkeypatch, tmp_path, clips_data):
+    monkeypatch.setattr(process, "TEMP_DIR", tmp_path / "temp")
+    monkeypatch.setattr(process, "find_source_video", lambda explicit: tmp_path / "source.mp4")
+    monkeypatch.setattr(process, "get_video_dimensions", lambda video_path: (1920, 1080))
+    monkeypatch.setattr(process, "_has_audio_stream", lambda video_path: False)
+    monkeypatch.setattr(process, "pick_background_track", lambda: None)
+    monkeypatch.setattr(process, "build_ass_for_clip", lambda *a, **k: tmp_path / "subs.ass")
+    monkeypatch.setattr(process, "_write_clip_metadata_sidecar", lambda *a, **k: None)
+    monkeypatch.setattr(process, "render_clip", lambda *a, **k: tmp_path / "clip_1.mp4")
+    monkeypatch.setattr(process.atomic_io, "atomic_write_json", lambda *a, **k: None)
+    monkeypatch.setattr(process, "resolve_layout", lambda *a, **k: (process.LAYOUT_SPLIT_SCREEN, 0.0))
+    monkeypatch.setattr(
+        process, "load_json",
+        lambda path: dict(clips_data) if "clips" in path.name else {"segments": []},
+    )
+
+
+def test_process_clips_iter_passes_clip_end_for_temporal_smoothing(tmp_path, monkeypatch):
+    # get_facecam_coordinates() only smooths across multiple sampled frames when clip_end is
+    # given -- process_clips_iter must pass the clip's own end_time so the crop box isn't read
+    # off a single static frame.
+    clips_data = {"clips": [{"start_time": 0.0, "end_time": 12.5, "title": "Clip"}]}
+    _process_clips_iter_common_mocks(monkeypatch, tmp_path, clips_data)
+
+    captured_kwargs = {}
+
+    def fake_get_facecam_coordinates(video_path, timestamp, **kwargs):
+        captured_kwargs.update(kwargs)
+        return (0, 0, 100, 100)
+
+    monkeypatch.setattr(process.vision, "get_facecam_coordinates", fake_get_facecam_coordinates)
+    monkeypatch.setattr(process.streamers, "load_streamers", lambda: [])
+
+    list(process.process_clips_iter(
+        source_video=tmp_path / "source.mp4", layout=process.LAYOUT_AUTO, output_dir=tmp_path / "out",
+    ))
+
+    assert captured_kwargs["clip_end"] == 12.5
+
+
+def test_process_clips_iter_threads_streamer_facecam_override(tmp_path, monkeypatch):
+    # A streamer with a facecam_box/facecam_padding configured in streamers.json should have
+    # both threaded straight into vision.get_facecam_coordinates() for every clip in the batch.
+    clips_data = {"clips": [{"start_time": 0.0, "end_time": 10.0, "title": "Clip"}]}
+    _process_clips_iter_common_mocks(monkeypatch, tmp_path, clips_data)
+
+    captured_kwargs = {}
+
+    def fake_get_facecam_coordinates(video_path, timestamp, **kwargs):
+        captured_kwargs.update(kwargs)
+        return (0, 0, 100, 100)
+
+    monkeypatch.setattr(process.vision, "get_facecam_coordinates", fake_get_facecam_coordinates)
+    monkeypatch.setattr(
+        process.streamers, "load_streamers",
+        lambda: [{"name": "papaplatte", "facecam_box": [0.6, 0.0, 1.0, 0.4], "facecam_padding": 0.25}],
+    )
+
+    list(process.process_clips_iter(
+        source_video=tmp_path / "source.mp4", layout=process.LAYOUT_AUTO, output_dir=tmp_path / "out",
+        streamer_name="papaplatte",
+    ))
+
+    assert captured_kwargs["override_box_ratio"] == [0.6, 0.0, 1.0, 0.4]
+    assert captured_kwargs["padding_factor"] == process.vision.padding_factor_from_margin(0.25)
+
+
+def test_process_clips_iter_no_streamer_name_means_no_override(tmp_path, monkeypatch):
+    # Unchanged behavior for a manual/single-video run with no known streamer identity.
+    clips_data = {"clips": [{"start_time": 0.0, "end_time": 10.0, "title": "Clip"}]}
+    _process_clips_iter_common_mocks(monkeypatch, tmp_path, clips_data)
+
+    captured_kwargs = {}
+
+    def fake_get_facecam_coordinates(video_path, timestamp, **kwargs):
+        captured_kwargs.update(kwargs)
+        return (0, 0, 100, 100)
+
+    monkeypatch.setattr(process.vision, "get_facecam_coordinates", fake_get_facecam_coordinates)
+
+    def boom():
+        raise AssertionError("streamers.load_streamers() should not be called without a streamer_name")
+    monkeypatch.setattr(process.streamers, "load_streamers", boom)
+
+    list(process.process_clips_iter(
+        source_video=tmp_path / "source.mp4", layout=process.LAYOUT_AUTO, output_dir=tmp_path / "out",
+    ))
+
+    assert captured_kwargs["override_box_ratio"] is None
+    assert captured_kwargs["padding_factor"] == process.vision.PADDING_FACTOR
+
+
 # --- build_filter_complex: full_cam branch ----------------------------------------------
 
 def test_build_filter_complex_full_cam_crops_source_and_fills_full_canvas(tmp_path):
@@ -256,10 +368,12 @@ def test_build_ass_for_clip_includes_title_box_dialogue_line(tmp_path, monkeypat
     assert "Krasser Moment!" in content
 
 
-def test_build_ass_for_clip_split_screen_anchors_title_to_the_seam(tmp_path, monkeypatch):
-    # 2026-08-19: a real render put the title box in the flat-ratio spot, well above the
-    # facecam/gameplay seam a reference clip in this style uses — split_screen now centers
-    # the title on the seam itself (SPLIT_SCREEN_FACE_RATIO), not the general TITLE_BOX_Y_RATIO.
+def test_build_ass_for_clip_split_screen_uses_safe_top_margin_not_the_seam(tmp_path, monkeypatch):
+    # 2026-08-19's original design centered the title ON the facecam/gameplay seam
+    # (SPLIT_SCREEN_FACE_RATIO). Account-owner report, 2026-08-22, with a real render attached:
+    # since the title is center-anchored, that put roughly half the box inside the facecam
+    # zone's bottom edge — right over a typically-centered face crop's mouth/chin. split_screen
+    # now uses its own safe top-margin ratio instead, well clear of the whole facecam zone.
     monkeypatch.setattr(process, "TEMP_DIR", tmp_path)
     clip = {"start_time": 0.0, "end_time": 5.0, "title": "Krasser Moment!"}
     transcript = {"segments": []}
@@ -269,8 +383,11 @@ def test_build_ass_for_clip_split_screen_anchors_title_to_the_seam(tmp_path, mon
     )
     content = ass_path.read_text(encoding="utf-8")
 
-    expected_y = int(1920 * process.SPLIT_SCREEN_FACE_RATIO)
+    expected_y = int(1920 * process.SPLIT_SCREEN_TITLE_Y_RATIO)
     assert f"\\pos(540,{expected_y})" in content
+    # Must clear the facecam zone (top SPLIT_SCREEN_FACE_RATIO of the canvas) by a wide
+    # margin, not sit anywhere near its bottom edge where a centered face's mouth/chin is.
+    assert expected_y < int(1920 * process.SPLIT_SCREEN_FACE_RATIO) * 0.5
 
 
 def test_build_ass_for_clip_full_cam_uses_flat_title_ratio(tmp_path, monkeypatch):
@@ -300,6 +417,24 @@ def test_build_ass_for_clip_omits_title_box_dialogue_without_a_title(tmp_path, m
 
 def test_title_box_and_subtitles_use_different_y_positions():
     # The whole point of raising SUBTITLE_Y_RATIO was to keep it clear of TITLE_BOX_Y_RATIO
-    # and, for split_screen, clear of the seam-anchored title position too.
+    # and, for split_screen, clear of SPLIT_SCREEN_TITLE_Y_RATIO too.
     assert process.TITLE_BOX_Y_RATIO < process.SUBTITLE_Y_RATIO
-    assert process.SPLIT_SCREEN_FACE_RATIO < process.SUBTITLE_Y_RATIO
+    assert process.SPLIT_SCREEN_TITLE_Y_RATIO < process.SUBTITLE_Y_RATIO
+
+
+def test_subtitle_y_position_is_within_the_shorts_reels_tiktok_safe_zone():
+    # Account-owner spec, 2026-08-22: dialogue/word-by-word subtitles must sit at y~1400-1600px
+    # on a 1920-tall canvas, clear of the platforms' own bottom UI chrome (like/comment/share
+    # icon column, caption area).
+    pos_y = int(1920 * process.SUBTITLE_Y_RATIO)
+    assert 1400 <= pos_y <= 1600
+
+
+def test_split_screen_title_clears_the_facecam_zone_entirely():
+    # Account-owner spec, 2026-08-22: the title must not obscure the center of the facecam —
+    # verified directly against the facecam zone's own boundary (SPLIT_SCREEN_FACE_RATIO),
+    # not just a fixed pixel guess that could drift out of sync if that ratio is ever retuned.
+    title_y = int(1920 * process.SPLIT_SCREEN_TITLE_Y_RATIO)
+    facecam_zone_bottom = int(1920 * process.SPLIT_SCREEN_FACE_RATIO)
+    assert 80 <= title_y <= 120
+    assert title_y < facecam_zone_bottom * 0.5  # well within the top half, clear of face center

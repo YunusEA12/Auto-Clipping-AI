@@ -3,7 +3,7 @@
 import logging
 import urllib.request
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import cv2
 import mediapipe as mp
@@ -50,6 +50,28 @@ MIN_BOX_DIMENSION = 100
 # blur_background decision is keyed on — a HUD portrait passing the detector's 0.5 floor
 # rarely also clears 0.65.
 FACE_COUNT_MIN_CONFIDENCE = 0.65
+
+# get_facecam_coordinates() trusts ANY dynamic detection at/above this confidence over a
+# streamer's static facecam_box override — streamers move/resize their webcam overlay between
+# streams, so a rigid static box that always wins would silently crop the wrong region once a
+# cam moves. 0.50 matches MediaPipe FaceDetectorOptions' own baseline detection floor (see
+# FACE_COUNT_MIN_CONFIDENCE's docstring above), so in practice any detection this module
+# returns at all already clears it — the override is therefore only a last-resort fallback for
+# the genuine zero-faces-across-every-sampled-frame case (streamer's cam is off-model, oddly
+# angled, or the detector otherwise finds nothing at all), never a way to override a real,
+# just-lower-confidence detection. 2026-08-23 account-owner spec: previously this compared
+# against a much higher 0.75 bar, which meant a real but marginal detection (motion blur, an
+# odd angle) still lost to the static box even though dynamic detection HAD found the actual
+# (possibly relocated) camera — exactly the failure mode this lower bar exists to avoid.
+DYNAMIC_DETECTION_MIN_CONFIDENCE = 0.50
+
+# How many frames to sample across a clip's duration for get_facecam_coordinates()'s temporal
+# smoothing (see _sample_smoothed_box below) — high enough that one bad frame (a blink, motion
+# blur, a HUD element briefly overlapping the webcam) can't dominate the median, low enough
+# that a several-minute clip doesn't cost many extra decode+detect passes just to place one
+# crop box. Odd, so the median of the sampled x/y/w/h values is always an actually-observed
+# component-wise combination rather than an average of two straddling samples.
+FACECAM_SMOOTH_SAMPLE_COUNT = 5
 
 
 def _ensure_model() -> Path:
@@ -180,26 +202,150 @@ def face_center_x_ratio(face_box: tuple[int, int, int, int], frame_w: int) -> fl
     return (x + w / 2) / frame_w
 
 
+def padding_factor_from_margin(margin_fraction: float) -> float:
+    """Convert a padding margin expressed as "extra fraction of the box's own size added on
+    each side" (e.g. 0.25 for a 25% margin — the account-owner spec's "20-30% extra margin
+    around head/shoulders") into the multiplicative `padding_factor` get_facecam_coordinates()
+    expects. get_facecam_coordinates() pads by size * (padding_factor - 1) / 2 per side, i.e.
+    a margin_fraction of the box size, so padding_factor = 1 + 2 * margin_fraction."""
+    return 1 + 2 * margin_fraction
+
+
+def _ratio_box_to_pixels(
+    ratio_box: Sequence[float], frame_w: int, frame_h: int
+) -> tuple[int, int, int, int]:
+    """Convert a streamers.json `facecam_box` — [x1, y1, x2, y2] as fractions (0..1) of frame
+    width/height, resolution-independent since source recordings vary in size across chunks —
+    into a pixel (x, y, w, h) box for this specific frame's dimensions."""
+    x1, y1, x2, y2 = ratio_box
+    x1_px = max(0, min(frame_w, int(x1 * frame_w)))
+    y1_px = max(0, min(frame_h, int(y1 * frame_h)))
+    x2_px = max(0, min(frame_w, int(x2 * frame_w)))
+    y2_px = max(0, min(frame_h, int(y2 * frame_h)))
+    return x1_px, y1_px, max(1, x2_px - x1_px), max(1, y2_px - y1_px)
+
+
+def _median(values: Sequence[float]) -> float:
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    return ordered[mid] if n % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _sample_smoothed_box(
+    video_path: str, start_ts: float, end_ts: float, sample_count: int
+) -> tuple[Optional[tuple[int, int, int, int]], float, int, int]:
+    """Sample `sample_count` frames evenly spaced across [start_ts, end_ts] (a clip's own
+    duration, not just its first frame) and return a temporally-smoothed
+    (median_box_or_None, mean_confidence, frame_w, frame_h).
+
+    Averaging/smoothing across multiple sampled frames instead of trusting a single static
+    frame coordinate: a lone unlucky sample (a blink, motion blur, a HUD element briefly
+    overlapping the webcam) can otherwise anchor the ENTIRE clip's crop, since
+    get_facecam_coordinates() only ever detects once per clip. The median of each of x/y/w/h
+    independently (not a mean) is deliberate — it discards a single outlier sample's pull on
+    the result the way a mean would still be dragged by it, while still returning one stable
+    box for the whole clip's render (no per-frame jitter within the render itself, since this
+    box is still used as one static crop, same as before).
+
+    Every sampled frame's OWN highest-scoring detection is used (not a fixed confidence floor)
+    so a sample with no detection at all just contributes nothing rather than forcing a
+    low-quality box into the median; frames where the streamer briefly isn't in view (e.g.
+    stood up, camera glitch) don't distort the result as long as most samples still see them.
+    """
+    if sample_count <= 1 or end_ts <= start_ts:
+        timestamps = [start_ts]
+    else:
+        step = (end_ts - start_ts) / (sample_count - 1)
+        timestamps = [start_ts + i * step for i in range(sample_count)]
+
+    boxes: list[tuple[int, int, int, int]] = []
+    scores: list[float] = []
+    frame_w = frame_h = 0
+    for ts in timestamps:
+        try:
+            raw_boxes, raw_scores, frame_w, frame_h = _detect_faces(video_path, ts)
+        except RuntimeError as e:
+            logger.warning("Facecam smoothing: could not read frame at %.2fs from %s (%s), skipping sample", ts, video_path, e)
+            continue
+        if not raw_boxes:
+            continue
+        best = max(range(len(raw_boxes)), key=lambda i: raw_scores[i])
+        boxes.append(raw_boxes[best])
+        scores.append(raw_scores[best])
+
+    if not boxes:
+        return None, 0.0, frame_w, frame_h
+
+    median_box = (
+        int(_median([b[0] for b in boxes])),
+        int(_median([b[1] for b in boxes])),
+        int(_median([b[2] for b in boxes])),
+        int(_median([b[3] for b in boxes])),
+    )
+    mean_confidence = sum(scores) / len(scores)
+    logger.info(
+        "Facecam smoothing over [%.2fs, %.2fs]: %d/%d samples had a face, median=%s, mean_confidence=%.2f",
+        start_ts, end_ts, len(boxes), len(timestamps), median_box, mean_confidence,
+    )
+    return median_box, mean_confidence, frame_w, frame_h
+
+
 def get_facecam_coordinates(
-    video_path: str, timestamp: float, padding_factor: float = PADDING_FACTOR
+    video_path: str,
+    timestamp: float,
+    padding_factor: float = PADDING_FACTOR,
+    clip_end: Optional[float] = None,
+    sample_count: int = FACECAM_SMOOTH_SAMPLE_COUNT,
+    override_box_ratio: Optional[Sequence[float]] = None,
 ) -> tuple[int, int, int, int]:
     """Detect a face at `timestamp` seconds into `video_path` and return a padded (x, y, w, h) box in pixels.
 
-    Detection runs once, at the clip's start_time, and that single box is used as a
-    static crop for the whole clip's render — so there is no per-frame jitter or
-    flicker within a clip by construction (no frame-by-frame re-detection to disagree
-    with itself).
+    That single box is used as a static crop for the whole clip's render — so there is no
+    per-frame jitter or flicker within a clip by construction (no frame-by-frame re-detection
+    to disagree with itself). When `clip_end` is given (and after `timestamp`), the box itself
+    is no longer read off a single frame: it's the temporally-smoothed median of
+    FACECAM_SMOOTH_SAMPLE_COUNT frames sampled across [timestamp, clip_end] — see
+    _sample_smoothed_box's own docstring for why. Without `clip_end`, this falls back to the
+    original single-frame read (used by callers, and tests, that only care about one instant).
 
     `padding_factor` defaults to PADDING_FACTOR (tuned for split_screen's top-third zone);
     process.py passes a larger value for full_cam, where the same box gets stretched to fill
     the ENTIRE tall 9:16 canvas instead of a short-wide strip — cover-fitting a padded box
-    tuned for a short zone into a much taller one crops far tighter than intended.
+    tuned for a short zone into a much taller one crops far tighter than intended. Callers can
+    also derive a padding_factor from a plain "20-30% margin" fraction via
+    padding_factor_from_margin() instead of picking a multiplier directly.
+
+    `override_box_ratio`, when given (streamers.json's per-streamer `facecam_box`, a
+    resolution-independent [x1, y1, x2, y2] fraction box), is used ONLY when the dynamic
+    detection is missing or its confidence is below DYNAMIC_DETECTION_MIN_CONFIDENCE — a
+    genuine detection (the streamer's ACTUAL, possibly-moved camera) always wins over a stale
+    hand-picked box; the override exists purely as a loose last-resort for the case where
+    detection finds nothing at all. The override is used as-is (no extra padding applied):
+    it's already an explicit crop box, not a raw face box that needs headroom added around it.
     """
-    boxes, scores, frame_w, frame_h = _detect_faces(video_path, timestamp)
-    raw_box = boxes[max(range(len(boxes)), key=lambda i: scores[i])] if boxes else None
+    smoothed = clip_end is not None and clip_end > timestamp
+    if smoothed:
+        raw_box, confidence, frame_w, frame_h = _sample_smoothed_box(video_path, timestamp, clip_end, sample_count)
+    else:
+        boxes, scores, frame_w, frame_h = _detect_faces(video_path, timestamp)
+        if boxes:
+            best = max(range(len(boxes)), key=lambda i: scores[i])
+            raw_box, confidence = boxes[best], scores[best]
+        else:
+            raw_box, confidence = None, 0.0
+
+    where = f"smoothed over [{timestamp:.2f}s, {clip_end:.2f}s]" if smoothed else f"at {timestamp:.2f}s"
+
+    if override_box_ratio is not None and (raw_box is None or confidence < DYNAMIC_DETECTION_MIN_CONFIDENCE):
+        logger.info(
+            "Facecam %s: dynamic confidence=%.2f (< %.2f threshold or no detection) — using streamer's "
+            "static facecam override instead", where, confidence, DYNAMIC_DETECTION_MIN_CONFIDENCE,
+        )
+        return _ratio_box_to_pixels(override_box_ratio, frame_w, frame_h)
 
     if raw_box is None:
-        logger.warning("No face detected at %.2fs in %s, using fallback crop", timestamp, video_path)
+        logger.warning("No face detected (%s) in %s, using fallback crop", where, video_path)
         return _fallback_box(frame_w, frame_h)
 
     x, y, w, h = raw_box
@@ -223,7 +369,7 @@ def get_facecam_coordinates(
         return _fallback_box(frame_w, frame_h)
 
     logger.info(
-        "Face detected at %.2fs: raw=(%d,%d,%d,%d) padded=(%d,%d,%d,%d)",
-        timestamp, x, y, w, h, final_x, final_y, final_w, final_h,
+        "Face detected (%s): raw=(%d,%d,%d,%d) padded=(%d,%d,%d,%d)",
+        where, x, y, w, h, final_x, final_y, final_w, final_h,
     )
     return final_x, final_y, final_w, final_h

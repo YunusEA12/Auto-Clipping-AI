@@ -279,6 +279,10 @@ def _persist_reward_score(output_path: Path, score: Optional[int]) -> None:
 # exceeded, a stale OAuth token) instead of a whole-pipeline one.
 YOUTUBE_RETRY_BATCH_LIMIT = BATCH_SIZE_MAX
 
+# Same reasoning as YOUTUBE_RETRY_BATCH_LIMIT, for Instagram's equivalent backlog sweep — see
+# find_missing_instagram_uploads()'s own docstring.
+INSTAGRAM_RETRY_BATCH_LIMIT = BATCH_SIZE_MAX
+
 
 def find_missing_youtube_uploads(uploaded_clips_dir: Path, streamer_name: Optional[str] = None) -> List[Path]:
     """upload_manager.upload_clip_everywhere() attempts TikTok and YouTube independently per
@@ -367,6 +371,86 @@ def retry_missing_youtube_uploads(uploaded_clips_dir: Path, streamer_name: Optio
                 mp4_path.name, outcome.url, e,
             )
         logger.info("📺 YouTube-Nachversuch erfolgreich für '%s' -> %s", mp4_path.name, outcome.url)
+
+    return ok, failed
+
+
+def find_missing_instagram_uploads(uploaded_clips_dir: Path, streamer_name: Optional[str] = None) -> List[Path]:
+    """Instagram's own equivalent of find_missing_youtube_uploads() above — found in a
+    2026-08-22 upload-parity audit: unlike YouTube, Instagram had NO backlog-retry sweep at
+    all. upload_clip_everywhere()'s own docstring already says only TikTok's outcome decides
+    whether a clip moves into uploaded_clips/ — so a clip whose Instagram leg failed (a
+    Playwright crash, an expired cookie, a selector-drift no-op that still counts as a
+    non-confirmed attempt) or was still `pending`/unconfirmed at archive time had nothing that
+    would ever revisit it once TikTok succeeded and moved it out of output/. This scans
+    uploaded_clips/ for exactly that gap — clips whose sidecar shows `instagram_enabled: true`
+    (this streamer had genuinely opted in, not e.g. an older clip from before the streamer
+    turned it on) but `instagram_uploaded` isn't `true`.
+
+    `streamer_name` filtering matches find_missing_youtube_uploads() exactly, same reasoning:
+    uploaded_clips/ is a single flat directory shared by every concurrent streamer process.
+
+    Returns sidecar-having .mp4 paths only, same reasoning as find_missing_youtube_uploads()."""
+    if not uploaded_clips_dir.exists():
+        return []
+
+    missing: List[Path] = []
+    for mp4_path in sorted(uploaded_clips_dir.glob("*.mp4")):
+        sidecar_path = mp4_path.with_suffix(".json")
+        try:
+            with open(sidecar_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        clip_owner = data.get("streamer_name")
+        if streamer_name is not None and clip_owner is not None and clip_owner != streamer_name:
+            continue
+        if data.get("instagram_enabled") and not data.get("instagram_uploaded"):
+            missing.append(mp4_path)
+    return missing
+
+
+def retry_missing_instagram_uploads(uploaded_clips_dir: Path, streamer_name: Optional[str] = None) -> Tuple[int, int]:
+    """Retries ONLY the Instagram leg for clips found by find_missing_instagram_uploads() —
+    never TikTok, same reasoning as retry_missing_youtube_uploads(). Uses
+    upload_manager._upload_to_instagram() directly, with instagram_enabled=True (the sidecar
+    filter above already confirmed this streamer opted in for this clip).
+
+    A success that isn't yet `confirmed` (Instagram's own "clicked but no confirming signal
+    seen" ambiguity — see InstagramOutcome's own docstring) is deliberately NOT marked
+    instagram_uploaded here, same as upload_ledger.mark_unresolved()'s own reasoning: leaving
+    it eligible for another retry next cycle is safer than guessing it went through.
+
+    Returns (retried_ok, retried_failed), same semantics as retry_missing_youtube_uploads()."""
+    candidates = find_missing_instagram_uploads(uploaded_clips_dir, streamer_name)[:INSTAGRAM_RETRY_BATCH_LIMIT]
+    ok, failed = 0, 0
+
+    for mp4_path in candidates:
+        sidecar_path = mp4_path.with_suffix(".json")
+        with open(sidecar_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        outcome = upload_manager._upload_to_instagram(
+            mp4_path, data.get("title", mp4_path.stem), data.get("description", ""),
+            data.get("hashtags"), publish=True, instagram_enabled=True,
+        )
+        if not (outcome.success and outcome.confirmed):
+            failed += 1
+            logger.warning(
+                "Instagram-Nachversuch für '%s' erneut fehlgeschlagen: %s", mp4_path.name, outcome.detail,
+            )
+            continue
+
+        ok += 1
+        data["instagram_uploaded"] = True
+        try:
+            atomic_io.atomic_write_json(sidecar_path, data)
+        except OSError as e:
+            logger.warning(
+                "Instagram-Upload für '%s' erfolgreich, aber Sidecar-Update fehlgeschlagen: %s",
+                mp4_path.name, e,
+            )
+        logger.info("📸 Instagram-Nachversuch erfolgreich für '%s'", mp4_path.name)
 
     return ok, failed
 
@@ -652,45 +736,59 @@ def run_cycle(
 
         with open(clips_path, "r", encoding="utf-8") as f:
             clips_data = json.load(f)
-        if not clips_data.get("clips"):
-            logger.info("Zyklus abgeschlossen: kein Content mit hohem viralem Potenzial gefunden, nichts gerendert.")
-            update_agent_state(
-                current_action="😴 Kein Content gefunden — warte auf nächsten Zyklus",
-                clips_kept_total=kept_total, clips_purged_total=purged_total,
-                clips_uploaded_total=uploaded_total, **common_state,
-            )
-            return 0, 0, 0
 
-        batch_size = random.randint(BATCH_SIZE_MIN, BATCH_SIZE_MAX)
-        batch_clips = _trim_to_batch(clips_path, batch_size)
-        logger.info("Phase 1 (Collect): %d Clip(s) für diesen Zyklus ausgewählt", len(batch_clips))
-
-        update_agent_state(current_action=f"🎬 Rendering läuft ({len(batch_clips)} Clip(s))", **common_state)
-        transcript = analyze.load_transcript(transcription_path)
+        # Phases 1-3 (Collect/Evaluate/Purge) only run when this cycle actually found new
+        # clips worth rendering — kept/deleted/survivors default to "nothing new" otherwise.
+        # Deliberately NOT an early return (2026-08-23 fix): this function used to return here
+        # immediately on a "no clips" cycle, which also skipped Phase 5 below entirely —
+        # including the output/ backlog sweep and the YouTube/Instagram retry sweeps, despite
+        # their own docstrings promising they "run every cycle regardless of whether this
+        # cycle had its own survivors". Found live: a content-quiet streamer (a stream with
+        # long stretches of nothing clip-worthy happening) could have an already-rendered
+        # backlog clip, or a clip stuck mid-upload on one platform, sit stuck for a FULL DAY —
+        # upload_ledger.json showed several "pending" entries 14-37 hours old, all belonging to
+        # streamers whose recent cycles kept coming back with zero new clips, so the retry
+        # sweep that would have released them (upload_ledger.try_mark_pending()'s own staleness
+        # check) never got a chance to run at all.
+        kept, deleted, survivors = 0, 0, []
         rendered: Dict[str, Path] = {}
-        for i, total, clip, output_path in process_module.process_clips_iter(
-            video_path, layout=layout, video_format=video_format,
-            highlight_color=highlight_color, transcript=transcript,
-            output_dir=_output_dir_override,
-        ):
-            rendered[clip["title"]] = output_path
+        if not clips_data.get("clips"):
+            logger.info(
+                "Zyklus: kein Content mit hohem viralem Potenzial gefunden, nichts gerendert — "
+                "Backlog/Nachversuche laufen unten trotzdem weiter."
+            )
+            update_agent_state(current_action="😴 Kein Content gefunden — prüfe Backlog/Nachversuche", **common_state)
+        else:
+            batch_size = random.randint(BATCH_SIZE_MIN, BATCH_SIZE_MAX)
+            batch_clips = _trim_to_batch(clips_path, batch_size)
+            logger.info("Phase 1 (Collect): %d Clip(s) für diesen Zyklus ausgewählt", len(batch_clips))
 
-        # Phase 2 (Evaluate & Update): score the batch (narrative + visual composition, via
-        # preview frames extracted from the just-rendered clips) and fold new content/visual/
-        # viral-pattern rules into ai_guidelines.txt — reused as-is from train_loop.py.
-        update_agent_state(current_action="🧠 KI bewertet die Clips (Critic)", **common_state)
-        guidelines_path, batch = train_loop.run_training_loop(
-            clips_path=clips_path, model=critic_model, rendered=rendered
-        )
+            update_agent_state(current_action=f"🎬 Rendering läuft ({len(batch_clips)} Clip(s))", **common_state)
+            transcript = analyze.load_transcript(transcription_path)
+            rendered: Dict[str, Path] = {}
+            for i, total, clip, output_path in process_module.process_clips_iter(
+                video_path, layout=layout, video_format=video_format,
+                highlight_color=highlight_color, transcript=transcript,
+                output_dir=_output_dir_override, streamer_name=streamer_handle,
+            ):
+                rendered[clip["title"]] = output_path
 
-        # Phase 3 (Clean & Purge)
-        update_agent_state(current_action="🧹 Bereinigung — lösche schwache Clips", **common_state)
-        kept, deleted, survivors = purge_low_scoring_clips(batch, rendered, clips_path, purge_threshold)
+            # Phase 2 (Evaluate & Update): score the batch (narrative + visual composition, via
+            # preview frames extracted from the just-rendered clips) and fold new content/visual/
+            # viral-pattern rules into ai_guidelines.txt — reused as-is from train_loop.py.
+            update_agent_state(current_action="🧠 KI bewertet die Clips (Critic)", **common_state)
+            guidelines_path, batch = train_loop.run_training_loop(
+                clips_path=clips_path, model=critic_model, rendered=rendered
+            )
 
-        logger.info(
-            "✅ Batch abgeschlossen: %d Clip(s) behalten, %d gelöscht, Regeln aktualisiert (%s).",
-            kept, deleted, guidelines_path,
-        )
+            # Phase 3 (Clean & Purge)
+            update_agent_state(current_action="🧹 Bereinigung — lösche schwache Clips", **common_state)
+            kept, deleted, survivors = purge_low_scoring_clips(batch, rendered, clips_path, purge_threshold)
+
+            logger.info(
+                "✅ Batch abgeschlossen: %d Clip(s) behalten, %d gelöscht, Regeln aktualisiert (%s).",
+                kept, deleted, guidelines_path,
+            )
 
         # Phase 5 (Deployment) — every clip that survived the purge gets uploaded to TikTok.
         # Requires publish too, not just auto_upload: TikTok has no draft-save action anymore
@@ -739,6 +837,13 @@ def run_cycle(
             yt_ok, yt_failed = retry_missing_youtube_uploads(UPLOADED_CLIPS_DIR, streamer_name=streamer_handle)
             if yt_ok or yt_failed:
                 logger.info("📺 YouTube-Nachversuch: %d erfolgreich, %d fehlgeschlagen", yt_ok, yt_failed)
+
+            # Instagram-only backlog: same gap, same fix, as the YouTube retry directly above —
+            # see find_missing_instagram_uploads()'s own docstring (2026-08-22 upload-parity
+            # audit finding: this side had no retry sweep at all until now).
+            ig_ok, ig_failed = retry_missing_instagram_uploads(UPLOADED_CLIPS_DIR, streamer_name=streamer_handle)
+            if ig_ok or ig_failed:
+                logger.info("📸 Instagram-Nachversuch: %d erfolgreich, %d fehlgeschlagen", ig_ok, ig_failed)
 
         update_agent_state(
             current_action="✅ Zyklus abgeschlossen — Cooldown",

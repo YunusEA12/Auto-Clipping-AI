@@ -180,6 +180,10 @@ def load_streamers() -> List[dict]:
     return streamers_module.load_streamers()
 
 
+def load_streamers_diagnostics() -> dict:
+    return streamers_module.load_streamers_diagnostics()
+
+
 def add_streamer(
     name: str, url: str, profile: str = "", auto_upload: bool = False, publish: bool = False
 ) -> None:

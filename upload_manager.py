@@ -94,6 +94,18 @@ def _upload_limit_backoff_until() -> Optional[datetime]:
 UPLOAD_DELAY_MIN_SECONDS = 30
 UPLOAD_DELAY_MAX_SECONDS = 60
 
+# 2026-08-22 upload-parity audit: in-call retry for a genuinely failed Instagram attempt
+# (Playwright crash, navigation timeout, an unhandled dialog) — up to 3 total tries with
+# jittered exponential backoff, same shape as llm_utils.call_with_retry's own ladder, just
+# tuned for a browser-automation upload (which needs longer gaps than an API call) rather than
+# an LLM request. Deliberately does NOT retry a "clicked but unconfirmed" outcome
+# (success=True, confirmed=False) — see _upload_to_instagram's own docstring for why retrying
+# THAT specific ambiguous state risks a real duplicate Reel post; only a clear success=False
+# or a raised exception is retried here.
+INSTAGRAM_UPLOAD_MAX_RETRIES = 3
+INSTAGRAM_UPLOAD_BASE_DELAY_SECONDS = 30
+INSTAGRAM_UPLOAD_MAX_DELAY_SECONDS = 180
+
 
 class YouTubeOutcome(NamedTuple):
     """Mirrors tiktok_uploader.UploadOutcome's shape (success/detail) rather than reusing it
@@ -242,7 +254,17 @@ def _upload_to_instagram(
     against a live session), so it defaults OFF for every streamer until proven working,
     opted into per-streamer via streamers.json's "instagram" field (see orchestrator.py's
     build_auto_pilot_cmd()) rather than firing automatically the moment this integration
-    merges. publish=True alone is NOT sufficient to attempt Instagram — both must be true."""
+    merges. publish=True alone is NOT sufficient to attempt Instagram — both must be true.
+
+    2026-08-22: retries a genuine failure (an exception, or try_upload_clip() returning
+    success=False — a navigation timeout, an unhandled dialog, a crashed browser) up to
+    INSTAGRAM_UPLOAD_MAX_RETRIES times with jittered exponential backoff, all within this one
+    call, before recording a final "failed" in the ledger — see that constant's own comment.
+    Deliberately stops retrying the moment an attempt comes back success=True, even if
+    unconfirmed: try_upload_clip() only reaches that state after actually clicking Instagram's
+    Share button, so a second attempt risks posting a real duplicate Reel over a first attempt
+    that may well have gone through — the same "don't guess on ambiguity" rule
+    upload_ledger.mark_unresolved() already applies one layer down for the NEXT cycle's retry."""
     if not publish or not instagram_enabled:
         reason = "publish=False" if not publish else "instagram not enabled for this streamer"
         logger.info("%s — skipping Instagram upload for %s", reason, video_path.name)
@@ -266,14 +288,39 @@ def _upload_to_instagram(
         )
         return InstagramOutcome(attempted=False, success=False, detail="duplicate upload blocked by ledger (pending)")
 
-    try:
-        outcome = instagram_uploader.try_upload_clip(video_path, description, tags, publish=publish)
-    except Exception as e:
-        # Never let an Instagram-side problem take down a cycle that's also reporting TikTok
-        # and YouTube results — same reasoning as the YouTube try/except above.
-        logger.error("Instagram upload raised unexpectedly for %s: %s", video_path.name, e)
-        upload_ledger.mark_failed(content_hash, "instagram", detail=str(e))
-        return InstagramOutcome(attempted=True, success=False, detail=str(e))
+    outcome = None
+    last_error = None
+    for attempt in range(1, INSTAGRAM_UPLOAD_MAX_RETRIES + 1):
+        try:
+            outcome = instagram_uploader.try_upload_clip(video_path, description, tags, publish=publish)
+            last_error = None
+        except Exception as e:
+            # Never let an Instagram-side problem take down a cycle that's also reporting
+            # TikTok and YouTube results — same reasoning as the YouTube try/except above.
+            outcome = None
+            last_error = str(e)
+
+        if outcome is not None and outcome.success:
+            break  # real success (confirmed or not) -- see docstring for why this stops retrying
+
+        if attempt < INSTAGRAM_UPLOAD_MAX_RETRIES:
+            delay = min(
+                INSTAGRAM_UPLOAD_MAX_DELAY_SECONDS,
+                INSTAGRAM_UPLOAD_BASE_DELAY_SECONDS * (2 ** (attempt - 1)),
+            ) * (1 + random.random() * 0.25)
+            logger.warning(
+                "Instagram upload attempt %d/%d failed for %s (%s) — retrying in %.0fs",
+                attempt, INSTAGRAM_UPLOAD_MAX_RETRIES, video_path.name,
+                last_error or (outcome.detail if outcome else "unknown error"), delay,
+            )
+            time.sleep(delay)
+
+    if outcome is None:
+        logger.error(
+            "Instagram upload raised unexpectedly for %s on every attempt: %s", video_path.name, last_error,
+        )
+        upload_ledger.mark_failed(content_hash, "instagram", detail=last_error or "unknown error")
+        return InstagramOutcome(attempted=True, success=False, detail=last_error or "unknown error")
 
     if outcome.success and outcome.confirmed:
         upload_ledger.mark_done(content_hash, "instagram", title=title)

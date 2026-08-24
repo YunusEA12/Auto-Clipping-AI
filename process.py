@@ -15,6 +15,7 @@ import cv2
 
 import atomic_io
 import optimization_engine
+import streamers
 import vision
 
 import logging_setup
@@ -123,13 +124,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 # built from (2026-08-19), same "verify by rendering and looking" caveat as every other
 # *_Y_RATIO constant in this file.
 #
-# split_screen does NOT use this: a flat 0.16 lands in the upper-middle of the face zone
-# (SPLIT_SCREEN_FACE_RATIO = 1/3, i.e. 0-33%), often crossing straight over the streamer's
-# face rather than sitting at the natural "hook caption" spot real TikTok reaction-cam clips
-# use — the seam where the facecam ends and gameplay begins. Found live, 2026-08-19, comparing
-# a real render against a reference clip in that style: build_ass_for_clip() below positions
-# split_screen's title at SPLIT_SCREEN_FACE_RATIO instead, centered on the seam itself.
+# split_screen does NOT use this — see SPLIT_SCREEN_TITLE_Y_RATIO below instead.
 TITLE_BOX_Y_RATIO = 0.16
+
+# Where split_screen's title sits, as a fraction of canvas height — a safe top-edge margin
+# (~80-120px at 1920 canvas height), NOT SPLIT_SCREEN_FACE_RATIO (the facecam/gameplay seam).
+# 2026-08-19's original design centered the title ON that seam deliberately (see this file's
+# git history), on the assumption it would read as a natural "hook caption" spot. Account-owner
+# report, 2026-08-22, with a real render attached: since the title is center-anchored (\an5),
+# centering it exactly on the seam put roughly half the box ABOVE the seam, inside the facecam
+# zone's bottom edge — which, for a typical centered face crop, is right where the mouth/chin
+# sits. Moved to a fixed near-top margin instead: clears the whole facecam zone regardless of
+# exactly how a given face crop is framed within it, rather than depending on box-height math
+# staying below whatever fraction of the seam a particular render's title text happens to need.
+SPLIT_SCREEN_TITLE_Y_RATIO = 100 / 1920
 
 # Where the subtitle block sits vertically, as a fraction of the canvas height — the TikTok
 # "lower third", clear of both the top facecam split and bottom platform UI icons. Empirical
@@ -278,9 +286,10 @@ def build_ass_for_clip(
     # than asking the LLM for a second, separate hook string.
     title_text = _escape_ass_text((clip.get("title") or "").strip())
     if title_text:
-        # split_screen anchors the title to the facecam/gameplay seam (see TITLE_BOX_Y_RATIO's
-        # docstring above) instead of the flat ratio other layouts use.
-        title_y_ratio = SPLIT_SCREEN_FACE_RATIO if layout == LAYOUT_SPLIT_SCREEN else TITLE_BOX_Y_RATIO
+        # split_screen uses its own safe top-margin ratio instead of TITLE_BOX_Y_RATIO — see
+        # SPLIT_SCREEN_TITLE_Y_RATIO's own docstring for why (must clear the facecam zone
+        # entirely, not sit on the seam).
+        title_y_ratio = SPLIT_SCREEN_TITLE_Y_RATIO if layout == LAYOUT_SPLIT_SCREEN else TITLE_BOX_Y_RATIO
         title_pos_y = int(output_h * title_y_ratio)
         title_tag = f"{{\\an5\\pos({pos_x},{title_pos_y})}}"
         clip_duration = clip_end - clip_start
@@ -806,6 +815,7 @@ LAYOUT_RETRY_FRACTIONS = (1 / 3, 2 / 3)
 
 def resolve_layout(
     layout: str, video_path: Path, clip_start: float, clip_end: float | None = None,
+    has_static_override: bool = False,
 ) -> tuple[str, float]:
     """Returns (resolved_layout, detection_ts) — NOT just the layout string (2026-08-22 fix).
     Previously process_clips_iter() always called vision.get_facecam_coordinates() at
@@ -846,6 +856,14 @@ def resolve_layout(
 
     A face_count == 0 result is retried at a couple more timestamps within the clip (when
     `clip_end` is given) before falling back to center_crop — see LAYOUT_RETRY_FRACTIONS.
+
+    `has_static_override`, when True (the streamer has a known `facecam_box` configured in
+    streamers.json — see streamers.StreamerEntry.facecam_box), skips that center_crop fallback
+    even after every retry comes up faceless: the streamer's own webcam position is known
+    independently of this clip's own dynamic detection, so split_screen (cropping toward that
+    known box, via get_facecam_coordinates()'s own override_box_ratio handling) is still the
+    right call rather than giving up on the facecam entirely. Only affects the zero-face case —
+    a face_count >= 1 result still resolves off the real detection as usual.
     """
     if layout != LAYOUT_AUTO:
         return layout, clip_start
@@ -894,6 +912,14 @@ def resolve_layout(
         # instead of re-detecting at clip_start, which could miss a face this function only
         # found on a retry. See this function's own docstring for the incident this fixes.
         detection_ts = ts
+    elif has_static_override:
+        resolved = LAYOUT_SPLIT_SCREEN
+        detection_ts = clip_start
+        logger.info(
+            "Auto-layout at %.2fs: face_count=0 after %d attempt(s), but streamer has a static "
+            "facecam override -> %s (crop toward the known box)",
+            clip_start, len(timestamps), resolved,
+        )
     else:
         resolved = LAYOUT_CENTER_CROP
         detection_ts = clip_start
@@ -930,12 +956,21 @@ def process_clips_iter(
     highlight_color: str = DEFAULT_HIGHLIGHT_COLOR,
     transcript: dict | None = None,
     output_dir: Path | None = None,
+    streamer_name: str | None = None,
 ) -> Iterator[Tuple[int, int, dict, Path]]:
     """Render clips one at a time, yielding (position, total, clip, output_path) as each one
     finishes — lets a caller (e.g. the Streamlit UI) show real per-clip progress instead of
     blocking on the whole batch. `process()` below is a thin wrapper for callers that just
     want the final list. `transcript`, if given, overrides temp/transcription.json.
-    `output_dir`, if given, overrides OUTPUT_DIR — see render_clip()'s docstring."""
+    `output_dir`, if given, overrides OUTPUT_DIR — see render_clip()'s docstring.
+
+    `streamer_name`, when given, looks up a matching streamers.json entry (by its `name`
+    field) for that streamer's optional `facecam_box`/`facecam_padding` overrides — see
+    StreamerEntry's own docstrings in streamers.py — and threads them through every facecam
+    detection call for this batch (same box/padding source for every clip, since they describe
+    the streamer's own layout, not anything clip-specific). None (the default, e.g. a manual
+    single-video run with no known streamer identity) means dynamic detection only, exactly
+    the previous behavior."""
     if layout not in SELECTABLE_LAYOUTS:
         raise ValueError(f"Unknown layout '{layout}', expected one of {SELECTABLE_LAYOUTS}")
     if video_format not in VIDEO_FORMATS:
@@ -976,9 +1011,25 @@ def process_clips_iter(
     # reasoning as get_video_dimensions() above, found in review 2026-08-21).
     has_source_audio = _has_audio_stream(video_path)
 
+    # Streamer-specific facecam override, looked up once for the whole batch (see this
+    # function's own docstring) — None/None when streamer_name wasn't given, or no entry
+    # matches it, or the matching entry hasn't set these fields, all of which mean "dynamic
+    # detection only", unchanged from before this feature existed.
+    override_box_ratio = None
+    padding_margin = None
+    if streamer_name is not None:
+        for entry in streamers.load_streamers():
+            if entry["name"] == streamer_name:
+                override_box_ratio = entry.get("facecam_box")
+                padding_margin = entry.get("facecam_padding")
+                break
+
     total = len(clips)
     for i, clip in enumerate(clips, start=1):
-        effective_layout, detection_ts = resolve_layout(layout, video_path, clip["start_time"], clip["end_time"])
+        effective_layout, detection_ts = resolve_layout(
+            layout, video_path, clip["start_time"], clip["end_time"],
+            has_static_override=override_box_ratio is not None,
+        )
 
         # detection_ts (not clip["start_time"]) — the exact frame resolve_layout()'s own
         # detection succeeded at, which may be a LAYOUT_RETRY_FRACTIONS retry rather than
@@ -986,12 +1037,31 @@ def process_clips_iter(
         # to silently disagree with the layout decision above (face found on a retry, but
         # clip_start itself faceless) and fall back to vision._fallback_box()'s static corner
         # box instead of the real, just-confirmed face — see resolve_layout()'s own docstring.
+        #
+        # clip["end_time"] is passed as clip_end so get_facecam_coordinates() samples and
+        # smooths the box across the REST of the clip (detection_ts -> end) rather than a
+        # single frame — see vision._sample_smoothed_box's docstring for why. override_box_ratio
+        # and padding_margin (converted to a padding_factor) carry this streamer's
+        # streamers.json overrides, when any are configured — see this function's own
+        # docstring.
         facecam_box = None
         if effective_layout == LAYOUT_SPLIT_SCREEN:
-            facecam_box = vision.get_facecam_coordinates(str(video_path), detection_ts)
-        elif effective_layout == LAYOUT_FULL_CAM:
+            padding_factor = (
+                vision.padding_factor_from_margin(padding_margin) if padding_margin is not None
+                else vision.PADDING_FACTOR
+            )
             facecam_box = vision.get_facecam_coordinates(
-                str(video_path), detection_ts, padding_factor=FULL_CAM_PADDING_FACTOR,
+                str(video_path), detection_ts, padding_factor=padding_factor,
+                clip_end=clip["end_time"], override_box_ratio=override_box_ratio,
+            )
+        elif effective_layout == LAYOUT_FULL_CAM:
+            padding_factor = (
+                vision.padding_factor_from_margin(padding_margin) if padding_margin is not None
+                else FULL_CAM_PADDING_FACTOR
+            )
+            facecam_box = vision.get_facecam_coordinates(
+                str(video_path), detection_ts, padding_factor=padding_factor,
+                clip_end=clip["end_time"], override_box_ratio=override_box_ratio,
             )
 
         # Picked once here (not inside render_clip) so it can be recorded below — see
@@ -1031,13 +1101,15 @@ def process(
     video_format: str = DEFAULT_FORMAT,
     highlight_color: str = DEFAULT_HIGHLIGHT_COLOR,
     transcript: dict | None = None,
+    streamer_name: str | None = None,
 ) -> List[Path]:
     """Render all clips and return the output paths. See process_clips_iter() for a
     version that yields progress per clip instead of blocking until everything is done."""
     return [
         output_path
         for _, _, _, output_path in process_clips_iter(
-            source_video, layout, video_format, highlight_color, transcript
+            source_video, layout, video_format, highlight_color, transcript,
+            streamer_name=streamer_name,
         )
     ]
 

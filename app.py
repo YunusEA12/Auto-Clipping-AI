@@ -455,8 +455,22 @@ with tab_fleet:
     orchestrator_streamers = (orchestrator_state or {}).get("streamers", {})
 
     if not streamer_entries:
-        st.info("Noch keine Streamer konfiguriert. Füge unten einen hinzu.")
+        diagnostics = dashboard_api.load_streamers_diagnostics()
+        if diagnostics["unreadable"]:
+            st.error(
+                "⚠️ streamers.json existiert, konnte aber nicht gelesen werden (Rechte- oder "
+                "Parse-Fehler) — keine Streamer geladen. Details im Server-Log."
+            )
+        else:
+            st.info("Noch keine Streamer konfiguriert. Füge unten einen hinzu.")
     else:
+        diagnostics = dashboard_api.load_streamers_diagnostics()
+        skipped = diagnostics["raw_count"] - diagnostics["loaded_count"] if diagnostics["raw_count"] is not None else 0
+        if skipped > 0:
+            st.warning(
+                f"⚠️ {skipped} Eintrag/Einträge in streamers.json konnten nicht geladen werden "
+                "(ungültig oder doppelter Name) — Details im Server-Log."
+            )
         for entry in streamer_entries:
             live_info = orchestrator_streamers.get(entry["name"], {})
             is_recording = live_info.get("recording", False)

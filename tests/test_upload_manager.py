@@ -416,6 +416,96 @@ def test_instagram_exception_does_not_raise_or_block_other_platforms(monkeypatch
     assert result.youtube.success is True
 
 
+# --- In-call retry with exponential backoff (2026-08-22 upload-parity audit) ---------------
+
+def test_instagram_retries_a_failure_and_succeeds_on_a_later_attempt(monkeypatch, fake_tiktok_success, clip_path):
+    monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
+    calls = []
+
+    def flaky(*a, **k):
+        calls.append(1)
+        if len(calls) < upload_manager.INSTAGRAM_UPLOAD_MAX_RETRIES:
+            return instagram_uploader.UploadOutcome(success=False, detail="transient")
+        return instagram_uploader.UploadOutcome(success=True, confirmed=True)
+    monkeypatch.setattr(instagram_uploader, "try_upload_clip", flaky)
+
+    result = upload_manager.upload_clip_everywhere(
+        clip_path, "Title", "desc", publish=True, instagram_enabled=True,
+    )
+
+    assert len(calls) == upload_manager.INSTAGRAM_UPLOAD_MAX_RETRIES
+    assert result.instagram.success is True
+    assert result.instagram.confirmed is True
+
+
+def test_instagram_gives_up_after_max_retries_and_marks_failed(monkeypatch, fake_tiktok_success, clip_path):
+    monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
+    calls = []
+    monkeypatch.setattr(
+        instagram_uploader, "try_upload_clip",
+        lambda *a, **k: (calls.append(1), instagram_uploader.UploadOutcome(success=False, detail="stuck"))[1],
+    )
+
+    result = upload_manager.upload_clip_everywhere(
+        clip_path, "Title", "desc", publish=True, instagram_enabled=True,
+    )
+
+    assert len(calls) == upload_manager.INSTAGRAM_UPLOAD_MAX_RETRIES
+    assert result.instagram.success is False
+    content_hash = upload_ledger.compute_content_hash(clip_path)
+    assert upload_ledger.get_entry(content_hash, "instagram")["status"] == "failed"
+
+
+def test_instagram_does_not_retry_an_unconfirmed_success(monkeypatch, fake_tiktok_success, clip_path):
+    # A "clicked but unconfirmed" outcome means the Share button was actually clicked --
+    # retrying it risks a real duplicate Reel post, so this must stop after one attempt.
+    monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
+    calls = []
+    monkeypatch.setattr(
+        instagram_uploader, "try_upload_clip",
+        lambda *a, **k: (calls.append(1), instagram_uploader.UploadOutcome(success=True, confirmed=False))[1],
+    )
+
+    result = upload_manager.upload_clip_everywhere(
+        clip_path, "Title", "desc", publish=True, instagram_enabled=True,
+    )
+
+    assert len(calls) == 1
+    assert result.instagram.success is True
+    assert result.instagram.confirmed is False
+
+
+def test_instagram_succeeds_on_first_attempt_without_extra_retries(monkeypatch, fake_tiktok_success, clip_path):
+    monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
+    calls = []
+    monkeypatch.setattr(
+        instagram_uploader, "try_upload_clip",
+        lambda *a, **k: (calls.append(1), instagram_uploader.UploadOutcome(success=True, confirmed=True))[1],
+    )
+
+    upload_manager.upload_clip_everywhere(clip_path, "Title", "desc", publish=True, instagram_enabled=True)
+
+    assert len(calls) == 1
+
+
+def test_instagram_retries_across_repeated_exceptions_then_gives_up(monkeypatch, fake_tiktok_success, clip_path):
+    monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise RuntimeError("playwright blew up")
+    monkeypatch.setattr(instagram_uploader, "try_upload_clip", boom)
+
+    result = upload_manager.upload_clip_everywhere(
+        clip_path, "Title", "desc", publish=True, instagram_enabled=True,
+    )
+
+    assert len(calls) == upload_manager.INSTAGRAM_UPLOAD_MAX_RETRIES
+    assert result.instagram.success is False
+    assert "playwright blew up" in result.instagram.detail
+
+
 def test_any_success_true_when_only_instagram_succeeds(monkeypatch, fake_tiktok_failure, clip_path):
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
     monkeypatch.setattr(
