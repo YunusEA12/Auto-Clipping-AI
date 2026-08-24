@@ -430,6 +430,15 @@ def run_orchestrator(
             except Exception as e:
                 logger.error("Optimization report failed (non-fatal): %s", e)
 
+            # Self-gated to ~once/hour internally (see run_periodic_chunk_cleanup()'s own
+            # docstring) — same "call every iteration, let the function decide if it's due"
+            # pattern as run_daily_report() just above. Never allowed to break the
+            # orchestrator's actual job over a cleanup failure.
+            try:
+                stream_watcher.run_periodic_chunk_cleanup()
+            except Exception as e:
+                logger.error("Raw chunk cleanup failed (non-fatal): %s", e)
+
             if max_iterations is None or iteration < max_iterations:
                 time.sleep(poll_interval)
     except KeyboardInterrupt:

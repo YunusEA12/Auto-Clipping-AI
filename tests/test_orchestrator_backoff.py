@@ -2,6 +2,7 @@ import streamers as streamers_module
 
 import optimization_engine
 import orchestrator
+import stream_watcher
 
 
 # --- build_auto_pilot_cmd's publish threading (safety-model correction, 2026-08-18: TikTok
@@ -101,6 +102,13 @@ def test_run_orchestrator_default_streamers_path_respects_monkeypatch(tmp_path, 
     # viral_memory.json/optimization_state.json instead of staying confined to tmp_path.
     monkeypatch.setattr(optimization_engine, "VIRAL_MEMORY_PATH", tmp_path / "viral_memory.json")
     monkeypatch.setattr(optimization_engine, "OPTIMIZATION_STATE_PATH", tmp_path / "optimization_state.json")
+    # run_orchestrator() also calls stream_watcher.run_periodic_chunk_cleanup() every
+    # iteration (2026-08-25) — already made structurally safe project-wide by conftest.py's
+    # _block_real_chunk_cleanup (real deletion is blocked, orchestrator's own try/except
+    # swallows the resulting error as non-fatal), but stubbed to a clean no-op here too rather
+    # than relying on that alone: this test is about streamer snapshot tracking, not cleanup,
+    # so it shouldn't log a "blocked" error on every run either.
+    monkeypatch.setattr(stream_watcher, "run_periodic_chunk_cleanup", lambda *a, **k: None)
 
     seen_snapshots = []
     original_write = orchestrator.write_orchestrator_state

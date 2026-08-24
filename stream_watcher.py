@@ -15,10 +15,12 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
 import analyze
+import atomic_io
 import ingest
 import notify
 import process as process_module
@@ -164,6 +166,136 @@ def _cleanup(path: Optional[Path]) -> None:
             logger.info("Cleaned up %s", path)
         except OSError as e:
             logger.warning("Could not delete %s: %s", path, e)
+
+
+# Periodic safety-net cleanup for raw .ts recording chunks (2026-08-25 incident: found live,
+# 181 accumulated chunks / 24GB in temp/, oldest 5 days old). auto_pilot.py's own
+# _cleanup_cycle_temp_files() already deletes a chunk once its cycle finishes normally — but
+# that's a `finally` block inside a single Python process, which cannot run if that process is
+# killed abruptly (an OOM kill, or `systemctl restart` sending SIGTERM while the process is
+# blocked in a long synchronous ffmpeg/Playwright call, both observed repeatedly during
+# incident response). Every interruption like that leaves its chunk (and .wav/.json siblings)
+# behind for good, since nothing else ever revisits temp/ afterward. This is an independent,
+# idempotent, age-based sweep — a safety net for exactly the cycles the per-cycle cleanup
+# never got to run for, not a replacement for it.
+RAW_CHUNK_MAX_AGE_HOURS = 24
+# Never delete something this fresh, even under disk-pressure below MIN_FREE_DISK_GB — a chunk
+# this young could still be mid-processing (recording, transcription, or a render still
+# reading it); PENDING_STALE_MINUTES elsewhere in this codebase (upload_ledger.py) uses the
+# same 30-minute bar for "safe to assume abandoned by whatever was using it".
+RAW_CHUNK_MIN_SAFE_AGE_MINUTES = 30
+MIN_FREE_DISK_GB = 20.0
+CHUNK_CLEANUP_INTERVAL_HOURS = 1
+CHUNK_CLEANUP_STATE_PATH = Path("chunk_cleanup_state.json")
+
+
+def _chunk_family(ts_path: Path) -> List[Path]:
+    """The .ts chunk plus every sibling temp artifact sharing its stem (.wav,
+    _transcription.json, _clips.json) — deleting only the .ts and leaving these behind would
+    just trade one kind of orphaned-file clutter for another."""
+    stem = ts_path.stem
+    parent = ts_path.parent
+    return [
+        ts_path,
+        parent / f"{stem}.wav",
+        parent / f"{stem}_transcription.json",
+        parent / f"{stem}_clips.json",
+    ]
+
+
+def cleanup_stale_chunks(
+    temp_dir: Path = None,
+    max_age_hours: float = RAW_CHUNK_MAX_AGE_HOURS,
+    min_free_disk_gb: float = MIN_FREE_DISK_GB,
+) -> int:
+    """Deletes raw .ts chunks (and their .wav/.json siblings) older than `max_age_hours`, then
+    — only if free disk space is STILL below `min_free_disk_gb` after that — deletes
+    additional chunks oldest-first (but never one younger than RAW_CHUNK_MIN_SAFE_AGE_MINUTES,
+    regardless of disk pressure) until the floor is met or nothing safe is left to delete.
+    Returns the number of .ts files removed. Safe to call repeatedly/concurrently with a real
+    cycle's own cleanup — _cleanup() no-ops on an already-gone file rather than raising.
+    `temp_dir` defaults to TEMP_DIR, resolved dynamically (not bound as a default-argument
+    value) so a test monkeypatching stream_watcher.TEMP_DIR is honored — same reasoning as
+    streamers.load_streamers()'s own `path: Path = None` pattern."""
+    if temp_dir is None:
+        temp_dir = TEMP_DIR
+    if not temp_dir.is_dir():
+        return 0
+
+    now = time.time()
+    deleted = 0
+
+    def _delete(ts_path: Path) -> None:
+        nonlocal deleted
+        for sibling in _chunk_family(ts_path):
+            _cleanup(sibling)
+        deleted += 1
+
+    remaining = []
+    for p in sorted(temp_dir.glob("live_chunk_*.ts")):
+        try:
+            age_seconds = now - p.stat().st_mtime
+        except OSError:
+            continue
+        if age_seconds > max_age_hours * 3600:
+            _delete(p)
+        else:
+            remaining.append((p, age_seconds))
+
+    free_gb = shutil.disk_usage(temp_dir).free / 1e9
+    if free_gb < min_free_disk_gb:
+        logger.warning(
+            "Free disk space (%.1fGB) is below the %.0fGB floor after age-based chunk "
+            "cleanup — deleting additional chunks oldest-first (never younger than %d "
+            "minutes) until restored.", free_gb, min_free_disk_gb, RAW_CHUNK_MIN_SAFE_AGE_MINUTES,
+        )
+        remaining.sort(key=lambda item: item[1], reverse=True)  # oldest (largest age) first
+        min_safe_age_seconds = RAW_CHUNK_MIN_SAFE_AGE_MINUTES * 60
+        for p, age_seconds in remaining:
+            if free_gb >= min_free_disk_gb:
+                break
+            if age_seconds < min_safe_age_seconds:
+                break  # sorted oldest-first — nothing left after this is safe to touch either
+            _delete(p)
+            free_gb = shutil.disk_usage(temp_dir).free / 1e9
+
+    if deleted:
+        logger.info(
+            "Chunk cleanup: removed %d stale raw chunk(s) (and siblings), %.1fGB free "
+            "afterward", deleted, shutil.disk_usage(temp_dir).free / 1e9,
+        )
+    return deleted
+
+
+def run_periodic_chunk_cleanup(force: bool = False) -> Optional[int]:
+    """Self-gated to roughly once per CHUNK_CLEANUP_INTERVAL_HOURS regardless of how often
+    it's called — same pattern, same reason, as optimization_engine.run_daily_report():
+    orchestrator.py's main loop is the only always-on process in this pipeline, so it calls
+    this every poll iteration (every ~90s), far more often than a disk sweep needs to run.
+    Returns the number of chunks deleted on a real run, None when skipped as too soon.
+    force=True (a manual/CLI run) always sweeps regardless of the last run."""
+    state = {}
+    if CHUNK_CLEANUP_STATE_PATH.exists():
+        try:
+            state = json.loads(CHUNK_CLEANUP_STATE_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            state = {}
+
+    last_run_at = state.get("last_run_at")
+    if not force and last_run_at:
+        try:
+            last = datetime.fromisoformat(last_run_at)
+            if (datetime.now(timezone.utc) - last).total_seconds() < CHUNK_CLEANUP_INTERVAL_HOURS * 3600:
+                return None
+        except ValueError:
+            pass  # corrupt timestamp — treat as due for a fresh sweep rather than getting stuck
+
+    deleted = cleanup_stale_chunks()
+    atomic_io.atomic_write_json(
+        CHUNK_CLEANUP_STATE_PATH,
+        {"last_run_at": datetime.now(timezone.utc).isoformat(), "last_deleted_count": deleted},
+    )
+    return deleted
 
 
 def render_hot_clips(

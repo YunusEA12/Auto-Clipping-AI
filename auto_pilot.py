@@ -232,7 +232,14 @@ def find_backlog_clips(
     a human clears it or a future cycle's own purge logic is extended to cover it.
 
     `exclude` is this cycle's own freshly-rendered paths (already handled as ordinary
-    survivors), so nothing is ever double-counted or double-uploaded within one cycle."""
+    survivors), so nothing is ever double-counted or double-uploaded within one cycle.
+
+    Returned newest-first by the clip's own rendered_at (2026-08-25, account-owner request):
+    a freshly-live moment is far more time-sensitive than a clip that's already been sitting
+    in this backlog for a while — the older one stays relevant regardless of which cycle
+    finally gets to it, but a "reacting live right now" clip loses most of its value if it
+    publishes hours late behind a long backlog queue. See _backlog_sort_key()'s own docstring
+    for the fallback when rendered_at is missing (older sidecars)."""
     if not output_dir.exists():
         return []
 
@@ -249,7 +256,26 @@ def find_backlog_clips(
         if "reward_score" not in clip:
             continue
         backlog.append((clip, mp4_path, clip.get("reward_score")))
+
+    backlog.sort(key=lambda item: _backlog_sort_key(item[0], item[1]), reverse=True)
     return backlog
+
+
+def _backlog_sort_key(clip: dict, mp4_path: Path) -> float:
+    """Newest-first ordering key for find_backlog_clips() — the sidecar's own rendered_at
+    timestamp when present (the authoritative "when this clip was actually created" signal),
+    falling back to the .mp4 file's own mtime for older sidecars written before that field
+    existed, or an unparseable value. Returns a POSIX timestamp for sorting; never raises."""
+    rendered_at = clip.get("rendered_at")
+    if rendered_at:
+        try:
+            return datetime.fromisoformat(rendered_at).timestamp()
+        except ValueError:
+            pass
+    try:
+        return mp4_path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _persist_reward_score(output_path: Path, score: Optional[int]) -> None:

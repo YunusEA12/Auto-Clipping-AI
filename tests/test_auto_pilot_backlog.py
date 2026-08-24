@@ -84,6 +84,46 @@ def test_backlog_missing_output_dir_is_empty(tmp_path):
     assert auto_pilot.find_backlog_clips(tmp_path / "does_not_exist", exclude=set()) == []
 
 
+# --- newest-first ordering (2026-08-25, account-owner request: a freshly-live clip loses most
+# of its value if it publishes hours late behind a long backlog queue) ----------------------
+
+def test_backlog_orders_newest_rendered_at_first(tmp_path):
+    old = _write_render(tmp_path, "clip_1_Old", {
+        "title": "Old", "reward_score": 3, "rendered_at": "2026-08-20T10:00:00+00:00",
+    })
+    newest = _write_render(tmp_path, "clip_2_Newest", {
+        "title": "Newest", "reward_score": 3, "rendered_at": "2026-08-25T09:00:00+00:00",
+    })
+    middle = _write_render(tmp_path, "clip_3_Middle", {
+        "title": "Middle", "reward_score": 3, "rendered_at": "2026-08-22T12:00:00+00:00",
+    })
+
+    backlog = auto_pilot.find_backlog_clips(tmp_path, exclude=set())
+
+    assert [path for _, path, _ in backlog] == [newest, middle, old]
+
+
+def test_backlog_falls_back_to_file_mtime_without_rendered_at(tmp_path):
+    import os
+    import time
+
+    older = _write_render(tmp_path, "clip_1_Older", {"title": "Older", "reward_score": 3})
+    os.utime(older, (time.time() - 3600, time.time() - 3600))
+    newer = _write_render(tmp_path, "clip_2_Newer", {"title": "Newer", "reward_score": 3})
+
+    backlog = auto_pilot.find_backlog_clips(tmp_path, exclude=set())
+
+    assert [path for _, path, _ in backlog] == [newer, older]
+
+
+def test_backlog_unparseable_rendered_at_falls_back_to_mtime_without_raising(tmp_path):
+    mp4 = _write_render(tmp_path, "clip_1_X", {
+        "title": "X", "reward_score": 3, "rendered_at": "not-a-real-timestamp",
+    })
+    backlog = auto_pilot.find_backlog_clips(tmp_path, exclude=set())
+    assert [path for _, path, _ in backlog] == [mp4]
+
+
 def test_backlog_returns_multiple_eligible_clips(tmp_path):
     mp4_a = _write_render(tmp_path, "clip_1_A", {"title": "A", "reward_score": 1})
     mp4_b = _write_render(tmp_path, "clip_2_B", {"title": "B", "reward_score": 5})

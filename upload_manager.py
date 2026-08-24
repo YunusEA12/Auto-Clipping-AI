@@ -114,11 +114,19 @@ UPLOAD_DELAY_MAX_SECONDS = 60
 # Instagram has no known daily cap (see this module's own docstring on why it isn't gated the
 # same way as TikTok/YouTube) so it isn't paced here.
 #
-# Defaults picked to spread roughly the volume seen on 2026-08-23 (151 TikTok, 101 YouTube
-# uploads) across a ~16h active-streaming day instead of the first ~6h of it. Tune per platform
-# via env var once the real daily quota for each account is better known.
-TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS = float(os.environ.get("TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS", "300"))
-YOUTUBE_MIN_UPLOAD_INTERVAL_SECONDS = float(os.environ.get("YOUTUBE_MIN_UPLOAD_INTERVAL_SECONDS", "300"))
+# Originally 300s, spreading the volume seen on 2026-08-23 (151 TikTok, 101 YouTube uploads)
+# across a ~16h active-streaming day instead of the first ~6h of it. Lowered to 120s
+# (2026-08-25, account-owner request for higher throughput) — raises the fleet-wide ceiling
+# to ~30/hour per platform instead of ~12/hour. Tradeoff, stated plainly: the 2026-08-23
+# incident this constant exists to prevent was TikTok's/YouTube's own daily quota getting
+# front-loaded and exhausted by mid-afternoon — a shorter interval reaches whatever the real
+# daily quota is that much sooner too. Right at 120s, TikTok's own "Content check lite" quota
+# (observed exhausting well before this pacing gate was ever the binding constraint — see the
+# 2026-08-25 TikTok-vs-YouTube discrepancy audit) is still the far tighter limit in practice,
+# so this mainly buys faster backlog drain during whatever window the quota IS open, not a
+# meaningfully earlier front-load. Tune per platform via env var if that changes.
+TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS = float(os.environ.get("TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS", "120"))
+YOUTUBE_MIN_UPLOAD_INTERVAL_SECONDS = float(os.environ.get("YOUTUBE_MIN_UPLOAD_INTERVAL_SECONDS", "120"))
 
 UPLOAD_PACING_STATE_PATH = Path("upload_pacing_state.json")
 UPLOAD_PACING_LOCK_TIMEOUT_SECONDS = 10

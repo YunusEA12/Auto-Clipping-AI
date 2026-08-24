@@ -23,6 +23,7 @@ orchestrator_state.json
 fleet_control.json
 viral_memory.json
 optimization_state.json
+chunk_cleanup_state.json
 tiktok_client_secret.json
 tiktok_token.json
 tiktok_cookies.json

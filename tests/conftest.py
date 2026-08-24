@@ -25,6 +25,7 @@ since it's applied later in the same test's setup."""
 
 import pytest
 
+import stream_watcher
 import upload
 import upload_instagram_playwright
 import upload_ledger
@@ -43,6 +44,11 @@ class RealInstagramCallBlocked(RuntimeError):
 class RealSleepBlocked(RuntimeError):
     """Raised instead of ever actually blocking a test on time.sleep() for more than a
     trivial moment — anything a test needs to wait out should be mocked, not endured."""
+
+
+class RealChunkCleanupBlocked(RuntimeError):
+    """Raised instead of ever deleting real files under stream_watcher.TEMP_DIR during
+    tests."""
 
 
 @pytest.fixture(autouse=True)
@@ -117,6 +123,30 @@ def _isolated_upload_pacing_state(tmp_path, monkeypatch):
     real (guarded against exceeding 1s by _block_real_sleep below, but still wrong: a test
     asserting "waited once" would see extra, unrelated pacing sleeps mixed in)."""
     monkeypatch.setattr(upload_manager, "UPLOAD_PACING_STATE_PATH", tmp_path / "upload_pacing_state.json")
+
+
+@pytest.fixture(autouse=True)
+def _block_real_chunk_cleanup(monkeypatch):
+    """stream_watcher.cleanup_stale_chunks() deletes real files under TEMP_DIR by default.
+    Found live, 2026-08-25: test_orchestrator_backoff.py exercises orchestrator.run_orchestrator()
+    for real (its own proper max_iterations=1/poll_interval=0 pattern, with optimization_engine's
+    state paths correctly isolated) — but had no isolation at all for orchestrator's new periodic
+    call into this function, which deleted 146 real raw stream chunks from the production temp/
+    directory. run_periodic_chunk_cleanup() calls this internally too (same-module name lookup,
+    so blocking the attribute here catches both entry points), and is deliberately NOT
+    separately isolated here — TEMP_DIR/CHUNK_CLEANUP_STATE_PATH aren't the real risk, actual
+    deletion is, so this blocks the one function that performs it rather than trying to isolate
+    every path that could reach it. A test that genuinely needs to exercise real cleanup
+    behavior restores the real function locally first — see
+    tests/test_stream_watcher_chunks.py's own _real_cleanup_stale_chunks module-level capture."""
+    def _raise(*args, **kwargs):
+        raise RealChunkCleanupBlocked(
+            "A test tried to call stream_watcher.cleanup_stale_chunks() for real — this "
+            "deletes real files under TEMP_DIR. Restore the real function locally (see "
+            "tests/test_stream_watcher_chunks.py's own pattern) if this test genuinely needs "
+            "to exercise it."
+        )
+    monkeypatch.setattr(stream_watcher, "cleanup_stale_chunks", _raise)
 
 
 @pytest.fixture(autouse=True)
