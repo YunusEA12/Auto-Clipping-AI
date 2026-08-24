@@ -135,15 +135,25 @@ def test_publish_false_never_sleeps(monkeypatch, fake_tiktok_failure, clip_path)
     assert sleep_calls == []
 
 
-# --- 2026-08-24: global per-platform daily-quota pacing gate -----------------------------------
-# See upload_manager._wait_for_upload_pacing()'s own docstring for why this exists (the
+# --- 2026-08-24/25: global per-platform daily-quota pacing gate --------------------------------
+# See upload_manager._try_reserve_upload_pacing_slot()'s own docstring for why this exists (the
 # 2026-08-23 incident: TikTok/YouTube's daily quotas were front-loaded into the first half of
-# the day instead of being spread across it). Isolated from the real state file by
-# tests/conftest.py's autouse _isolated_upload_pacing_state fixture.
+# the day) and why it's a non-blocking check-and-reserve rather than a sleep (2026-08-25 fix: a
+# blocking sleep here stalled the entire per-streamer capture loop, not just the upload step —
+# found live the next day). Isolated from the real state file by tests/conftest.py's autouse
+# _isolated_upload_pacing_state fixture.
 
-def test_second_tiktok_attempt_within_interval_waits_the_remainder(monkeypatch, tmp_path):
+def test_reserve_never_sleeps_and_grants_the_first_ever_attempt(monkeypatch, tmp_path):
+    monkeypatch.setattr(upload_manager, "UPLOAD_PACING_STATE_PATH", tmp_path / "pacing.json")
+    monkeypatch.setattr(upload_manager.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must not sleep")))
+
+    assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 300) is True
+
+
+def test_second_attempt_within_interval_is_denied_not_delayed(monkeypatch, tmp_path):
     monkeypatch.setattr(upload_manager, "UPLOAD_PACING_STATE_PATH", tmp_path / "pacing.json")
     monkeypatch.setattr(upload_manager, "TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS", 100)
+    monkeypatch.setattr(upload_manager.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must not sleep")))
 
     fake_now = upload_manager.datetime(2026, 1, 1, tzinfo=upload_manager.timezone.utc)
 
@@ -153,37 +163,48 @@ def test_second_tiktok_attempt_within_interval_waits_the_remainder(monkeypatch, 
             return fake_now
 
     monkeypatch.setattr(upload_manager, "datetime", _FakeDateTime)
-    sleep_calls = []
-    monkeypatch.setattr(upload_manager.time, "sleep", lambda s: sleep_calls.append(s))
 
-    upload_manager._wait_for_upload_pacing("tiktok", upload_manager.TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS)
-    assert sleep_calls == []  # first-ever attempt: nothing to wait out
+    assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 100) is True  # first: granted
 
-    fake_now = fake_now + upload_manager.timedelta(seconds=40)
-    upload_manager._wait_for_upload_pacing("tiktok", upload_manager.TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS)
-    assert sleep_calls == [60]  # 100s interval - 40s elapsed = 60s remaining
+    fake_now = fake_now + upload_manager.timedelta(seconds=40)  # only 40s of a 100s interval
+    assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 100) is False  # denied, no sleep
+
+    fake_now = fake_now + upload_manager.timedelta(seconds=61)  # now 101s since the granted slot
+    assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 100) is True  # interval elapsed
 
 
 def test_pacing_is_tracked_independently_per_platform(monkeypatch, tmp_path):
     monkeypatch.setattr(upload_manager, "UPLOAD_PACING_STATE_PATH", tmp_path / "pacing.json")
-    sleep_calls = []
-    monkeypatch.setattr(upload_manager.time, "sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(upload_manager.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must not sleep")))
 
-    upload_manager._wait_for_upload_pacing("tiktok", 300)
-    upload_manager._wait_for_upload_pacing("youtube", 300)  # a fresh platform, not tiktok's slot
-
-    assert sleep_calls == []
+    assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 300) is True
+    assert upload_manager._try_reserve_upload_pacing_slot("youtube", 300) is True  # a fresh platform
 
 
-def test_zero_interval_never_waits(monkeypatch, tmp_path):
+def test_zero_interval_always_grants(monkeypatch, tmp_path):
     monkeypatch.setattr(upload_manager, "UPLOAD_PACING_STATE_PATH", tmp_path / "pacing.json")
+    monkeypatch.setattr(upload_manager.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must not sleep")))
+
+    assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 0) is True
+    assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 0) is True
+
+
+def test_denied_slot_is_not_a_regression_to_blocking_the_caller(monkeypatch, tmp_path, fake_tiktok_success, clip_path):
+    """The specific bug this fixes: upload_clip_everywhere() (called synchronously, once per
+    clip, from auto_pilot.py's single-threaded per-streamer cycle) must return promptly even
+    when the pacing slot is denied — never block the caller waiting for it to free up."""
+    monkeypatch.setattr(upload_manager, "UPLOAD_PACING_STATE_PATH", tmp_path / "pacing.json")
+    monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-video-id")
+    monkeypatch.setattr(upload_manager, "TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS", 9999)
+    upload_manager._try_reserve_upload_pacing_slot("tiktok", 9999)  # consume the only slot for a long time
+
     sleep_calls = []
     monkeypatch.setattr(upload_manager.time, "sleep", lambda s: sleep_calls.append(s))
 
-    upload_manager._wait_for_upload_pacing("tiktok", 0)
-    upload_manager._wait_for_upload_pacing("tiktok", 0)
+    result = upload_manager.upload_clip_everywhere(clip_path, "Title", "desc", publish=True)
 
-    assert sleep_calls == []
+    assert result.tiktok.success is False  # denied this cycle, not attempted
+    assert all(s <= upload_manager.UPLOAD_DELAY_MAX_SECONDS for s in sleep_calls)  # only the platform stagger, never a 9999s pacing wait
 
 
 # --- a YouTube failure never propagates past this module ---------------------------------------
@@ -697,6 +718,12 @@ def test_two_different_clips_with_same_title_are_not_confused_by_the_ledger(monk
     """The ledger is keyed by content hash, not by title — two genuinely different clips that
     happen to share an AI-generated title (seen live: "Nico testet Calisthenics" recurred
     across separate stream sessions) must not be treated as the same upload."""
+    # Pacing is orthogonal to what this test checks (ledger dedup by content hash, not by
+    # title) — without disabling it, clip_b's real-time-adjacent attempt would be legitimately
+    # denied by the fleet-wide pacing interval instead of by anything ledger-related, which
+    # would make this test about pacing timing instead of the dedup behavior it's named for.
+    monkeypatch.setattr(upload_manager, "TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(upload_manager, "YOUTUBE_MIN_UPLOAD_INTERVAL_SECONDS", 0)
     calls = []
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: calls.append(1) or f"yt-id-{len(calls)}")
 

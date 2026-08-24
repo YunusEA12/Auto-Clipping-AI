@@ -134,6 +134,13 @@ def test_backlog_and_fresh_survivors_both_get_uploaded(tmp_path, monkeypatch):
         auto_pilot.tiktok_uploader, "try_upload_clip",
         lambda *a, **k: auto_pilot.tiktok_uploader.UploadOutcome(success=True, confirmed=True),
     )
+    # This test checks that backlog + fresh survivors are BOTH considered/uploaded within one
+    # deployment phase, not real-time upload spacing — the fleet-wide pacing interval
+    # (upload_manager.TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS) would otherwise legitimately deny the
+    # second clip's real-time-adjacent attempt here, same as it would in production for two
+    # survivors from the same cycle. Disabled so this test stays about backlog merging.
+    monkeypatch.setattr(upload_manager, "TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(upload_manager, "YOUTUBE_MIN_UPLOAD_INTERVAL_SECONDS", 0)
 
     fresh_path = tmp_path / "clip_1_Fresh.mp4"
     fresh_path.write_bytes(b"fake video bytes")

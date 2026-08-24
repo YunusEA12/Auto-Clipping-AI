@@ -124,15 +124,25 @@ UPLOAD_PACING_STATE_PATH = Path("upload_pacing_state.json")
 UPLOAD_PACING_LOCK_TIMEOUT_SECONDS = 10
 
 
-def _wait_for_upload_pacing(platform: str, min_interval_seconds: float) -> None:
-    """Blocks until at least `min_interval_seconds` have passed since the last real upload
-    attempt on `platform`, fleet-wide (every auto_pilot.py process shares this one state file).
-    Reserves the slot for `now` BEFORE sleeping, under the same lock as the read — otherwise
-    two streamer processes waking up at the same instant would both see the slot as free and
-    both proceed together, defeating the point of a cross-process pacing gate."""
+def _try_reserve_upload_pacing_slot(platform: str, min_interval_seconds: float) -> bool:
+    """2026-08-25 fix: this used to SLEEP out the remaining wait right here — found live the
+    next day as a serious regression, not the intended pacing. auto_pilot.py's run_cycle() is
+    single-threaded and fully synchronous per streamer (record chunk -> transcribe -> render
+    -> critic -> upload -> repeat); a blocking sleep here blocks that ENTIRE loop, not just the
+    upload step. With several streamers simultaneously live all sharing this one fleet-wide
+    budget, queued reservations stacked into 15-20+ minute sleeps (994s/1191s/836s observed
+    live) — during which the affected streamer recorded nothing at all. Silently turned "pace
+    the uploads" into "stall the capture pipeline", the same failure mode as the incident this
+    was meant to fix, just self-inflicted instead of platform-caused.
+
+    Now a non-blocking check, same idiom as _upload_limit_backoff_until() above: returns True
+    and reserves the slot (writes `now` as the new last-attempt) only if the interval has
+    genuinely elapsed since the last real attempt; otherwise returns False immediately with no
+    side effect at all — no reservation, no wait. The caller skips this cycle's attempt exactly
+    like a YouTube-backoff skip (logged, clip stays in output/, picked up by a later cycle),
+    letting recording/rendering continue uninterrupted in the meantime."""
     if min_interval_seconds <= 0:
-        return
-    wait_seconds = 0.0
+        return True
     with FileLock(str(UPLOAD_PACING_STATE_PATH) + ".lock", timeout=UPLOAD_PACING_LOCK_TIMEOUT_SECONDS):
         try:
             state = json.loads(UPLOAD_PACING_STATE_PATH.read_text(encoding="utf-8"))
@@ -143,15 +153,13 @@ def _wait_for_upload_pacing(platform: str, min_interval_seconds: float) -> None:
         if last_attempt:
             try:
                 elapsed = (now - datetime.fromisoformat(last_attempt)).total_seconds()
-                wait_seconds = max(0.0, min_interval_seconds - elapsed)
             except ValueError:
-                wait_seconds = 0.0
-        state[platform] = (now + timedelta(seconds=wait_seconds)).isoformat()
+                elapsed = min_interval_seconds  # unparseable timestamp: fail open, allow it
+            if elapsed < min_interval_seconds:
+                return False
+        state[platform] = now.isoformat()
         atomic_io.atomic_write_json(UPLOAD_PACING_STATE_PATH, state)
-
-    if wait_seconds > 0:
-        logger.info("Waiting %.0fs before the %s upload (daily-quota pacing budget)", wait_seconds, platform)
-        time.sleep(wait_seconds)
+        return True
 
 # 2026-08-22 upload-parity audit: in-call retry for a genuinely failed Instagram attempt
 # (Playwright crash, navigation timeout, an unhandled dialog) — up to 3 total tries with
@@ -235,6 +243,14 @@ def _upload_to_youtube(
         )
         return YouTubeOutcome(attempted=True, success=True, video_id=existing.get("video_id"), detail="already uploaded (ledger)")
 
+    if not _try_reserve_upload_pacing_slot("youtube", YOUTUBE_MIN_UPLOAD_INTERVAL_SECONDS):
+        logger.info(
+            "Skipping YouTube upload for %s — within the fleet-wide daily-quota pacing "
+            "interval (another upload happened too recently); will retry a later cycle.",
+            video_path.name,
+        )
+        return YouTubeOutcome(attempted=False, success=False, detail="daily-quota pacing budget")
+
     if not upload_ledger.try_mark_pending(content_hash, "youtube", title=title):
         logger.warning(
             "Skipping YouTube upload for %s — another attempt for this exact clip (hash=%s...) "
@@ -242,8 +258,6 @@ def _upload_to_youtube(
             video_path.name, content_hash[:12],
         )
         return YouTubeOutcome(attempted=False, success=False, detail="duplicate upload blocked by ledger (pending)")
-
-    _wait_for_upload_pacing("youtube", YOUTUBE_MIN_UPLOAD_INTERVAL_SECONDS)
 
     try:
         video_id = youtube_uploader.upload_clip(video_path, title, description, tags)
@@ -423,6 +437,14 @@ def _upload_to_tiktok(
         )
         return tiktok_uploader.UploadOutcome(success=True, confirmed=True)
 
+    if not _try_reserve_upload_pacing_slot("tiktok", TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS):
+        logger.info(
+            "Skipping TikTok upload for %s — within the fleet-wide daily-quota pacing "
+            "interval (another upload happened too recently); will retry a later cycle.",
+            video_path.name,
+        )
+        return tiktok_uploader.UploadOutcome(success=False, confirmed=False)
+
     if not upload_ledger.try_mark_pending(content_hash, "tiktok"):
         logger.warning(
             "Skipping TikTok upload for %s — another attempt for this exact clip (hash=%s...) "
@@ -432,8 +454,6 @@ def _upload_to_tiktok(
             video_path.name, content_hash[:12],
         )
         return tiktok_uploader.UploadOutcome(success=False, confirmed=False)
-
-    _wait_for_upload_pacing("tiktok", TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS)
 
     outcome = tiktok_uploader.try_upload_clip(
         video_path, description, hashtags, publish=publish, add_background_sound=add_background_sound,
