@@ -330,6 +330,52 @@ def test_process_clips_iter_no_streamer_name_means_no_override(tmp_path, monkeyp
     assert captured_kwargs["padding_factor"] == process.vision.PADDING_FACTOR
 
 
+# --- resolve_layout: multi-cam / blur_background (2026-08-24 incident) -------------------
+# Real symptom: a Discord call / podcast / collab grid forced into the single-primary-face
+# split_screen decision produced ~40%+ black gaps where the two zones' crops landed on the
+# grid's own margins instead of real content — see process.resolve_layout()'s own docstring.
+
+def test_resolve_layout_multi_cam_grid_routes_to_multi_cam(monkeypatch):
+    boxes = [(0, 0, 100, 100), (200, 0, 100, 100), (400, 0, 100, 100)]
+    scores = [0.9, 0.85, 0.88]
+    monkeypatch.setattr(process.vision, "_detect_faces", lambda video_path, timestamp: (boxes, scores, 1920, 1080))
+    resolved, detection_ts = process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0)
+    assert resolved == process.LAYOUT_MULTI_CAM
+    assert detection_ts == 1.0
+
+
+def test_resolve_layout_too_many_faces_falls_back_to_blur_background(monkeypatch):
+    # A 9-player Werwolf/Among Us/poker-table overlay -- too crowded to slot individually.
+    boxes = [(i * 100, 0, 90, 90) for i in range(9)]
+    scores = [0.9] * 9
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", lambda *a, **k: (9, boxes[0], 1920, 1080))
+    monkeypatch.setattr(process.vision, "detect_multi_cam_faces", lambda *a, **k: None)
+    resolved, _ = process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0)
+    assert resolved == process.LAYOUT_BLUR_BACKGROUND
+
+
+def test_resolve_layout_zero_confident_faces_but_busy_scene_skips_static_override(monkeypatch):
+    # Found live, 2026-08-24: a 9-tile Werwolf grid's small tiles detect at low confidence
+    # (real observed scores ~0.50-0.54), never clearing FACE_COUNT_MIN_CONFIDENCE -- reading as
+    # "zero faces" exactly like an ordinary momentary dropout would. Must NOT trust the
+    # streamer's SOLO-layout static override on a frame that isn't their solo layout at all.
+    monkeypatch.setattr(process.vision, "detect_multi_cam_faces", lambda *a, **k: None)
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", lambda *a, **k: (0, None, 1920, 1080))
+    monkeypatch.setattr(process.vision, "looks_like_busy_multi_face_scene", lambda *a, **k: True)
+    resolved, _ = process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0, has_static_override=True)
+    assert resolved == process.LAYOUT_BLUR_BACKGROUND
+
+
+def test_resolve_layout_zero_confident_faces_ordinary_dropout_still_uses_override(monkeypatch):
+    # The unchanged, common case: streamer briefly out of frame in their normal solo layout --
+    # not a busy scene -- still trusts the static override as before.
+    monkeypatch.setattr(process.vision, "detect_multi_cam_faces", lambda *a, **k: None)
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", lambda *a, **k: (0, None, 1920, 1080))
+    monkeypatch.setattr(process.vision, "looks_like_busy_multi_face_scene", lambda *a, **k: False)
+    resolved, _ = process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0, has_static_override=True)
+    assert resolved == process.LAYOUT_SPLIT_SCREEN
+
+
 # --- build_filter_complex: full_cam branch ----------------------------------------------
 
 def test_build_filter_complex_full_cam_crops_source_and_fills_full_canvas(tmp_path):
@@ -346,6 +392,40 @@ def test_build_filter_complex_full_cam_crops_source_and_fills_full_canvas(tmp_pa
     assert "[outv]" in filter_str
     # Unlike split_screen, full_cam has no separate gameplay zone/vstack.
     assert "vstack" not in filter_str
+
+
+# --- build_filter_complex: multi_cam branch (2026-08-24 incident) ------------------------
+
+def test_build_filter_complex_multi_cam_slots_sum_to_exact_canvas_height(tmp_path):
+    # The bug this generalizes the fix for: a vstack whose zone heights don't sum to EXACTLY
+    # output_h leaves an unaccounted vertical gap between zones.
+    ass_path = tmp_path / "subs.ass"
+    ass_path.write_text("", encoding="utf-8")
+    boxes = [(0, 0, 300, 300), (400, 0, 300, 300), (800, 0, 300, 300)]
+
+    filter_str = process.build_filter_complex(
+        process.LAYOUT_MULTI_CAM, ass_path, 1080, 1920, multi_cam_boxes=boxes,
+    )
+
+    # 1920 // 3 = 640 for the first two slots; the third absorbs the // remainder (0 here).
+    assert "scale=1080:640" in filter_str
+    assert filter_str.count("crop=1080:640") == 3  # each slot's own final cover-fit crop
+    assert "vstack=inputs=3" in filter_str
+    assert "[outv]" in filter_str
+
+
+def test_build_filter_complex_multi_cam_two_slots_remainder_absorbed_by_last():
+    ass_path = Path("subs.ass")
+    boxes = [(0, 0, 300, 300), (400, 0, 300, 300)]
+
+    filter_str = process.build_filter_complex(
+        process.LAYOUT_MULTI_CAM, ass_path, 1080, 1921, multi_cam_boxes=boxes,
+    )
+
+    # 1921 // 2 = 960 for the first slot, 961 for the second (absorbs the odd remainder) --
+    # 960 + 961 == 1921 exactly, no gap.
+    assert "scale=1080:960" in filter_str
+    assert "scale=1080:961" in filter_str
 
 
 def test_build_filter_complex_unknown_layout_still_raises():

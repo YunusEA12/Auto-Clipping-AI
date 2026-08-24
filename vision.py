@@ -348,8 +348,30 @@ def get_facecam_coordinates(
         logger.warning("No face detected (%s) in %s, using fallback crop", where, video_path)
         return _fallback_box(frame_w, frame_h)
 
-    x, y, w, h = raw_box
+    padded = _pad_and_clamp_box(raw_box, frame_w, frame_h, padding_factor)
+    if padded is None:
+        logger.warning(
+            "Degenerate face box at %.2fs (raw=%s) after clamping to frame edges, using fallback crop",
+            timestamp, raw_box,
+        )
+        return _fallback_box(frame_w, frame_h)
 
+    logger.info(
+        "Face detected (%s): raw=%s padded=%s", where, raw_box, padded,
+    )
+    return padded
+
+
+def _pad_and_clamp_box(
+    raw_box: tuple[int, int, int, int], frame_w: int, frame_h: int, padding_factor: float,
+) -> Optional[tuple[int, int, int, int]]:
+    """Shared by get_facecam_coordinates() (one box) and get_multi_cam_coordinates() (one box
+    per grid tile) — adds `padding_factor`'s headroom around a raw MediaPipe box and clamps to
+    the frame edges, exactly the math get_facecam_coordinates() always did inline. Returns None
+    (not a raised error) for a box that clamps down to near-nothing (a raw box hard against a
+    frame edge with padding pushing the rest out of bounds) — same fail-open-to-fallback
+    posture as every other degenerate-box case in this module."""
+    x, y, w, h = raw_box
     pad_w = w * (padding_factor - 1) / 2
     pad_h = h * (padding_factor - 1) / 2
 
@@ -358,18 +380,146 @@ def get_facecam_coordinates(
     x2 = min(frame_w, int(x + w + pad_w))
     y2 = min(frame_h, int(y + h + pad_h))
 
-    final_x, final_y = x1, y1
     final_w, final_h = x2 - x1, y2 - y1
-
     if final_w < MIN_BOX_DIMENSION or final_h < MIN_BOX_DIMENSION:
-        logger.warning(
-            "Degenerate face box at %.2fs (%dx%d after clamping to frame edges), using fallback crop",
-            timestamp, final_w, final_h,
-        )
-        return _fallback_box(frame_w, frame_h)
+        return None
+    return x1, y1, final_w, final_h
 
-    logger.info(
-        "Face detected (%s): raw=(%d,%d,%d,%d) padded=(%d,%d,%d,%d)",
-        where, x, y, w, h, final_x, final_y, final_w, final_h,
-    )
-    return final_x, final_y, final_w, final_h
+
+# Multi-cam / collab-grid scene detection (2026-08-24 incident: a Discord call, podcast, or
+# multi-participant "Craft Attack"-style grid shows several roughly-equal-sized face tiles
+# spread across the frame, not one dominant streamer face over a separate gameplay/desktop
+# region. Forcing the existing 2-slot split_screen (crop toward ONE face, treat the rest of
+# the frame as "gameplay") onto this scene produced exactly what was observed live: a sliver
+# of one tile, hundreds of pixels of black, then another tile — the "gameplay" half was itself
+# just another region of the SAME grid, straddling the black gaps built into the grid layout.
+MULTI_CAM_MIN_FACES = 2
+MULTI_CAM_MAX_FACES = 4
+# Two tiles in the same grid render at close to the same size — unlike a real streamer cam
+# next to a small/large false-positive (a HUD icon, a face within reacted photo/video
+# content), whose area ratio to the real face tends to be far more lopsided.
+MULTI_CAM_MAX_AREA_RATIO_SPREAD = 3.0
+
+
+# Fraction of near-black pixels a facecam crop region can contain before it's treated as
+# landing on empty/gap space rather than real content. Not 0 -- a real webcam feed with a dark
+# background (a dim room, a black hoodie filling part of frame) legitimately has SOME black
+# pixels; this only needs to catch a crop that's PREDOMINANTLY blank.
+BOX_BLACK_PIXEL_THRESHOLD = 20
+# Tuned against the actual 2026-08-24 incident render: a pixel-sampled vertical scan of the
+# defective output measured ~44% near-black pixels within the face zone alone (worse combined
+# with the adjoining game-zone black run past it) — a 0.5 bar would have let that exact case
+# through. 0.3 catches it with headroom while still tolerating a genuinely dim real webcam
+# shot (a dark room, a black hoodie filling part of frame), which doesn't typically run this high.
+BOX_MAX_BLACK_FRACTION = 0.3
+
+
+def box_is_mostly_black(
+    video_path: str, timestamp: float, box: tuple[int, int, int, int],
+    max_black_fraction: float = BOX_MAX_BLACK_FRACTION,
+) -> bool:
+    """Direct pixel check on the ACTUAL frame content a facecam_box (dynamic detection or a
+    streamer's static override) would crop toward — catches the exact defect observed live,
+    2026-08-24: a collab/grid scene's own black margins or gaps between tiles happening to sit
+    where a streamer's SOLO-layout webcam normally does, producing a mostly-black slot instead
+    of a real facecam no matter how well-reasoned the box itself is. General and scene-agnostic
+    by design — unlike face-count-based heuristics (is_multi_cam_scene,
+    looks_like_busy_multi_face_scene), this doesn't need to know WHY a box would be black, only
+    THAT it is, so it also catches collab formats too visually different from every case those
+    heuristics were tuned against. Fails open (returns False — "trust it") on any read error,
+    same posture as every other layout signal in this module: a box this can't check is not
+    treated as evidence against itself."""
+    try:
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return False
+        try:
+            cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+            success, frame = cap.read()
+        finally:
+            cap.release()
+        if not success or frame is None:
+            return False
+        x, y, w, h = box
+        region = frame[max(0, y):y + h, max(0, x):x + w]
+        if region.size == 0:
+            return False
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+        black_fraction = float((gray < BOX_BLACK_PIXEL_THRESHOLD).mean())
+        return black_fraction > max_black_fraction
+    except Exception as e:
+        logger.warning("Could not check box blackness at %.2fs in %s (%s) — trusting the box as-is", timestamp, video_path, e)
+        return False
+
+
+def looks_like_busy_multi_face_scene(video_path: str, timestamp: float) -> bool:
+    """True when the frame at `timestamp` has 2+ face detections of ANY confidence — not just
+    ones clearing FACE_COUNT_MIN_CONFIDENCE. Used only to decide whether a zero-CONFIDENT-face
+    reading is a genuine "streamer briefly out of frame" moment (trust their static facecam
+    override — its original purpose) or a busy multi-participant scene their solo webcam
+    override has no business being cropped toward. Found live, 2026-08-24: a 9-tile Werwolf
+    collab grid's individual tiles are too small/low-quality for MediaPipe to confidently clear
+    FACE_COUNT_MIN_CONFIDENCE at all (real observed scores: 0.50-0.54, against a 0.65 floor) —
+    reading as "zero faces" exactly like an ordinary momentary dropout would, which used to
+    send it straight into the static-override split_screen this whole detection exists to
+    avoid misapplying."""
+    try:
+        boxes, _, _, _ = _detect_faces(video_path, timestamp)
+    except RuntimeError:
+        return False
+    return len(boxes) >= 2
+
+
+def is_multi_cam_scene(
+    boxes: Sequence[tuple[int, int, int, int]], scores: Sequence[float],
+) -> bool:
+    """True when `boxes`/`scores` (as returned by _detect_faces) look like a multi-participant
+    camera grid rather than one real streamer face plus incidental/false-positive detections
+    elsewhere in the frame. Two signals, both required: (1) MULTI_CAM_MIN_FACES..
+    MULTI_CAM_MAX_FACES faces clear FACE_COUNT_MIN_CONFIDENCE — outside that range this is
+    either an ordinary single-cam scene or too crowded to confidently split into individual
+    slots. (2) the confident faces' areas are all within MULTI_CAM_MAX_AREA_RATIO_SPREAD of
+    each other — real grid tiles render at roughly the same size; a single genuine streamer
+    face next to a small HUD/game-content false positive does not."""
+    confident = [b for b, s in zip(boxes, scores) if s >= FACE_COUNT_MIN_CONFIDENCE]
+    if not (MULTI_CAM_MIN_FACES <= len(confident) <= MULTI_CAM_MAX_FACES):
+        return False
+    areas = [w * h for _, _, w, h in confident]
+    if min(areas) <= 0:
+        return False
+    return max(areas) / min(areas) <= MULTI_CAM_MAX_AREA_RATIO_SPREAD
+
+
+def detect_multi_cam_faces(
+    video_path: str, timestamp: float,
+) -> Optional[tuple[list[tuple[int, int, int, int]], int, int]]:
+    """One detection pass at `timestamp`: (confident_boxes, frame_w, frame_h) in reading order
+    (top-to-bottom, then left-to-right — matching how a grid actually reads on screen) if
+    is_multi_cam_scene() confirms this looks like a real multi-participant grid; None otherwise
+    (including on a frame-read failure — same fail-open-to-the-existing-single-face-path
+    posture as every other layout signal in this module)."""
+    try:
+        boxes, scores, frame_w, frame_h = _detect_faces(video_path, timestamp)
+    except RuntimeError:
+        return None
+    if not is_multi_cam_scene(boxes, scores):
+        return None
+    confident = [b for b, s in zip(boxes, scores) if s >= FACE_COUNT_MIN_CONFIDENCE]
+    confident.sort(key=lambda b: (b[1], b[0]))  # (y, x) reading order
+    return confident, frame_w, frame_h
+
+
+def get_multi_cam_coordinates(
+    boxes: Sequence[tuple[int, int, int, int]], frame_w: int, frame_h: int,
+    padding_factor: float = PADDING_FACTOR,
+) -> list[tuple[int, int, int, int]]:
+    """Pads and clamps each raw face box in `boxes` the same way get_facecam_coordinates() pads
+    a single box — one cover-fit-ready crop box per grid slot for build_filter_complex()'s
+    multi_cam layout. A box that clamps to near-nothing falls back to its own raw (unpadded)
+    box rather than being dropped — dropping a slot here would shrink the vstack tile count out
+    from under the layout decision that already committed to len(boxes) slots."""
+    result = []
+    for b in boxes:
+        padded = _pad_and_clamp_box(b, frame_w, frame_h, padding_factor)
+        result.append(padded if padded is not None else b)
+    return result

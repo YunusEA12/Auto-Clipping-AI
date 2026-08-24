@@ -49,9 +49,11 @@ LAYOUT_SPLIT_SCREEN = "split_screen"
 LAYOUT_BLUR_BACKGROUND = "blur_background"
 LAYOUT_FULL_CAM = "full_cam"
 LAYOUT_CENTER_CROP = "center_crop"
+LAYOUT_MULTI_CAM = "multi_cam"
 LAYOUT_AUTO = "auto"
 SELECTABLE_LAYOUTS = (
-    LAYOUT_SPLIT_SCREEN, LAYOUT_BLUR_BACKGROUND, LAYOUT_FULL_CAM, LAYOUT_CENTER_CROP, LAYOUT_AUTO,
+    LAYOUT_SPLIT_SCREEN, LAYOUT_BLUR_BACKGROUND, LAYOUT_FULL_CAM, LAYOUT_CENTER_CROP,
+    LAYOUT_MULTI_CAM, LAYOUT_AUTO,
 )
 
 # Facecam gets the top third of the canvas, gameplay the bottom two-thirds — TikTok's
@@ -432,8 +434,38 @@ def build_filter_complex(
     output_h: int,
     facecam_box: Tuple[int, int, int, int] | None = None,
     gameplay_box: Tuple[int, int, int, int] | None = None,
+    multi_cam_boxes: List[Tuple[int, int, int, int]] | None = None,
 ) -> str:
     subtitles = escape_subtitles_path(ass_path)
+
+    if layout == LAYOUT_MULTI_CAM:
+        # Discord call / podcast / multi-participant grid (2026-08-24 incident: see
+        # vision.is_multi_cam_scene()'s own docstring) — N individual speaker crops (2-4,
+        # vision.MULTI_CAM_MIN_FACES..MAX_FACES), each "cover" fit into its OWN equal-height
+        # slot exactly like split_screen's face/game zones, then vstacked. Slot heights are
+        # computed to sum to EXACTLY output_h (the last slot absorbs the // remainder) — the
+        # single-vstack-of-two-zones version of this bug (2026-08-24 incident) was a vertical
+        # gap between zones whose heights didn't actually sum to the canvas height; this
+        # generalizes the fix to N slots instead of assuming N=2.
+        n = len(multi_cam_boxes)
+        base_h = output_h // n
+        slot_heights = [base_h] * (n - 1) + [output_h - base_h * (n - 1)]
+        filters = []
+        labels = []
+        for i, (box, slot_h) in enumerate(zip(multi_cam_boxes, slot_heights)):
+            bx, by, bw, bh = box
+            label = f"cam{i}"
+            filters.append(
+                f"[0:v]crop={bw}:{bh}:{bx}:{by},"
+                f"scale={output_w}:{slot_h}:force_original_aspect_ratio=increase,"
+                f"crop={output_w}:{slot_h},setsar=1,format=yuv420p[{label}]"
+            )
+            labels.append(f"[{label}]")
+        return (
+            ";".join(filters) + ";"
+            f"{''.join(labels)}vstack=inputs={n}[stacked];"
+            f"[stacked]subtitles='{subtitles}'[outv]"
+        )
 
     if layout == LAYOUT_SPLIT_SCREEN:
         # TikTok's standard "reaction on top, content below" split: the facecam gets the
@@ -520,7 +552,10 @@ def build_filter_complex(
         return (
             f"[0:v]setsar=1,scale={small_w}:{small_h}:force_original_aspect_ratio=increase,"
             f"crop={small_w}:{small_h},boxblur=20:20,scale={output_w}:{output_h},"
-            f"setsar=1,format=yuv420p[bg];"
+            # Slight darkening (2026-08-24, account-owner spec: eq brightness=-0.15) so the
+            # sharp foreground reads as clearly "the real content" against the blurred fill,
+            # not just a same-brightness backdrop it visually competes with.
+            f"eq=brightness=-0.15,setsar=1,format=yuv420p[bg];"
             # Contain-fit within the FULL canvas — both width AND height are bounded here
             # (force_original_aspect_ratio=decrease against output_w:output_h), not just
             # width. The previous width-only scale (scale=W:-2) left height unconstrained,
@@ -722,6 +757,7 @@ def render_clip(
     output_dir: Path | None = None,
     music_path: Path | None = "unset",  # type: ignore[assignment]
     has_source_audio: bool | None = None,
+    multi_cam_boxes: List[Tuple[int, int, int, int]] | None = None,
 ) -> Path:
     # output_dir defaults to the shared OUTPUT_DIR (single-video/manual/Streamlit usage,
     # unchanged behavior) — auto_pilot.py passes a streamer-namespaced subdirectory instead
@@ -733,7 +769,9 @@ def render_clip(
     end = clip["end_time"]
     output_path = output_dir / clip_output_filename(index, clip["title"])
 
-    filter_complex = build_filter_complex(layout, ass_path, output_w, output_h, facecam_box, gameplay_box)
+    filter_complex = build_filter_complex(
+        layout, ass_path, output_w, output_h, facecam_box, gameplay_box, multi_cam_boxes,
+    )
 
     # music_path defaults to the sentinel "unset" (not None) so a caller can explicitly pass
     # music_path=None to render silently even when tracks exist — distinct from "caller didn't
@@ -874,7 +912,35 @@ def resolve_layout(
         timestamps += [clip_start + f * duration for f in LAYOUT_RETRY_FRACTIONS]
 
     face_count, raw_box, frame_w, frame_h = 0, None, 0, 0
+    # Accumulated across every timestamp actually sampled below, not just the last one tried —
+    # see vision.looks_like_busy_multi_face_scene()'s own docstring for why this signal exists.
+    # A single frame's raw detection count is noisy on a 9-tile grid (real observed spread
+    # across timestamps a few seconds apart, same chunk: 1, 2, 1, 0 detections) — checking only
+    # the final retry timestamp would miss a busy scene whose last-tried frame happened to catch
+    # nobody clearly enough even at the permissive raw-count bar, undercounting exactly the
+    # scenario this exists to catch.
+    saw_busy_scene = False
     for attempt, ts in enumerate(timestamps):
+        # Multi-cam grid check first (2026-08-24 incident — see vision.is_multi_cam_scene()'s
+        # own docstring): a Discord call / podcast / collab grid needs a completely different
+        # treatment (N individual speaker slots, or blur_background if too crowded to slot)
+        # than the single-primary-face full_cam/split_screen decision below, which assumes
+        # exactly one real streamer face plus at most incidental false positives. Runs as its
+        # own detection pass; fails open (returns None) on any read error, same as the
+        # single-face path below, so this never turns a working single-cam clip into a
+        # crash — it just falls through to that existing path unchanged.
+        multi_cam = vision.detect_multi_cam_faces(str(video_path), ts)
+        if multi_cam is not None:
+            boxes, _, _ = multi_cam
+            logger.info(
+                "Auto-layout at %.2fs: %d similarly-sized confident faces at %.2fs -> %s",
+                clip_start, len(boxes), ts, LAYOUT_MULTI_CAM,
+            )
+            return LAYOUT_MULTI_CAM, ts
+
+        if vision.looks_like_busy_multi_face_scene(str(video_path), ts):
+            saw_busy_scene = True
+
         try:
             face_count, raw_box, frame_w, frame_h = vision.detect_faces_for_layout(str(video_path), ts)
         except RuntimeError as e:
@@ -889,6 +955,20 @@ def resolve_layout(
             logger.warning("Auto-layout at %.2fs: could not read frame at %.2fs (%s) — trying next timestamp", clip_start, ts, e)
             face_count, raw_box, frame_w, frame_h = 0, None, 0, 0
             continue
+
+        if face_count > vision.MULTI_CAM_MAX_FACES:
+            # Too many faces on screen to slot individually (a 9-player Werwolf/Among Us/
+            # poker-table overlay) — neither a 2-4-way multi_cam stack nor the single-primary
+            # full_cam/split_screen decision make sense here. blur_background shows the WHOLE
+            # event uncropped (foreground contain-fit) instead of guessing which one face out
+            # of 9+ is "the" subject.
+            logger.info(
+                "Auto-layout at %.2fs: face_count=%d (> %d) at %.2fs, too crowded to slot "
+                "individually -> %s", clip_start, face_count, vision.MULTI_CAM_MAX_FACES, ts,
+                LAYOUT_BLUR_BACKGROUND,
+            )
+            return LAYOUT_BLUR_BACKGROUND, ts
+
         if face_count >= 1:
             if attempt > 0:
                 logger.info("Auto-layout at %.2fs: face_count=%d found on retry at %.2fs", clip_start, face_count, ts)
@@ -912,13 +992,29 @@ def resolve_layout(
         # instead of re-detecting at clip_start, which could miss a face this function only
         # found on a retry. See this function's own docstring for the incident this fixes.
         detection_ts = ts
-    elif has_static_override:
+    elif has_static_override and not saw_busy_scene:
         resolved = LAYOUT_SPLIT_SCREEN
         detection_ts = clip_start
         logger.info(
             "Auto-layout at %.2fs: face_count=0 after %d attempt(s), but streamer has a static "
             "facecam override -> %s (crop toward the known box)",
             clip_start, len(timestamps), resolved,
+        )
+    elif has_static_override:
+        # Zero CONFIDENT faces, but not an ordinary dropout either — see
+        # vision.looks_like_busy_multi_face_scene()'s own docstring (2026-08-24 incident: a
+        # 9-tile Werwolf collab grid's small tiles detect at low confidence, never clearing
+        # FACE_COUNT_MIN_CONFIDENCE, reading as "zero faces" exactly like this streamer's
+        # ordinary solo layout would when they're briefly out of frame). Trusting the static
+        # override here would crop toward their SOLO webcam position on a frame that isn't
+        # their solo layout at all — blur_background shows the whole busy scene uncropped
+        # instead of guessing.
+        resolved = LAYOUT_BLUR_BACKGROUND
+        detection_ts = clip_start
+        logger.info(
+            "Auto-layout at %.2fs: face_count=0 after %d attempt(s), but frame looks like a "
+            "busy multi-face scene, not this streamer's own solo layout — %s instead of the "
+            "static override", clip_start, len(timestamps), resolved,
         )
     else:
         resolved = LAYOUT_CENTER_CROP
@@ -1045,6 +1141,7 @@ def process_clips_iter(
         # streamers.json overrides, when any are configured — see this function's own
         # docstring.
         facecam_box = None
+        multi_cam_boxes = None
         if effective_layout == LAYOUT_SPLIT_SCREEN:
             padding_factor = (
                 vision.padding_factor_from_margin(padding_margin) if padding_margin is not None
@@ -1063,6 +1160,52 @@ def process_clips_iter(
                 str(video_path), detection_ts, padding_factor=padding_factor,
                 clip_end=clip["end_time"], override_box_ratio=override_box_ratio,
             )
+        elif effective_layout == LAYOUT_MULTI_CAM:
+            # Re-detects at detection_ts rather than threading the boxes resolve_layout()
+            # already found through its return value — same "single source of truth for which
+            # frame this is keyed off of, re-query for the actual data" pattern the
+            # split_screen/full_cam branches above already use with get_facecam_coordinates().
+            multi_cam = vision.detect_multi_cam_faces(str(video_path), detection_ts)
+            if multi_cam is not None:
+                raw_boxes, frame_w, frame_h = multi_cam
+                multi_cam_boxes = vision.get_multi_cam_coordinates(raw_boxes, frame_w, frame_h)
+            else:
+                # The grid moved on since resolve_layout()'s own detection a moment ago (rare —
+                # same frame, re-queried immediately after) — fail open to center_crop rather
+                # than crash the render on an empty box list.
+                logger.warning(
+                    "Auto-layout: multi_cam re-detection at %.2fs found no grid — falling back "
+                    "to center_crop for this clip", detection_ts,
+                )
+                effective_layout = LAYOUT_CENTER_CROP
+
+        # Final safety net (2026-08-24 incident) — verify the ACTUAL pixel content of whatever
+        # box(es) were just computed before committing to split_screen/full_cam/multi_cam, no
+        # matter how the box was chosen (dynamic detection or a streamer's static override):
+        # see vision.box_is_mostly_black()'s own docstring for why this check is scene-agnostic
+        # by design rather than another face-count heuristic. Downgrades to blur_background
+        # (shows the whole frame uncropped) rather than shipping a render with a black slot in
+        # it — the exact defect this whole incident was about.
+        if facecam_box is not None and vision.box_is_mostly_black(str(video_path), detection_ts, facecam_box):
+            logger.warning(
+                "Auto-layout: facecam_box %s at %.2fs is mostly black (a collab/grid gap, not "
+                "real content) — falling back to %s instead of %s",
+                facecam_box, detection_ts, LAYOUT_BLUR_BACKGROUND, effective_layout,
+            )
+            effective_layout = LAYOUT_BLUR_BACKGROUND
+            facecam_box = None
+        elif multi_cam_boxes is not None:
+            black_slots = sum(
+                1 for box in multi_cam_boxes if vision.box_is_mostly_black(str(video_path), detection_ts, box)
+            )
+            if black_slots > 0:
+                logger.warning(
+                    "Auto-layout: %d/%d multi_cam slot(s) at %.2fs are mostly black — falling "
+                    "back to %s instead of %s",
+                    black_slots, len(multi_cam_boxes), detection_ts, LAYOUT_BLUR_BACKGROUND, effective_layout,
+                )
+                effective_layout = LAYOUT_BLUR_BACKGROUND
+                multi_cam_boxes = None
 
         # Picked once here (not inside render_clip) so it can be recorded below — see
         # optimization_engine.py's module docstring for why this attribute is tracked. Passed
@@ -1074,6 +1217,7 @@ def process_clips_iter(
         output_path = render_clip(
             video_path, clip, ass_path, i, effective_layout, output_w, output_h, facecam_box, gameplay_box,
             output_dir=output_dir, music_path=music_path, has_source_audio=has_source_audio,
+            multi_cam_boxes=multi_cam_boxes,
         )
 
         # Recorded onto the SAME dict object that lives inside clips_data["clips"] (clips is
