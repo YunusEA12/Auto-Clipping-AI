@@ -61,6 +61,7 @@ import browser_concurrency
 import tiktok_uploader
 import upload as youtube_uploader
 import upload_ledger
+import upload_manager
 
 import logging_setup
 
@@ -372,7 +373,20 @@ def _fetch_youtube_metrics(uploaded: List[dict]) -> Dict[str, dict]:
     went to YouTube. Unlike TikTok's fuzzy caption matching, this is an exact ID lookup — the
     YouTube Data API returns the exact video for the exact ID upload.upload_clip() already
     handed back at upload time. Returns {} (never raises) if there's nothing to check or no
-    usable YouTube token this cycle — same graceful-skip contract as fetch_content_list()."""
+    usable YouTube token this cycle — same graceful-skip contract as fetch_content_list().
+
+    TikTok-only mode (2026-08-25): gated on upload_manager.YOUTUBE_UPLOADS_ENABLED, same switch
+    as the upload side. Not just an optimization — found live the same day this toggle was
+    added: the account's YouTube Data API access was independently suspended
+    (authenticatedUserAccountSuspended), so every cycle's stats batch for the ~300+ already-
+    YouTube-uploaded clips in uploaded_clips/ was failing and logging an ERROR per batch,
+    forever (existing youtube_uploaded sidecars never change, so nothing would ever make this
+    stop retrying on its own). No reason to keep spending a cycle's time on doomed API calls
+    while the fleet is TikTok-only anyway."""
+    if not upload_manager.YOUTUBE_UPLOADS_ENABLED:
+        logger.debug("YouTube uploads disabled (TikTok-only mode) — skipping YouTube metrics fetch")
+        return {}
+
     id_to_clip_id: Dict[str, str] = {}
     for entry in uploaded:
         if not entry.get("youtube_uploaded"):

@@ -151,3 +151,81 @@ def test_stale_pending_counts_treats_an_unparseable_timestamp_as_stale():
     upload_ledger._save_ledger(ledger)
 
     assert upload_ledger.stale_pending_counts() == {"tiktok": 1}
+
+
+# --- 2026-08-25: release_stale_pending() / run_periodic_pending_sweep() ------------------------
+# Proactive counterpart to try_mark_pending()'s own per-attempt stale release — see
+# release_stale_pending()'s own docstring for why that per-attempt release alone isn't enough.
+
+def _seed_pending(content_hash, platform, minutes_old, title=""):
+    updated_at = upload_ledger.datetime.now(upload_ledger.timezone.utc) - upload_ledger.timedelta(minutes=minutes_old)
+    ledger = upload_ledger._load_ledger()
+    ledger.setdefault(content_hash, {})[platform] = {
+        "status": "pending", "title": title, "updated_at": updated_at.isoformat(),
+    }
+    upload_ledger._save_ledger(ledger)
+
+
+def test_release_stale_pending_converts_old_entries_to_failed():
+    _seed_pending("hash1", "tiktok", minutes_old=upload_ledger.PENDING_STALE_MINUTES + 5)
+
+    released = upload_ledger.release_stale_pending()
+
+    assert released == {"tiktok": 1}
+    assert upload_ledger.get_entry("hash1", "tiktok")["status"] == "failed"
+
+
+def test_release_stale_pending_leaves_fresh_entries_alone():
+    _seed_pending("hash1", "tiktok", minutes_old=1)
+
+    released = upload_ledger.release_stale_pending()
+
+    assert released == {}
+    assert upload_ledger.get_entry("hash1", "tiktok")["status"] == "pending"
+
+
+def test_release_stale_pending_ignores_done_and_failed_entries():
+    upload_ledger.mark_done("hash1", "tiktok")
+    upload_ledger.mark_failed("hash2", "tiktok", detail="boom")
+
+    assert upload_ledger.release_stale_pending(stale_minutes=0) == {}
+
+
+def test_release_stale_pending_counts_multiple_platforms_independently():
+    _seed_pending("hash1", "tiktok", minutes_old=upload_ledger.PENDING_STALE_MINUTES + 1)
+    _seed_pending("hash2", "tiktok", minutes_old=upload_ledger.PENDING_STALE_MINUTES + 1)
+    _seed_pending("hash3", "instagram", minutes_old=upload_ledger.PENDING_STALE_MINUTES + 1)
+
+    assert upload_ledger.release_stale_pending() == {"tiktok": 2, "instagram": 1}
+
+
+def test_release_stale_pending_makes_the_hash_immediately_retryable():
+    _seed_pending("hash1", "tiktok", minutes_old=upload_ledger.PENDING_STALE_MINUTES + 1)
+    upload_ledger.release_stale_pending()
+
+    # A "failed" entry (unlike a fresh "pending" one) has no cooldown of its own —
+    # try_mark_pending() must let a new attempt through immediately.
+    assert upload_ledger.try_mark_pending("hash1", "tiktok") is True
+
+
+def test_run_periodic_pending_sweep_self_gates(tmp_path, monkeypatch):
+    monkeypatch.setattr(upload_ledger, "PENDING_SWEEP_STATE_PATH", tmp_path / "state.json")
+    _seed_pending("hash1", "tiktok", minutes_old=upload_ledger.PENDING_STALE_MINUTES + 1)
+
+    first = upload_ledger.run_periodic_pending_sweep()
+    assert first == {"tiktok": 1}
+
+    _seed_pending("hash2", "tiktok", minutes_old=upload_ledger.PENDING_STALE_MINUTES + 1)
+    second = upload_ledger.run_periodic_pending_sweep()
+    assert second is None
+    assert upload_ledger.get_entry("hash2", "tiktok")["status"] == "pending"
+
+
+def test_run_periodic_pending_sweep_force_bypasses_gate(tmp_path, monkeypatch):
+    monkeypatch.setattr(upload_ledger, "PENDING_SWEEP_STATE_PATH", tmp_path / "state.json")
+    upload_ledger.run_periodic_pending_sweep()  # establishes last_run_at
+
+    _seed_pending("hash1", "tiktok", minutes_old=upload_ledger.PENDING_STALE_MINUTES + 1)
+    released = upload_ledger.run_periodic_pending_sweep(force=True)
+
+    assert released == {"tiktok": 1}

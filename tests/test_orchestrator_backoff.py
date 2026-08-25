@@ -3,6 +3,7 @@ import streamers as streamers_module
 import optimization_engine
 import orchestrator
 import stream_watcher
+import upload_ledger
 
 
 # --- build_auto_pilot_cmd's publish threading (safety-model correction, 2026-08-18: TikTok
@@ -109,6 +110,11 @@ def test_run_orchestrator_default_streamers_path_respects_monkeypatch(tmp_path, 
     # than relying on that alone: this test is about streamer snapshot tracking, not cleanup,
     # so it shouldn't log a "blocked" error on every run either.
     monkeypatch.setattr(stream_watcher, "run_periodic_chunk_cleanup", lambda *a, **k: None)
+    # run_orchestrator() also calls upload_ledger.run_periodic_pending_sweep() every iteration
+    # (2026-08-25) — already structurally safe (LEDGER_PATH/PENDING_SWEEP_STATE_PATH are both
+    # isolated to tmp_path by conftest.py autouse fixtures), but stubbed to a no-op here too for
+    # the same "this test is about streamer snapshot tracking" reason as the cleanup stub above.
+    monkeypatch.setattr(upload_ledger, "run_periodic_pending_sweep", lambda *a, **k: None)
 
     seen_snapshots = []
     original_write = orchestrator.write_orchestrator_state

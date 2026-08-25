@@ -40,6 +40,7 @@ import atomic_io
 import optimization_engine
 import streamers as streamers_module
 import stream_watcher
+import upload_ledger
 
 import logging_setup
 
@@ -438,6 +439,15 @@ def run_orchestrator(
                 stream_watcher.run_periodic_chunk_cleanup()
             except Exception as e:
                 logger.error("Raw chunk cleanup failed (non-fatal): %s", e)
+
+            # Self-gated to ~once/15min internally (see run_periodic_pending_sweep()'s own
+            # docstring) — proactively releases stale "pending" ledger entries so a clip whose
+            # local file isn't about to be re-scanned by this cycle still becomes retryable,
+            # instead of waiting for try_mark_pending()'s own per-attempt stale check.
+            try:
+                upload_ledger.run_periodic_pending_sweep()
+            except Exception as e:
+                logger.error("Pending ledger sweep failed (non-fatal): %s", e)
 
             if max_iterations is None or iteration < max_iterations:
                 time.sleep(poll_interval)

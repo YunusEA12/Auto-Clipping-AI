@@ -57,6 +57,12 @@ logger = logging.getLogger(__name__)
 LEDGER_PATH = Path("upload_ledger.json")
 LEDGER_LOCK_TIMEOUT_SECONDS = 10
 
+# How often the orchestrator's main loop is allowed to actually run release_stale_pending()
+# (see run_periodic_pending_sweep() below) — comfortably shorter than PENDING_STALE_MINUTES so
+# a newly-stale entry isn't left sitting for long, but not every single iteration either.
+PENDING_SWEEP_INTERVAL_MINUTES = 15
+PENDING_SWEEP_STATE_PATH = Path("pending_sweep_state.json")
+
 # How long a "pending" marker is trusted as "someone else is actively working on this" before
 # it's treated as abandoned (a crashed process, a killed supervisor, a machine reboot mid-
 # upload) and released for a fresh attempt. Comfortably longer than any single platform's own
@@ -131,6 +137,73 @@ def stale_pending_counts(stale_minutes: int = PENDING_STALE_MINUTES) -> Dict[str
             if updated_at is None or (now - updated_at) >= timedelta(minutes=stale_minutes):
                 counts[platform] = counts.get(platform, 0) + 1
     return counts
+
+
+def release_stale_pending(stale_minutes: int = PENDING_STALE_MINUTES) -> Dict[str, int]:
+    """2026-08-25: try_mark_pending()'s own stale-release only fires when a caller happens to
+    re-encounter the exact same (content_hash, platform) pair — i.e. only once a later upload
+    cycle finds that file again (a fresh live clip, or find_backlog_clips() re-scanning
+    output/). An entry whose local file was moved, renamed away, or hasn't been re-scanned yet
+    can sit "pending" indefinitely without anything ever re-triggering that check. This sweeps
+    the WHOLE ledger proactively, independent of any file being re-encountered, and resolves
+    every entry stale (status=='pending', older than `stale_minutes`) to 'failed' — the same
+    outcome try_mark_pending()'s own stale branch already treats as immediately retryable, with
+    no extra cooldown of its own. Returns a per-platform count of what was released, for
+    logging/reporting; touches the ledger in a single lock acquisition, matching every other
+    write in this module."""
+    released: Dict[str, int] = {}
+    try:
+        with _ledger_lock():
+            ledger = _load_ledger()
+            now = datetime.now(timezone.utc)
+            changed = False
+            for platform_entries in ledger.values():
+                for platform, entry in platform_entries.items():
+                    if entry.get("status") != "pending":
+                        continue
+                    updated_at_raw = entry.get("updated_at")
+                    try:
+                        updated_at = datetime.fromisoformat(updated_at_raw) if updated_at_raw else None
+                    except ValueError:
+                        updated_at = None
+                    if updated_at is not None and (now - updated_at) < timedelta(minutes=stale_minutes):
+                        continue
+                    entry["status"] = "failed"
+                    entry["detail"] = "released by periodic stale-pending sweep (interrupted attempt, never resolved)"
+                    entry["updated_at"] = now.isoformat()
+                    released[platform] = released.get(platform, 0) + 1
+                    changed = True
+            if changed:
+                _save_ledger(ledger)
+    except Timeout:
+        logger.warning(
+            "Could not acquire the upload ledger lock within %ds for the periodic stale-pending "
+            "sweep — skipping this cycle, the next one will catch it.", LEDGER_LOCK_TIMEOUT_SECONDS,
+        )
+    return released
+
+
+def run_periodic_pending_sweep(force: bool = False) -> Optional[Dict[str, int]]:
+    """Self-gated wrapper around release_stale_pending(), same 'call every iteration, let the
+    function decide if it's due' pattern as stream_watcher.run_periodic_chunk_cleanup() — meant
+    to be called from orchestrator.py's main loop unconditionally. Returns None when skipped
+    (too soon since the last real run), otherwise the per-platform release counts (possibly
+    empty if nothing was stale)."""
+    now = datetime.now(timezone.utc)
+    if not force:
+        try:
+            state = json.loads(PENDING_SWEEP_STATE_PATH.read_text(encoding="utf-8"))
+            last_run_at = datetime.fromisoformat(state["last_run_at"])
+            if now - last_run_at < timedelta(minutes=PENDING_SWEEP_INTERVAL_MINUTES):
+                return None
+        except (OSError, ValueError, KeyError):
+            pass
+
+    released = release_stale_pending()
+    atomic_io.atomic_write_json(PENDING_SWEEP_STATE_PATH, {"last_run_at": now.isoformat(), "released": released})
+    if released:
+        logger.info("Periodic pending-ledger sweep released stale entries for a fresh retry: %s", released)
+    return released
 
 
 def try_mark_pending(content_hash: str, platform: str, title: str = "") -> bool:

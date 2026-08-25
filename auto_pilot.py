@@ -879,9 +879,16 @@ def run_cycle(
             # find_missing_youtube_uploads()'s own docstring. Runs every cycle regardless of
             # whether this cycle had its own survivors, same reasoning as the output/ backlog
             # scan above; never touches TikTok.
-            yt_ok, yt_failed = retry_missing_youtube_uploads(UPLOADED_CLIPS_DIR, streamer_name=streamer_handle)
-            if yt_ok or yt_failed:
-                logger.info("📺 YouTube-Nachversuch: %d erfolgreich, %d fehlgeschlagen", yt_ok, yt_failed)
+            #
+            # Gated on upload_manager.YOUTUBE_UPLOADS_ENABLED (TikTok-only mode, 2026-08-25):
+            # skipped entirely rather than scanning uploaded_clips/ every cycle only to have
+            # every candidate's _upload_to_youtube() call no-op — that would otherwise log a
+            # "failed" for each one indefinitely, since a disabled leg never becomes
+            # youtube_uploaded=True and so never ages out of find_missing_youtube_uploads().
+            if upload_manager.YOUTUBE_UPLOADS_ENABLED:
+                yt_ok, yt_failed = retry_missing_youtube_uploads(UPLOADED_CLIPS_DIR, streamer_name=streamer_handle)
+                if yt_ok or yt_failed:
+                    logger.info("📺 YouTube-Nachversuch: %d erfolgreich, %d fehlgeschlagen", yt_ok, yt_failed)
 
             # Instagram-only backlog: same gap, same fix, as the YouTube retry directly above —
             # see find_missing_instagram_uploads()'s own docstring (2026-08-22 upload-parity

@@ -10,6 +10,9 @@ __pycache__/
 *.mkv
 *.wav
 *.tflite
+*.ts
+cookies/
+tokens/
 client_secret.json
 token.json
 token.json.bak
@@ -24,6 +27,7 @@ fleet_control.json
 viral_memory.json
 optimization_state.json
 chunk_cleanup_state.json
+pending_sweep_state.json
 tiktok_client_secret.json
 tiktok_token.json
 tiktok_cookies.json

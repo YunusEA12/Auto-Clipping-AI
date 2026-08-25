@@ -126,6 +126,19 @@ def _isolated_upload_pacing_state(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_pending_sweep_state(tmp_path, monkeypatch):
+    """Same isolation, same reasoning, as _isolated_upload_pacing_state above —
+    upload_ledger.py's PENDING_SWEEP_STATE_PATH (2026-08-25, the proactive stale-pending
+    sweep's own self-gating state) also defaults to a real repo-root file
+    (pending_sweep_state.json). LEDGER_PATH itself is already isolated by
+    _isolated_upload_ledger above, so a real run_periodic_pending_sweep() call in a test can't
+    touch real upload data either way — this just keeps it from leaving a stray state file in
+    the repo root during test runs, the same repo-hygiene reasoning as the chunk-cleanup state
+    path below."""
+    monkeypatch.setattr(upload_ledger, "PENDING_SWEEP_STATE_PATH", tmp_path / "pending_sweep_state.json")
+
+
+@pytest.fixture(autouse=True)
 def _block_real_chunk_cleanup(monkeypatch):
     """stream_watcher.cleanup_stale_chunks() deletes real files under TEMP_DIR by default.
     Found live, 2026-08-25: test_orchestrator_backoff.py exercises orchestrator.run_orchestrator()

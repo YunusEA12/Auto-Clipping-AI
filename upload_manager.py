@@ -131,6 +131,22 @@ YOUTUBE_MIN_UPLOAD_INTERVAL_SECONDS = float(os.environ.get("YOUTUBE_MIN_UPLOAD_I
 UPLOAD_PACING_STATE_PATH = Path("upload_pacing_state.json")
 UPLOAD_PACING_LOCK_TIMEOUT_SECONDS = 10
 
+# TikTok-only mode (2026-08-25, account-owner request): a global kill switch for the YouTube
+# leg, independent of Instagram's existing per-streamer instagram_enabled opt-in (see
+# _upload_to_instagram() below — Instagram is already off by default and opted into per
+# streamer via streamers.json/orchestrator.py's build_auto_pilot_cmd(), so no code change was
+# needed there). Unlike publish=False (which also silently skips TikTok), this leaves TikTok's
+# own upload path completely untouched — only the YouTube leg is switched off, checked in
+# _upload_to_youtube() below (same early-return shape as the publish=False check right after
+# it: no ledger write, no error log, just a debug note) AND in upload_clip_everywhere()'s own
+# pacing delay (no reason to sleep 30-60s waiting to attempt a call that's just going to no-op)
+# AND in auto_pilot.py's retry_missing_youtube_uploads() backlog sweep (skipped entirely rather
+# than scanning uploaded_clips/ and logging a "failed" for every candidate every cycle) — so
+# 100% of the upload budget/pacing goes to draining the TikTok backlog. Env-var override, same
+# idiom as TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS above, so this can be flipped back on later
+# without a code change.
+YOUTUBE_UPLOADS_ENABLED = os.environ.get("YOUTUBE_UPLOADS_ENABLED", "false").strip().lower() not in ("false", "0", "")
+
 
 def _try_reserve_upload_pacing_slot(platform: str, min_interval_seconds: float) -> bool:
     """2026-08-25 fix: this used to SLEEP out the remaining wait right here — found live the
@@ -225,6 +241,10 @@ class MultiPlatformOutcome(NamedTuple):
 def _upload_to_youtube(
     video_path: Path, title: str, description: str, tags: Optional[List[str]], publish: bool,
 ) -> YouTubeOutcome:
+    if not YOUTUBE_UPLOADS_ENABLED:
+        logger.debug("YouTube uploads disabled (TikTok-only mode) — skipping %s", video_path.name)
+        return YouTubeOutcome(attempted=False, success=False, detail="YouTube uploads disabled (TikTok-only mode)")
+
     if not publish:
         logger.info("publish=False — skipping YouTube upload for %s (same no-op as TikTok)", video_path.name)
         return YouTubeOutcome(attempted=False, success=False, detail="publish=False, skipped")
@@ -522,7 +542,7 @@ def upload_clip_everywhere(
     commit 0aa31b1 — is now redundant and has been removed in favor of this global mechanism)."""
     tiktok_outcome = _upload_to_tiktok(video_path, description, hashtags, publish, add_background_sound)
 
-    if publish:
+    if publish and YOUTUBE_UPLOADS_ENABLED:
         delay = random.uniform(UPLOAD_DELAY_MIN_SECONDS, UPLOAD_DELAY_MAX_SECONDS)
         logger.info("Waiting %.0fs before the YouTube upload (rate-limit/pacing buffer)", delay)
         time.sleep(delay)

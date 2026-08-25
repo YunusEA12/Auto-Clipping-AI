@@ -47,6 +47,16 @@ def _no_real_sleep(monkeypatch):
     monkeypatch.setattr(upload_manager.time, "sleep", lambda _s: None)
 
 
+@pytest.fixture(autouse=True)
+def _youtube_enabled(monkeypatch):
+    # This whole module targets _upload_to_youtube()'s own upload/error-handling/pacing logic,
+    # written before TikTok-only mode (upload_manager.YOUTUBE_UPLOADS_ENABLED, 2026-08-25)
+    # existed and defaulted the YouTube leg off fleet-wide. Force it on here so that default
+    # doesn't gate out this file's coverage of the YouTube leg itself — see the "TikTok-only
+    # mode" section near the bottom of this file for coverage of the toggle.
+    monkeypatch.setattr(upload_manager, "YOUTUBE_UPLOADS_ENABLED", True)
+
+
 @pytest.fixture
 def clip_path(tmp_path) -> Path:
     """A real file on disk — upload_ledger.compute_content_hash() reads actual bytes, so a
@@ -764,3 +774,29 @@ def test_two_different_clips_with_same_title_are_not_confused_by_the_ledger(monk
 
     assert len(calls) == 2  # both genuinely uploaded, not deduplicated against each other
     assert result_a.youtube.video_id != result_b.youtube.video_id
+
+
+# --- TikTok-only mode: YOUTUBE_UPLOADS_ENABLED global kill switch (2026-08-25) -----------------
+
+def test_youtube_uploads_disabled_skips_youtube_without_calling_it(monkeypatch, fake_tiktok_success, clip_path):
+    monkeypatch.setattr(upload_manager, "YOUTUBE_UPLOADS_ENABLED", False)
+    called = []
+    monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: called.append(1))
+
+    result = upload_manager.upload_clip_everywhere(clip_path, "Title", "desc", publish=True)
+
+    assert called == []
+    assert result.youtube.attempted is False
+    assert result.youtube.success is False
+    assert result.tiktok.success is True  # TikTok is untouched by the YouTube toggle
+
+
+def test_youtube_uploads_disabled_skips_the_pacing_delay(monkeypatch, fake_tiktok_success, clip_path):
+    monkeypatch.setattr(upload_manager, "YOUTUBE_UPLOADS_ENABLED", False)
+    sleeps = []
+    monkeypatch.setattr(upload_manager.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: (_ for _ in ()).throw(AssertionError()))
+
+    upload_manager.upload_clip_everywhere(clip_path, "Title", "desc", publish=True)
+
+    assert sleeps == []  # no reason to pace out an attempt that's just going to no-op

@@ -33,6 +33,11 @@ def _common_mocks(monkeypatch, tmp_path, video_path, wav_path, transcription_pat
 
 
 def test_run_cycle_still_runs_backlog_and_retry_sweeps_when_no_new_clips(tmp_path, monkeypatch):
+    # This test locks in the "runs every cycle" promise for the YouTube sweep itself, which only
+    # applies while YouTube uploads are enabled at all (upload_manager.YOUTUBE_UPLOADS_ENABLED,
+    # 2026-08-25 TikTok-only mode) — see test_youtube_retry_sweep_skipped_entirely_when_youtube_
+    # uploads_disabled below for the disabled-mode behavior this same gate now has.
+    monkeypatch.setattr(auto_pilot.upload_manager, "YOUTUBE_UPLOADS_ENABLED", True)
     video_path = _touch(tmp_path / "live_chunk_1.ts")
     wav_path = _touch(tmp_path / "live_chunk_1.wav")
     transcription_path = _touch(tmp_path / "live_chunk_1_transcription.json")
@@ -72,6 +77,42 @@ def test_run_cycle_still_runs_backlog_and_retry_sweeps_when_no_new_clips(tmp_pat
     assert len(backlog_calls) == 1, "find_backlog_clips() must still run on a content-quiet cycle"
     assert len(yt_retry_calls) == 1, "YouTube retry sweep must still run on a content-quiet cycle"
     assert len(ig_retry_calls) == 1, "Instagram retry sweep must still run on a content-quiet cycle"
+
+
+def test_youtube_retry_sweep_skipped_entirely_when_youtube_uploads_disabled(tmp_path, monkeypatch):
+    # TikTok-only mode (2026-08-25): with upload_manager.YOUTUBE_UPLOADS_ENABLED off, run_cycle()
+    # must not even call retry_missing_youtube_uploads() — every candidate would otherwise no-op
+    # and get logged as "failed" every cycle forever, since a disabled leg never becomes
+    # youtube_uploaded=True and so never ages out of find_missing_youtube_uploads(). The
+    # Instagram sweep is untouched by this toggle and must still run.
+    monkeypatch.setattr(auto_pilot.upload_manager, "YOUTUBE_UPLOADS_ENABLED", False)
+    video_path = _touch(tmp_path / "live_chunk_1.ts")
+    wav_path = _touch(tmp_path / "live_chunk_1.wav")
+    transcription_path = _touch(tmp_path / "live_chunk_1_transcription.json")
+    clips_path = _touch(tmp_path / "live_chunk_1_clips.json", json.dumps({"clips": []}))
+
+    _common_mocks(monkeypatch, tmp_path, video_path, wav_path, transcription_path, clips_path)
+    monkeypatch.setattr(auto_pilot, "_trim_to_batch", lambda *a, **k: (_ for _ in ()).throw(AssertionError()))
+    monkeypatch.setattr(auto_pilot, "find_backlog_clips", lambda *a, **k: [])
+
+    ig_retry_calls = []
+    monkeypatch.setattr(auto_pilot, "retry_missing_youtube_uploads", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("YouTube retry sweep must not run when YOUTUBE_UPLOADS_ENABLED is False")
+    ))
+    monkeypatch.setattr(
+        auto_pilot, "retry_missing_instagram_uploads",
+        lambda *a, **k: ig_retry_calls.append((a, k)) or (0, 0),
+    )
+
+    kept, deleted, uploaded = auto_pilot.run_cycle(
+        video_path=video_path, profile=None, layout="split_screen", video_format="9:16",
+        highlight_color="#FFFFFF", purge_threshold=-2, critic_model="gemini-x", cycle=1,
+        target_streamer="eliasn97", kept_total=0, purged_total=0, uploaded_total=0,
+        live=True, auto_upload=True, publish=True, streamer_handle="eliasn97",
+    )
+
+    assert (kept, deleted, uploaded) == (0, 0, 0)
+    assert len(ig_retry_calls) == 1, "Instagram retry sweep must still run regardless of the YouTube toggle"
 
 
 def test_run_cycle_uploads_a_real_backlog_clip_even_with_no_new_clips(tmp_path, monkeypatch):

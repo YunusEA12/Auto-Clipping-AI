@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import metrics_tracker
 import upload_ledger
+import upload_manager
 
 
 # --- embedded-JSON content extraction (C-01: real per-row DOM has no views/likes words at
@@ -564,7 +565,22 @@ def test_extract_youtube_video_id_returns_none_for_missing_url():
     assert metrics_tracker._extract_youtube_video_id("") is None
 
 
+def test_fetch_youtube_metrics_skips_everything_when_youtube_uploads_disabled(monkeypatch):
+    # TikTok-only mode (2026-08-25): gated on the same upload_manager.YOUTUBE_UPLOADS_ENABLED
+    # switch as the upload side, so this never even asks for a stats service — found live the
+    # same day: the account's YouTube Data API access was independently suspended, and without
+    # this gate every cycle logged a fresh ERROR per stats batch forever.
+    monkeypatch.setattr(upload_manager, "YOUTUBE_UPLOADS_ENABLED", False)
+    called = []
+    monkeypatch.setattr(metrics_tracker.youtube_uploader, "get_stats_service", lambda: called.append(1) or object())
+    uploaded = [{"_clip_id": "clip_1", "youtube_uploaded": True, "youtube_url": "https://youtu.be/vid1"}]
+
+    assert metrics_tracker._fetch_youtube_metrics(uploaded) == {}
+    assert called == []
+
+
 def test_fetch_youtube_metrics_skips_entries_not_uploaded_to_youtube(monkeypatch):
+    monkeypatch.setattr(upload_manager, "YOUTUBE_UPLOADS_ENABLED", True)
     called = []
     monkeypatch.setattr(metrics_tracker.youtube_uploader, "get_stats_service", lambda: called.append(1) or object())
     uploaded = [{"_clip_id": "clip_1", "youtube_uploaded": False, "youtube_url": None}]
@@ -576,6 +592,7 @@ def test_fetch_youtube_metrics_skips_entries_not_uploaded_to_youtube(monkeypatch
 
 
 def test_fetch_youtube_metrics_returns_empty_when_no_usable_token(monkeypatch):
+    monkeypatch.setattr(upload_manager, "YOUTUBE_UPLOADS_ENABLED", True)
     monkeypatch.setattr(metrics_tracker.youtube_uploader, "get_stats_service", lambda: None)
     uploaded = [{"_clip_id": "clip_1", "youtube_uploaded": True, "youtube_url": "https://youtu.be/vid1"}]
 
@@ -583,6 +600,7 @@ def test_fetch_youtube_metrics_returns_empty_when_no_usable_token(monkeypatch):
 
 
 def test_fetch_youtube_metrics_maps_video_id_stats_back_to_clip_id(monkeypatch):
+    monkeypatch.setattr(upload_manager, "YOUTUBE_UPLOADS_ENABLED", True)
     monkeypatch.setattr(metrics_tracker.youtube_uploader, "get_stats_service", lambda: object())
     monkeypatch.setattr(
         metrics_tracker.youtube_uploader, "fetch_video_stats",
@@ -596,6 +614,7 @@ def test_fetch_youtube_metrics_maps_video_id_stats_back_to_clip_id(monkeypatch):
 
 
 def test_fetch_youtube_metrics_never_raises_on_a_fetch_error(monkeypatch):
+    monkeypatch.setattr(upload_manager, "YOUTUBE_UPLOADS_ENABLED", True)
     monkeypatch.setattr(metrics_tracker.youtube_uploader, "get_stats_service", lambda: object())
 
     def _raise(youtube, video_ids):
@@ -616,6 +635,7 @@ def _setup_update_viral_memory(tmp_path, monkeypatch):
 
 
 def test_update_viral_memory_records_youtube_metrics_alongside_tiktok(tmp_path, monkeypatch):
+    monkeypatch.setattr(upload_manager, "YOUTUBE_UPLOADS_ENABLED", True)
     uploaded_dir = _setup_update_viral_memory(tmp_path, monkeypatch)
     (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
     (uploaded_dir / "clip_1.json").write_text(json.dumps({
@@ -643,6 +663,7 @@ def test_update_viral_memory_records_youtube_metrics_alongside_tiktok(tmp_path, 
 
 
 def test_update_viral_memory_matches_youtube_even_when_tiktok_scrape_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(upload_manager, "YOUTUBE_UPLOADS_ENABLED", True)
     uploaded_dir = _setup_update_viral_memory(tmp_path, monkeypatch)
     (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
     (uploaded_dir / "clip_1.json").write_text(json.dumps({
@@ -667,6 +688,7 @@ def test_update_viral_memory_matches_youtube_even_when_tiktok_scrape_fails(tmp_p
 def test_update_viral_memory_a_youtube_miss_does_not_erase_prior_youtube_data(tmp_path, monkeypatch):
     # Pass 1: matched on both platforms. Pass 2: YouTube stats unavailable this cycle (e.g. a
     # token hiccup) -- the YouTube numbers from pass 1 must survive, not get wiped to None.
+    monkeypatch.setattr(upload_manager, "YOUTUBE_UPLOADS_ENABLED", True)
     uploaded_dir = _setup_update_viral_memory(tmp_path, monkeypatch)
     (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
     (uploaded_dir / "clip_1.json").write_text(json.dumps({
