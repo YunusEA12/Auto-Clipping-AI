@@ -39,6 +39,11 @@ The system has evolved from a manual script to an autonomous 24/7 supervisor-dri
 - **Large & Temp Files:** NEVER commit `temp/`, `output/`, `selector_audit/`, or any raw media (`*.mp4`, `*.wav`, `*.ts`).
 - **Log Sanitation:** Ensure all OpenAI/Anthropic API keys and Bearer tokens are redacted from logs before printing or saving.
 
+## Fable-Orchestrator-Regeln
+- **Chief Architect (Fable):** Plant, spezifiziert und validiert — Roadmap, Schnittstellen-Design und Code-Reviews liegen bei Fable.
+- **Worker-Modelle:** Führen die Routine-Aufgaben aus (Implementierung nach vorgegebener Schnittstelle, Tests, Refactoring nach festem Muster), delegiert von Fable, um dessen Tokens für Architektur-Entscheidungen zu reservieren.
+- **Dokumentationspflicht:** Jede relevante Architektur-Entscheidung wandert automatisch als eigenständige Markdown-Seite in `obsidian_vault/02_wiki/` und wird von der Startseite (`obsidian_vault/02_wiki/index.md`) aus verlinkt.
+
 ## Hard Rules
 - Do not introduce heavy C++ compilation dependencies unless absolutely necessary.
 - Do not overwrite the original source video files.

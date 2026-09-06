@@ -1,0 +1,33 @@
+[project]
+name = "auto-clipping-ai"
+version = "0.1.0"
+description = "Autonomous 24/7 stream-monitoring and auto-clipping pipeline"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "yt-dlp",
+    "ffmpeg-python",
+    "faster-whisper",
+    "python-dotenv",
+    "pydantic",
+    "google-genai",
+    "opencv-python-headless",
+    "mediapipe",
+    "google-api-python-client",
+    "google-auth-httplib2",
+    "google-auth-oauthlib",
+    "streamlit",
+    "requests",
+    "numpy",
+    "streamlink",
+    "playwright",
+    "streamlit-autorefresh",
+    "browser-cookie3",
+    "filelock",
+    "psutil",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
