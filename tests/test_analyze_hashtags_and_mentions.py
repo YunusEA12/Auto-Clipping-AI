@@ -6,8 +6,10 @@
 3. Every caption must credit the source streamer with "@<streamer_name>" once known."""
 
 import json
+import types
 
 import analyze
+import llm_utils
 
 
 def _clip(**overrides):
@@ -22,9 +24,33 @@ def _clip(**overrides):
 
 # --- clip duration bounds -------------------------------------------------------------
 
-def test_clip_duration_bounds_are_15_to_150_seconds():
-    assert analyze.MIN_CLIP_DURATION == 15
+def test_clip_duration_bounds_are_61_to_150_seconds():
+    assert analyze.MIN_CLIP_DURATION == 61
     assert analyze.MAX_CLIP_DURATION == 150
+
+
+def test_duration_bounds_filter_keeps_61s_clip_and_drops_a_60s_clip(monkeypatch):
+    # TICKET-001 boundary case: 61.0s is the new floor (TikTok Creator Rewards requires
+    # >60s), so a clip of exactly 61.0s must be kept and a clip just under it (60.0s) must
+    # be dropped by select_clips()'s duration-bounds post-filter.
+    monkeypatch.setattr(analyze.genai, "Client", lambda: types.SimpleNamespace(models=None))
+    exactly_61 = _clip(title="Exactly 61", start_time=0.0, end_time=61.0)
+    just_under_61 = _clip(title="Just Under 61", start_time=0.0, end_time=60.0)
+
+    def fake_response(clips):
+        return types.SimpleNamespace(
+            candidates=[types.SimpleNamespace(finish_reason=None)],
+            parsed=analyze.ClipSelection(clips=clips),
+        )
+
+    monkeypatch.setattr(
+        llm_utils, "call_with_fallback",
+        lambda fn, description, model_pool: fake_response([exactly_61, just_under_61]),
+    )
+
+    selection = analyze.select_clips("Transcript:\n[00:00] hi")
+
+    assert [c.title for c in selection.clips] == ["Exactly 61"]
 
 
 # --- hashtag validator -----------------------------------------------------------------
@@ -124,7 +150,10 @@ def test_analyze_reads_transcript_language_and_passes_it_to_select_clips(tmp_pat
 
 # --- fallback clip (find_longest_segment_fallback) --------------------------------------
 
-def _transcript_with_one_long_segment(duration=40.0):
+def _transcript_with_one_long_segment(duration=65.0):
+    # duration default kept above MIN_CLIP_DURATION (61s as of TICKET-001) so these tests
+    # exercise find_longest_segment_fallback()'s mention/hashtag behavior, not its duration
+    # floor (which has its own dedicated coverage above).
     return {"segments": [{"start": 0.0, "end": duration, "text": "Ein langer, zusammenhängender Moment."}]}
 
 

@@ -54,7 +54,11 @@ MODEL = "gemini-3.5-flash-lite"
 # laugh, a one-line zinger — exactly what TRIGGER_WORDS targets) very often naturally runs
 # 15-25s; forcing every clip to either pad out past 30s or get discarded outright was
 # throwing away real, usable content on a mechanical technicality, not a quality judgment.
-MIN_CLIP_DURATION = 15
+# This yield-driven reasoning no longer sets the floor as of 2026-09-06 (TICKET-001):
+# MIN_CLIP_DURATION raised 15 -> 61 so every rendered clip clears TikTok Creator Rewards'
+# >60s eligibility threshold, intentionally trading yield for monetization eligibility — see
+# ADR-001-Min-Clip-Length for the full rationale.
+MIN_CLIP_DURATION = 61
 MAX_CLIP_DURATION = 150
 MAX_HASHTAGS = 5
 

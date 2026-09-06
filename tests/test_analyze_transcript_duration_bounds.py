@@ -37,8 +37,10 @@ def _no_real_genai_client(monkeypatch):
 # outside the transcript's own known duration before it ever reaches rendering.
 
 def test_select_clips_drops_a_clip_hallucinated_past_the_transcript_duration(monkeypatch):
-    in_bounds = _clip("Real Moment", 10.0, 30.0)
-    hallucinated = _clip("Hallucinated Moment", 221.9, 240.6)  # transcript only covers 0-180s
+    # Durations kept >= MIN_CLIP_DURATION (61s as of TICKET-001) so both clips clear the
+    # duration-bounds filter and this test exercises the transcript-duration check specifically.
+    in_bounds = _clip("Real Moment", 10.0, 71.0)  # 61s, comfortably within the transcript
+    hallucinated = _clip("Hallucinated Moment", 221.9, 290.6)  # 68.7s; transcript only covers 0-180s
 
     monkeypatch.setattr(
         llm_utils, "call_with_fallback",
@@ -51,7 +53,8 @@ def test_select_clips_drops_a_clip_hallucinated_past_the_transcript_duration(mon
 
 
 def test_select_clips_allows_a_clip_within_a_small_rounding_tolerance(monkeypatch):
-    almost_in_bounds = _clip("Almost At The Edge", 160.0, 180.4)  # 0.4s past a 180.0s transcript
+    # 61s duration (>= MIN_CLIP_DURATION as of TICKET-001), 0.4s past a 180.0s transcript
+    almost_in_bounds = _clip("Almost At The Edge", 119.4, 180.4)
 
     monkeypatch.setattr(
         llm_utils, "call_with_fallback",
@@ -64,7 +67,7 @@ def test_select_clips_allows_a_clip_within_a_small_rounding_tolerance(monkeypatc
 
 
 def test_select_clips_skips_the_bounds_check_when_transcript_duration_is_not_given(monkeypatch):
-    far_out = _clip("No Duration Known", 500.0, 520.0)
+    far_out = _clip("No Duration Known", 500.0, 565.0)  # 65s, >= MIN_CLIP_DURATION
 
     monkeypatch.setattr(
         llm_utils, "call_with_fallback",
