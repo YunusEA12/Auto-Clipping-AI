@@ -32,9 +32,13 @@ tiktok_client_secret.json
 tiktok_token.json
 tiktok_cookies.json
 cookies.json
+youtube_studio_cookies.json
 config/instagram_cookies.json
 uploaded_clips/
 gemini_call_budget.json
+# Leftover from the pre-Gemini OpenAI backend — still written on machines that ran that
+# version, and pure local state either way, so it has no business in git.
+openai_call_budget.json
 youtube_upload_backoff.json
 upload_ledger.json
 upload_ledger.json.lock
