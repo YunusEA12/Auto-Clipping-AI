@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import process
+import vision
 
 
 # --- resolve_layout --------------------------------------------------------------------
@@ -374,6 +375,88 @@ def test_resolve_layout_zero_confident_faces_ordinary_dropout_still_uses_overrid
     monkeypatch.setattr(process.vision, "looks_like_busy_multi_face_scene", lambda *a, **k: False)
     resolved, _ = process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0, has_static_override=True)
     assert resolved == process.LAYOUT_SPLIT_SCREEN
+
+
+# --- facecam_scan veto (2026-08-25 incident: EA FC pack-opening clips rendered with a zoomed
+# crop of a player CARD in the split_screen face zone. A card's portrait art is a real
+# photograph of a real face, so it passes face_count, blackness and within-clip stability
+# checks alike — only the whole-chunk persistence scan separates a camera from something the
+# game drew. See vision.locate_persistent_facecam) ------------------------------------------
+
+def _scan(box_ratio, samples_read=16, samples_with_face=2, persistence=0.125):
+    return vision.FacecamScan(
+        box_ratio=box_ratio, persistence=persistence, samples_with_face=samples_with_face,
+        samples_read=samples_read, mean_confidence=0.9,
+    )
+
+
+def test_split_screen_is_vetoed_when_the_chunk_has_no_persistent_facecam(monkeypatch):
+    box = (0, 0, 100, 100)  # small + off-center -> would normally be split_screen
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", lambda *a, **k: (1, box, 1000, 1000))
+    monkeypatch.setattr(process.vision, "detect_multi_cam_faces", lambda *a, **k: None)
+    monkeypatch.setattr(process.vision, "looks_like_busy_multi_face_scene", lambda *a, **k: False)
+
+    resolved, _ = process.resolve_layout(
+        process.LAYOUT_AUTO, Path("x.mp4"), 1.0, facecam_scan=_scan(box_ratio=None),
+    )
+
+    assert resolved == process.LAYOUT_CENTER_CROP
+
+
+def test_split_screen_survives_when_the_chunk_does_have_a_persistent_facecam(monkeypatch):
+    box = (0, 0, 100, 100)
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", lambda *a, **k: (1, box, 1000, 1000))
+    monkeypatch.setattr(process.vision, "detect_multi_cam_faces", lambda *a, **k: None)
+    monkeypatch.setattr(process.vision, "looks_like_busy_multi_face_scene", lambda *a, **k: False)
+
+    resolved, _ = process.resolve_layout(
+        process.LAYOUT_AUTO, Path("x.mp4"), 1.0,
+        facecam_scan=_scan(box_ratio=(0.8, 0.05, 0.95, 0.2), persistence=0.9, samples_with_face=14),
+    )
+
+    assert resolved == process.LAYOUT_SPLIT_SCREEN
+
+
+def test_a_failed_scan_is_not_treated_as_evidence_against_a_facecam(monkeypatch):
+    # An unreadable chunk says nothing about whether a camera is there — it must not veto.
+    box = (0, 0, 100, 100)
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", lambda *a, **k: (1, box, 1000, 1000))
+    monkeypatch.setattr(process.vision, "detect_multi_cam_faces", lambda *a, **k: None)
+    monkeypatch.setattr(process.vision, "looks_like_busy_multi_face_scene", lambda *a, **k: False)
+
+    resolved, _ = process.resolve_layout(
+        process.LAYOUT_AUTO, Path("x.mp4"), 1.0,
+        facecam_scan=_scan(box_ratio=None, samples_read=0, samples_with_face=0, persistence=0.0),
+    )
+
+    assert resolved == process.LAYOUT_SPLIT_SCREEN
+
+
+def test_no_scan_given_leaves_existing_behaviour_untouched(monkeypatch):
+    box = (0, 0, 100, 100)
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", lambda *a, **k: (1, box, 1000, 1000))
+    monkeypatch.setattr(process.vision, "detect_multi_cam_faces", lambda *a, **k: None)
+    monkeypatch.setattr(process.vision, "looks_like_busy_multi_face_scene", lambda *a, **k: False)
+
+    resolved, _ = process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0)
+
+    assert resolved == process.LAYOUT_SPLIT_SCREEN
+
+
+def test_full_cam_is_deliberately_not_vetoed(monkeypatch):
+    # Scoped to split_screen on purpose — see resolve_layout's docstring: a genuine talking
+    # head moves far more than a fixed corner cam, so it is the case most likely to miss the
+    # persistence bar legitimately.
+    box = (0, 0, 600, 600)  # large -> full_cam
+    monkeypatch.setattr(process.vision, "detect_faces_for_layout", lambda *a, **k: (1, box, 1000, 1000))
+    monkeypatch.setattr(process.vision, "detect_multi_cam_faces", lambda *a, **k: None)
+    monkeypatch.setattr(process.vision, "looks_like_busy_multi_face_scene", lambda *a, **k: False)
+
+    resolved, _ = process.resolve_layout(
+        process.LAYOUT_AUTO, Path("x.mp4"), 1.0, facecam_scan=_scan(box_ratio=None),
+    )
+
+    assert resolved == process.LAYOUT_FULL_CAM
 
 
 # --- build_filter_complex: full_cam branch ----------------------------------------------

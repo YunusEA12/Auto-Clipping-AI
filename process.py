@@ -854,6 +854,7 @@ LAYOUT_RETRY_FRACTIONS = (1 / 3, 2 / 3)
 def resolve_layout(
     layout: str, video_path: Path, clip_start: float, clip_end: float | None = None,
     has_static_override: bool = False,
+    facecam_scan: "vision.FacecamScan | None" = None,
 ) -> tuple[str, float]:
     """Returns (resolved_layout, detection_ts) — NOT just the layout string (2026-08-22 fix).
     Previously process_clips_iter() always called vision.get_facecam_coordinates() at
@@ -902,6 +903,20 @@ def resolve_layout(
     known box, via get_facecam_coordinates()'s own override_box_ratio handling) is still the
     right call rather than giving up on the facecam entirely. Only affects the zero-face case —
     a face_count >= 1 result still resolves off the real detection as usual.
+
+    `facecam_scan` (2026-08-25) is this chunk's whole-recording webcam search — see
+    vision.locate_persistent_facecam(). When it ran successfully and found NO persistent
+    position, a small off-center face in this clip is not a corner webcam but something the
+    GAME drew (an EA FC player-card portrait is a real photograph of a real face, and scores
+    like one), so split_screen is vetoed down to center_crop rather than cropping game content
+    into the face zone — the exact defect that shipped on 2026-08-25. A scan that could not run
+    at all (`scan_succeeded` False) is no evidence either way and changes nothing.
+
+    Deliberately scoped to the split_screen branch only. full_cam's big/centered face could in
+    principle be a card portrait too, but a genuine full_cam subject (a Just-Chatting talking
+    head) moves around far more than a fixed corner cam, so it is the case most likely to miss
+    FACECAM_MIN_PERSISTENCE legitimately — vetoing it would risk downgrading real talking-head
+    clips to fix a defect that has not actually been observed there.
     """
     if layout != LAYOUT_AUTO:
         return layout, clip_start
@@ -982,6 +997,23 @@ def resolve_layout(
             LAYOUT_FULL_CAM if ratio >= FULL_CAM_MIN_FACE_AREA_RATIO or is_centered
             else LAYOUT_SPLIT_SCREEN
         )
+        if (
+            resolved == LAYOUT_SPLIT_SCREEN
+            and facecam_scan is not None
+            and facecam_scan.scan_succeeded
+            and facecam_scan.box_ratio is None
+        ):
+            # See this function's docstring: no position held still across the whole chunk, so
+            # this small off-center "face" is game content, not a corner webcam.
+            logger.warning(
+                "Auto-layout at %.2fs: face_count=%d looks like a corner facecam, but the "
+                "whole-chunk scan found no persistent webcam position (best held %d/%d "
+                "sample(s)) — this is game-rendered content, not a camera. Using %s instead "
+                "of %s so no game footage gets cropped into the face zone.",
+                clip_start, face_count, facecam_scan.samples_with_face,
+                facecam_scan.samples_read, LAYOUT_CENTER_CROP, resolved,
+            )
+            resolved = LAYOUT_CENTER_CROP
         logger.info(
             "Auto-layout at %.2fs: face_count=%d, face_area_ratio=%.3f (threshold %.2f), "
             "face_center_x_ratio=%.3f (centered=%s) -> %s",
@@ -1120,11 +1152,24 @@ def process_clips_iter(
                 padding_margin = entry.get("facecam_padding")
                 break
 
+    # Whole-chunk webcam search ("Facecam-Agent", 2026-08-25) — run ONCE for this source file,
+    # not per clip: where the streamer's camera sits is a property of the RECORDING, and
+    # sampling only inside one clip is exactly the mistake that lets a single pack-opening
+    # sequence pass as a stable face (see vision.locate_persistent_facecam). Its result does
+    # two jobs below: it supplies the authoritative crop box when a camera really is there, and
+    # it vetoes split_screen when one demonstrably isn't. Skipped for layouts that never crop a
+    # face zone at all, where the scan would be pure cost.
+    facecam_scan = None
+    if layout in (LAYOUT_AUTO, LAYOUT_SPLIT_SCREEN, LAYOUT_FULL_CAM):
+        facecam_scan = vision.locate_persistent_facecam(str(video_path))
+    verified_box_ratio = facecam_scan.box_ratio if facecam_scan is not None else None
+
     total = len(clips)
     for i, clip in enumerate(clips, start=1):
         effective_layout, detection_ts = resolve_layout(
             layout, video_path, clip["start_time"], clip["end_time"],
             has_static_override=override_box_ratio is not None,
+            facecam_scan=facecam_scan,
         )
 
         # detection_ts (not clip["start_time"]) — the exact frame resolve_layout()'s own
@@ -1150,6 +1195,7 @@ def process_clips_iter(
             facecam_box = vision.get_facecam_coordinates(
                 str(video_path), detection_ts, padding_factor=padding_factor,
                 clip_end=clip["end_time"], override_box_ratio=override_box_ratio,
+                verified_box_ratio=verified_box_ratio,
             )
         elif effective_layout == LAYOUT_FULL_CAM:
             padding_factor = (
@@ -1159,6 +1205,7 @@ def process_clips_iter(
             facecam_box = vision.get_facecam_coordinates(
                 str(video_path), detection_ts, padding_factor=padding_factor,
                 clip_end=clip["end_time"], override_box_ratio=override_box_ratio,
+                verified_box_ratio=verified_box_ratio,
             )
         elif effective_layout == LAYOUT_MULTI_CAM:
             # Re-detects at detection_ts rather than threading the boxes resolve_layout()

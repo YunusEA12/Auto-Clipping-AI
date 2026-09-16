@@ -8,6 +8,7 @@ Startseite der vernetzten Projekt-Dokumentation. Diese Seite verlinkt die zentra
 - [[Streamer-Settings]] — Konfiguration der überwachten Streamer/Kanäle
 - [[Status]] — Aktueller Betriebszustand (Agent-States, laufende Prozesse)
 - [[Layout-Logik]] — Regeln zur Video-Layout-Erzeugung (Split-Screen, Facecam-Erkennung, Multi-Cam-Grids)
+- [[Facecam-Agent]] — Wie die echte Webcam von Gesichtern unterschieden wird, die das Spiel zeichnet (Persistenz-Scan)
 
 ## Struktur des Vaults
 

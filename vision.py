@@ -3,7 +3,7 @@
 import logging
 import urllib.request
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import NamedTuple, Optional, Sequence
 
 import cv2
 import mediapipe as mp
@@ -225,6 +225,19 @@ def _ratio_box_to_pixels(
     return x1_px, y1_px, max(1, x2_px - x1_px), max(1, y2_px - y1_px)
 
 
+def _frame_size(video_path: str) -> tuple[int, int]:
+    """(width, height) straight off the container's own metadata — no frame decode, unlike
+    _detect_faces(). Lets a caller that already KNOWS which region it wants (a ratio box) turn
+    it into pixels without paying for a detection pass. (0, 0) when unreadable."""
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return 0, 0
+    try:
+        return int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    finally:
+        cap.release()
+
+
 def _median(values: Sequence[float]) -> float:
     ordered = sorted(values)
     n = len(ordered)
@@ -298,6 +311,7 @@ def get_facecam_coordinates(
     clip_end: Optional[float] = None,
     sample_count: int = FACECAM_SMOOTH_SAMPLE_COUNT,
     override_box_ratio: Optional[Sequence[float]] = None,
+    verified_box_ratio: Optional[Sequence[float]] = None,
 ) -> tuple[int, int, int, int]:
     """Detect a face at `timestamp` seconds into `video_path` and return a padded (x, y, w, h) box in pixels.
 
@@ -323,7 +337,38 @@ def get_facecam_coordinates(
     hand-picked box; the override exists purely as a loose last-resort for the case where
     detection finds nothing at all. The override is used as-is (no extra padding applied):
     it's already an explicit crop box, not a raw face box that needs headroom added around it.
+
+    `verified_box_ratio`, when given, WINS over everything below including per-clip dynamic
+    detection — it is this chunk's persistent webcam position from locate_persistent_facecam()
+    (see its docstring), i.e. the same detector's verdict over many more frames plus a
+    positional-consistency requirement no single clip's detection can provide. Outranking
+    dynamic detection is the entire point: the case this exists for is exactly the one where a
+    frame's HIGHEST-scoring face is not the camera at all (a game-rendered portrait), so
+    deferring to per-clip confidence there would just reproduce the bug. Unlike
+    `override_box_ratio` this IS a raw face box, so it gets the same `padding_factor` headroom
+    a live detection would.
     """
+    if verified_box_ratio is not None:
+        frame_w, frame_h = _frame_size(video_path)
+        if frame_w > 0 and frame_h > 0:
+            verified_raw = _ratio_box_to_pixels(verified_box_ratio, frame_w, frame_h)
+            verified_padded = _pad_and_clamp_box(verified_raw, frame_w, frame_h, padding_factor)
+            if verified_padded is not None:
+                logger.info(
+                    "Facecam: using this chunk's verified persistent webcam position raw=%s padded=%s",
+                    verified_raw, verified_padded,
+                )
+                return verified_padded
+            logger.warning(
+                "Facecam: verified persistent box %s clamped down to nothing — falling through "
+                "to per-clip detection", verified_raw,
+            )
+        else:
+            logger.warning(
+                "Facecam: could not read frame size for %s — falling through to per-clip "
+                "detection instead of the verified persistent box", video_path,
+            )
+
     smoothed = clip_end is not None and clip_end > timestamp
     if smoothed:
         raw_box, confidence, frame_w, frame_h = _sample_smoothed_box(video_path, timestamp, clip_end, sample_count)
@@ -507,6 +552,260 @@ def detect_multi_cam_faces(
     confident = [b for b, s in zip(boxes, scores) if s >= FACE_COUNT_MIN_CONFIDENCE]
     confident.sort(key=lambda b: (b[1], b[0]))  # (y, x) reading order
     return confident, frame_w, frame_h
+
+
+# --- Persistent facecam localisation ("Facecam-Agent", 2026-08-25) ---------------------------
+#
+# 2026-08-25 incident: EA FC / FIFA pack-opening clips rendered with the split_screen face zone
+# showing a zoomed crop of the GAME (a player card's portrait art) instead of the streamer —
+# the same content as the gameplay zone right below it, just zoomed. Two clips shipped like
+# this before it was caught.
+#
+# Every guard in this module missed it, and none of them were wrong to: a player card's
+# portrait IS a photograph of a real human face, so MediaPipe scores it as one. face_count is
+# 1 (not a grid, not busy, not crowded), the box is bright gold (not black), and during a
+# walkout animation the card sits still long enough that _sample_smoothed_box's within-clip
+# median is perfectly stable. Every existing signal asks "is there a face, and where" — none
+# asks "is this face the STREAMER'S CAMERA, or something the game is drawing".
+#
+# The discriminator this adds: a webcam overlay is FIXED FURNITURE for the whole broadcast —
+# same rectangle, minute after minute, across menus, matches and pack openings alike. Game
+# content is transient: a card fills the screen for a few seconds and is gone. So sampling
+# across the WHOLE source chunk (not within one clip, which can be entirely one pack-opening
+# sequence) and keeping only a face position that PERSISTS separates the two cleanly, with no
+# game-specific knowledge and no extra model.
+#
+# This also fixes the weaker version of the same bug: when a streamer's real webcam IS on
+# screen, a big sharp card portrait can out-score their small corner cam in any single frame.
+# Scoring by persistence instead of by one frame's confidence picks the camera.
+FACECAM_SCAN_SAMPLE_COUNT = 16
+# Fraction of successfully-read samples a position must appear in to count as the facecam. A
+# real webcam is present in essentially every frame, so this could be much higher; it is kept
+# below half deliberately, for the streamer who steps away, leans out of frame, or whose cam
+# the detector loses at odd angles. Transient game content sits far below it either way (a
+# pack animation is seconds out of a multi-minute chunk).
+FACECAM_MIN_PERSISTENCE = 0.45
+# How far two detections may sit apart (as a fraction of frame width/height, center-to-center)
+# and still count as the same fixed position. Generous enough for a person moving around
+# inside their webcam box — the detected FACE moves within the fixed CAMERA rectangle, which
+# is the thing actually being located — while far tighter than the jump between a webcam
+# corner and centre-screen game content.
+FACECAM_CLUSTER_CENTER_TOLERANCE = 0.08
+# Two detections whose sizes differ by more than this factor are not the same face, even at
+# the same position — guards against a large centre-screen card portrait absorbing a small
+# corner webcam into one cluster when they happen to overlap.
+FACECAM_CLUSTER_SIZE_TOLERANCE = 2.0
+
+
+class FacecamScan(NamedTuple):
+    """Result of locate_persistent_facecam(). `box_ratio` is None when the scan ran fine but
+    found no position persistent enough to be a camera — a real, meaningful answer ("this
+    footage has no webcam overlay"), NOT an error, and the thing that stops game content from
+    being cropped as a facecam. Distinguish that from a scan that could not run at all via
+    `scan_succeeded` (samples_read == 0): an unreadable file is not evidence about anything,
+    so callers must fail open there rather than treating it as "no facecam"."""
+    box_ratio: Optional[tuple[float, float, float, float]]
+    persistence: float
+    samples_with_face: int
+    samples_read: int
+    mean_confidence: float
+
+    @property
+    def scan_succeeded(self) -> bool:
+        return self.samples_read > 0
+
+
+def _video_duration_seconds(video_path: str) -> float:
+    """Best-effort duration from frame count / fps. Returns 0.0 (never raises) when either is
+    missing or nonsensical — some .ts chunk recordings report neither reliably — which callers
+    treat as "can't scan a time range", not as a zero-length video."""
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return 0.0
+    try:
+        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+    finally:
+        cap.release()
+    if not fps or fps <= 0 or not frame_count or frame_count <= 0:
+        return 0.0
+    return float(frame_count) / float(fps)
+
+
+def _boxes_are_same_position(
+    a: tuple[int, int, int, int], b: tuple[int, int, int, int], frame_w: int, frame_h: int,
+) -> bool:
+    """Whether two raw face boxes plausibly sit at the same fixed on-screen position — the
+    clustering predicate for locate_persistent_facecam(). Compares CENTERS (not corners: a
+    face box grows and shrinks as someone leans toward or away from their camera, which moves
+    both corners while leaving the center roughly put) plus a size-similarity guard."""
+    if frame_w <= 0 or frame_h <= 0:
+        return False
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    if min(aw, ah, bw, bh) <= 0:
+        return False
+
+    a_cx, a_cy = ax + aw / 2, ay + ah / 2
+    b_cx, b_cy = bx + bw / 2, by + bh / 2
+    if abs(a_cx - b_cx) / frame_w > FACECAM_CLUSTER_CENTER_TOLERANCE:
+        return False
+    if abs(a_cy - b_cy) / frame_h > FACECAM_CLUSTER_CENTER_TOLERANCE:
+        return False
+
+    a_area, b_area = aw * ah, bw * bh
+    larger, smaller = max(a_area, b_area), min(a_area, b_area)
+    return larger / smaller <= FACECAM_CLUSTER_SIZE_TOLERANCE
+
+
+def _scan_frames_for_faces(
+    video_path: str, timestamps: Sequence[float],
+) -> tuple[list[list[tuple[int, int, int, int]]], list[list[float]], int, int]:
+    """Detect faces at each timestamp, reusing ONE VideoCapture and ONE FaceDetector across all
+    of them — unlike _detect_faces(), which opens and tears down both per call. At
+    FACECAM_SCAN_SAMPLE_COUNT samples that difference is the bulk of the scan's cost (model
+    load dominates a single detect), which is what makes a whole-chunk scan cheap enough to run
+    once per chunk. Frames that can't be read are skipped, not raised on: the returned lists
+    only contain successfully-read samples, so the caller's persistence denominator counts real
+    evidence rather than punishing a position for frames nobody could look at."""
+    per_frame_boxes: list[list[tuple[int, int, int, int]]] = []
+    per_frame_scores: list[list[float]] = []
+    frame_w = frame_h = 0
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return per_frame_boxes, per_frame_scores, frame_w, frame_h
+
+    model_path = _ensure_model()
+    options = mp_vision.FaceDetectorOptions(
+        base_options=BaseOptions(model_asset_path=str(model_path)),
+        running_mode=mp_vision.RunningMode.IMAGE,
+    )
+
+    try:
+        with mp_vision.FaceDetector.create_from_options(options) as detector:
+            for ts in timestamps:
+                cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000)
+                success, frame = cap.read()
+                if not success or frame is None:
+                    continue
+                frame_h, frame_w = frame.shape[:2]
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                result = detector.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
+                per_frame_boxes.append([
+                    (d.bounding_box.origin_x, d.bounding_box.origin_y,
+                     d.bounding_box.width, d.bounding_box.height)
+                    for d in result.detections
+                ])
+                per_frame_scores.append([
+                    d.categories[0].score if d.categories else 0.0 for d in result.detections
+                ])
+    finally:
+        cap.release()
+
+    return per_frame_boxes, per_frame_scores, frame_w, frame_h
+
+
+def locate_persistent_facecam(
+    video_path: str,
+    sample_count: int = FACECAM_SCAN_SAMPLE_COUNT,
+    min_persistence: float = FACECAM_MIN_PERSISTENCE,
+) -> FacecamScan:
+    """Find the streamer's actual webcam overlay in `video_path` by looking for a face position
+    that PERSISTS across the whole recording, and return it as a resolution-independent
+    [x1, y1, x2, y2] ratio box — the same shape as streamers.json's hand-configured
+    `facecam_box`, just derived automatically from the footage instead of by hand.
+
+    See the block comment above FACECAM_SCAN_SAMPLE_COUNT for the incident this exists to
+    prevent and why persistence (rather than confidence, count, or within-clip stability) is
+    the signal that separates a camera from a face the game itself is drawing.
+
+    Run ONCE PER SOURCE CHUNK, not per clip — the answer is a property of the recording, and
+    sampling within a single clip is exactly the mistake that lets one pack-opening sequence
+    look like a stable face. Never raises: an unreadable/unopenable file comes back as a scan
+    with samples_read == 0, which callers must treat as "no evidence" rather than "no facecam".
+    """
+    duration = _video_duration_seconds(video_path)
+    if duration <= 0 or sample_count < 1:
+        logger.warning(
+            "Facecam scan: could not determine a usable duration for %s — skipping scan", video_path,
+        )
+        return FacecamScan(None, 0.0, 0, 0, 0.0)
+
+    # Skip the very start and end: a chunk's first and last frames are the most likely to be
+    # a transition, a black frame, or a partially-written GOP at a recording boundary.
+    span_start, span_end = 0.05 * duration, 0.95 * duration
+    if sample_count == 1:
+        timestamps = [(span_start + span_end) / 2]
+    else:
+        step = (span_end - span_start) / (sample_count - 1)
+        timestamps = [span_start + i * step for i in range(sample_count)]
+
+    per_frame_boxes, per_frame_scores, frame_w, frame_h = _scan_frames_for_faces(video_path, timestamps)
+    samples_read = len(per_frame_boxes)
+    if samples_read == 0 or frame_w <= 0 or frame_h <= 0:
+        logger.warning("Facecam scan: no readable frames in %s — skipping scan", video_path)
+        return FacecamScan(None, 0.0, 0, 0, 0.0)
+
+    # Cluster by position across frames. Each cluster counts at most ONE hit per frame (a
+    # frame where two detections land in the same cluster is still just one frame's worth of
+    # evidence that something is there) so `persistence` stays a true fraction of frames.
+    clusters: list[dict] = []
+    for boxes, scores in zip(per_frame_boxes, per_frame_scores):
+        claimed: set[int] = set()
+        for box, score in zip(boxes, scores):
+            for index, cluster in enumerate(clusters):
+                if _boxes_are_same_position(box, cluster["representative"], frame_w, frame_h):
+                    cluster["boxes"].append(box)
+                    cluster["scores"].append(score)
+                    if index not in claimed:
+                        cluster["frames"] += 1
+                        claimed.add(index)
+                    cluster["representative"] = (
+                        int(_median([b[0] for b in cluster["boxes"]])),
+                        int(_median([b[1] for b in cluster["boxes"]])),
+                        int(_median([b[2] for b in cluster["boxes"]])),
+                        int(_median([b[3] for b in cluster["boxes"]])),
+                    )
+                    break
+            else:
+                clusters.append({
+                    "boxes": [box], "scores": [score], "frames": 1, "representative": box,
+                })
+                claimed.add(len(clusters) - 1)
+
+    if not clusters:
+        logger.info(
+            "Facecam scan of %s: no faces at all across %d readable sample(s) — no facecam",
+            video_path, samples_read,
+        )
+        return FacecamScan(None, 0.0, 0, samples_read, 0.0)
+
+    # Most-persistent wins; mean confidence only breaks ties between equally persistent
+    # positions. Deliberately NOT score-first: out-scoring the streamer's small corner cam in
+    # a given frame is exactly what a big sharp card portrait does.
+    best = max(clusters, key=lambda c: (c["frames"], sum(c["scores"]) / len(c["scores"])))
+    persistence = best["frames"] / samples_read
+    mean_confidence = sum(best["scores"]) / len(best["scores"])
+
+    if persistence < min_persistence:
+        logger.info(
+            "Facecam scan of %s: best position held only %d/%d sample(s) (%.0f%% < %.0f%% "
+            "required) — treating this footage as having NO webcam overlay, so no face zone "
+            "gets cropped out of game content",
+            video_path, best["frames"], samples_read, persistence * 100, min_persistence * 100,
+        )
+        return FacecamScan(None, persistence, best["frames"], samples_read, mean_confidence)
+
+    x, y, w, h = best["representative"]
+    box_ratio = (x / frame_w, y / frame_h, (x + w) / frame_w, (y + h) / frame_h)
+    logger.info(
+        "Facecam scan of %s: persistent webcam at ratio box %s — held %d/%d sample(s) "
+        "(%.0f%%), mean_confidence=%.2f",
+        video_path, tuple(round(v, 4) for v in box_ratio), best["frames"], samples_read,
+        persistence * 100, mean_confidence,
+    )
+    return FacecamScan(box_ratio, persistence, best["frames"], samples_read, mean_confidence)
 
 
 def get_multi_cam_coordinates(
