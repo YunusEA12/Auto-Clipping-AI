@@ -18,4 +18,6 @@ Startseite der vernetzten Projekt-Dokumentation. Diese Seite verlinkt die zentra
 
 ## Architektur-Entscheidungen
 
+- [[Wiederinbetriebnahme]] — Diagnose, aktuelle Abhängigkeiten und reproduzierbarer Windows-Start (28.10.2026).
+
 Wichtige Architektur-Entscheidungen werden hier automatisch als eigene Markdown-Seiten abgelegt (siehe `claude.md` — Abschnitt "Fable-Orchestrator-Regeln").

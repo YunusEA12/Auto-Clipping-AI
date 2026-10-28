@@ -1,6 +1,8 @@
 yt-dlp
 ffmpeg-python
 faster-whisper
+# Compatibility with faster-whisper 1.2.1 (upstream issue #1589).
+av>=11,<19
 python-dotenv
 pydantic
 google-genai

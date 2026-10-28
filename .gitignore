@@ -1,4 +1,6 @@
 venv/
+.venv/
+.streamlit/secrets.toml
 .env
 .playwright-browsers/
 temp/
