@@ -51,6 +51,7 @@ import profiles
 import stream_watcher
 import tiktok_uploader
 import train_loop
+import clip_quality_audit
 import transcribe
 import upload_manager
 
@@ -817,6 +818,12 @@ def run_cycle(
                 output_dir=_output_dir_override, streamer_name=streamer_handle,
             ):
                 rendered[clip["title"]] = output_path
+                try:
+                    clip_quality_audit.capture_rendered(
+                        clip, output_path, transcript, video_path, streamer_handle,
+                    )
+                except Exception as exc:
+                    logger.exception("Qualitätsaudit konnte den Clip nicht sichern: %s", exc)
 
             # Phase 2 (Evaluate & Update): score the batch (narrative + visual composition, via
             # preview frames extracted from the just-rendered clips) and fold new content/visual/

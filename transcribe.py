@@ -18,6 +18,20 @@ OUTPUT_PATH = TEMP_DIR / "transcription.json"
 MODEL_SIZE = "base"
 
 
+def whisper_cpu_threads() -> int:
+    """Bound each streamer's CPU use; six workers must not each claim every core."""
+    available = os.cpu_count() or 2
+    raw = os.environ.get("WHISPER_CPU_THREADS", "2")
+    try:
+        requested = int(raw)
+        if requested < 1:
+            raise ValueError
+    except ValueError:
+        logger.warning("Invalid WHISPER_CPU_THREADS; using 2")
+        requested = 2
+    return min(available, requested)
+
+
 def transcription_path_for(audio_path: Path) -> Path:
     """Per-video transcript path (e.g. temp/my_video_transcription.json) so re-processing
     the same video can be recognized and skipped instead of re-running Whisper."""
@@ -51,7 +65,7 @@ def transcribe(audio_path: Path, model_size: str = MODEL_SIZE) -> Path:
         logger.info("Transkription bereits vorhanden, überspringe Whisper: %s", output_path)
         return output_path
 
-    cpu_threads = os.cpu_count() or 4
+    cpu_threads = whisper_cpu_threads()
     logger.info("Loading faster-whisper model '%s' on CPU (int8, %d threads)", model_size, cpu_threads)
     model = WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
 

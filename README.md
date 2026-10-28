@@ -51,3 +51,28 @@ Abhängigkeiten gezielt aktualisieren: `uv lock --upgrade`, dann `uv sync --lock
 und Tests ausführen. `av<19` ist absichtlich begrenzt: Faster-Whisper 1.2.1 verwendet einen
 in PyAV 19 entfernten Parameter; siehe [Upstream-Fehler #1589](https://github.com/SYSTRAN/faster-whisper/issues/1589).
 Die Decoder-Integration wird deshalb mit einer echten WAV-Datei ohne Modell-Download getestet.
+
+## Die nächsten zehn Clips prüfen
+
+```powershell
+uv run --locked python clip_quality_audit.py --init --limit 10 --check-after-hours 12
+./start.ps1 audit
+```
+
+Der laufende Autopilot sichert die nächsten zehn neu gerenderten Videos vor Löschung oder
+Upload in `quality_audit/`. Der separate Prüfer bewertet Video **mit Ton** und protokolliert
+je 0–10 für Schnitt, Untertiteltext/Timing, Textposition/Safe-Zone, Bildlayout, Audio,
+Sinn/Hook/Payoff und Viralitätspotenzial. Fehlende Evidenz ergibt „nicht prüfbar“.
+Die Prüfung läuft zusätzlich zum bisherigen Critic und verändert keine Veröffentlichungsfreigaben.
+
+Ergebnisse: `quality_audit/report.md`, pro Clip `assessment.md/json`. Videos, Transkripte,
+Messwerte und Berichte bleiben privat und außerhalb von Git. Der erste Check nach zwölf Stunden
+wird unter `quality_audit/checkpoint_12h.md/json` gesichert. Er enthält nur tatsächlich gemessene
+Performance; eine Viralitätsprognose ist keine Garantie und ersetzt keine Watchtime-/Retention-Daten.
+Weniger als zehn neue Clips werden ausdrücklich als unvollständige Stichprobe ausgewiesen.
+Eine vorhandene Kampagne wird durch erneutes `--init` nicht zurückgesetzt.
+
+Die Windows-Prozesse und ein lokaler Codex-Check benötigen einen eingeschalteten PC.
+Für PC-unabhängigen Betrieb muss die Pipeline samt Prüfer auf einem erreichbaren Server
+laufen. Dafür liegt `deploy/auto-clipping-quality-audit.service` bereit; Einrichtung siehe
+[SETUP_SERVER.md](SETUP_SERVER.md). Ein Git-Push allein aktualisiert keine laufenden Serverprozesse.

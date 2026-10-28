@@ -6,12 +6,14 @@ import logging
 import random
 import re
 import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
 import cv2
+from filelock import FileLock
 
 import atomic_io
 import optimization_engine
@@ -299,8 +301,14 @@ def build_ass_for_clip(
             f"Dialogue: 0,{format_ass_timestamp(0)},{format_ass_timestamp(clip_duration)},TitleBox,,0,0,0,,{title_tag}{title_text}"
         )
 
-    ass_path = TEMP_DIR / f"clip_{index}.ass"
-    with open(ass_path, "w", encoding="utf-8") as f:
+    # Concurrent streamer processes reuse clip indices. A unique file per invocation
+    # prevents one render from burning another streamer's captions/title into its video.
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", prefix=f"clip_{index}_", suffix=".ass",
+        dir=TEMP_DIR, delete=False,
+    ) as f:
+        ass_path = Path(f.name)
         f.write(ASS_HEADER_TEMPLATE.format(width=output_w, height=output_h))
         if events:
             f.write("\n".join(events))
@@ -1261,11 +1269,17 @@ def process_clips_iter(
         music_path = pick_background_track()
 
         ass_path = build_ass_for_clip(clip, transcript, i, highlight_color, output_w, output_h, effective_layout)
-        output_path = render_clip(
-            video_path, clip, ass_path, i, effective_layout, output_w, output_h, facecam_box, gameplay_box,
-            output_dir=output_dir, music_path=music_path, has_source_audio=has_source_audio,
-            multi_cam_boxes=multi_cam_boxes,
-        )
+        try:
+            # Separate streamer processes share one CPU/iGPU. Serialize final renders
+            # across processes, while acquisition/transcription can continue in parallel.
+            with FileLock(str(TEMP_DIR / "render.lock")):
+                output_path = render_clip(
+                    video_path, clip, ass_path, i, effective_layout, output_w, output_h, facecam_box, gameplay_box,
+                    output_dir=output_dir, music_path=music_path, has_source_audio=has_source_audio,
+                    multi_cam_boxes=multi_cam_boxes,
+                )
+        finally:
+            ass_path.unlink(missing_ok=True)
 
         # Recorded onto the SAME dict object that lives inside clips_data["clips"] (clips is
         # clips_data["clips"] by reference, not a copy) — clips_data is written back to

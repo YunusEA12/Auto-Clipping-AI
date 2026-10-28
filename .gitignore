@@ -51,3 +51,4 @@ selector_audit/
 metrics_scrape_health.json
 .tiktok_browser_profile/
 logs/
+quality_audit/

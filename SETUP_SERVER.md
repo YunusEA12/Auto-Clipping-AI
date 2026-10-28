@@ -1,5 +1,29 @@
 # 24/7-Betrieb auf einem eigenen Server (statt dem eigenen PC)
 
+## Zusätzliche Prüfung der nächsten zehn Clips
+
+Nach Aktualisierung des Server-Checkouts und Installation der Abhängigkeiten kann ein eigener
+Prüfdienst die nächsten zehn neu gerenderten Clips bewerten, auch wenn der PC ausgeschaltet ist:
+
+```bash
+cd /opt/auto-clipping-ai
+git pull --ff-only
+venv/bin/pip install -r requirements.txt
+venv/bin/python clip_quality_audit.py --init --limit 10 --check-after-hours 12
+sudo cp deploy/auto-clipping-quality-audit.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now auto-clipping-quality-audit
+sudo systemctl restart auto-clipping-supervisor
+```
+
+Der Supervisor-Neustart lädt den Capture-Hook; der Prüfdienst verarbeitet gesicherte Kopien.
+Ergebnisse liegen auf dem Server in `quality_audit/report.md` und `checkpoint_12h.md/json`.
+`--init` lässt eine bestehende Kampagne unverändert. Kopiere keinen Windows-Kampagnenzustand
+blind auf Linux: er enthält absolute Snapshot-Pfade. `.env` und lokale Sitzungen bleiben privat.
+Vor einem Wechsel vom PC zum Server die laufenden Instanzen prüfen und die lokale Fleet
+pausieren, damit nicht zwei unabhängige Upload-Ledger dasselbe Konto parallel bespielen.
+Die Existenz dieser Anleitung oder Unit bestätigt keine erfolgreiche Serverinstallation.
+
 Diese Anleitung verlagert `process_supervisor.py` (also `orchestrator.py` +
 `metrics_tracker.py` + alle `auto_pilot.py`-Subprozesse) und das Streamlit-Dashboard
 (`app.py`) von deinem Windows-PC auf einen dauerhaft laufenden Linux-VPS. Ziel: der PC kann

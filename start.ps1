@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('dashboard', 'supervisor', 'check', 'test')]
+    [ValidateSet('dashboard', 'supervisor', 'check', 'test', 'audit')]
     [string]$Mode = 'dashboard'
 )
 
@@ -16,6 +16,7 @@ try {
         'supervisor' { & uv run --locked python health_check.py; if ($LASTEXITCODE -eq 0) { & uv run --locked python process_supervisor.py } }
         'check' { & uv run --locked python health_check.py }
         'test' { & uv run --locked pytest -q }
+        'audit' { & uv run --locked python clip_quality_audit.py --watch }
     }
     exit $LASTEXITCODE
 } finally {
