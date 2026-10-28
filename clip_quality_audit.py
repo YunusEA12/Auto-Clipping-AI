@@ -416,6 +416,18 @@ def write_checkpoint() -> dict:
             review = f'[Bewertung]({relative})' if row.get('assessment') else (row.get('error') or 'ausstehend')
             performance = json.dumps(row['performance'], ensure_ascii=False).replace('|', '/')
             lines.append(f"| {title} | {row['status']} | {review} | {performance} |")
+        lines.extend(['', '## Qualitätsvergleich (KI-Urteile, jeweils /10)', '',
+                      '| Clip | Schnitt | Text/Timing | Textposition | Bild | Audio | Sinn/Hook | Potenzial |',
+                      '|---|---|---|---|---|---|---|---|'])
+        for row in rows:
+            categories = row.get('assessment', {}).get('verdict', {}).get('categories', {})
+            values = [str(categories.get(key, {}).get('score'))
+                      if categories.get(key, {}).get('score') is not None else 'offen/nicht prüfbar'
+                      for key in CATEGORIES]
+            title = str(row['title']).replace('|', '/').replace('\n', ' ')
+            lines.append('| ' + ' | '.join([title, *values]) + ' |')
+        if (AUDIT_ROOT / 'manual_review.md').is_file():
+            lines.extend(['', '[Zusätzliche Sichtprüfung und Einordnung der KI-Urteile](manual_review.md)', ''])
         atomic_io.atomic_write_text(AUDIT_ROOT / 'report.md', '\n'.join(lines) + '\n')
         # Preserve the actual first due checkpoint instead of rewriting its history later.
         if report['checkpoint_due'] and not (AUDIT_ROOT / 'checkpoint_12h.json').exists():
