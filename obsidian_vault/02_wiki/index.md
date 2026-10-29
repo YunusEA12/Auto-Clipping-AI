@@ -18,6 +18,8 @@ Startseite der vernetzten Projekt-Dokumentation. Diese Seite verlinkt die zentra
 
 ## Architektur-Entscheidungen
 
+- [[Serverbetrieb]] — produktiver Linux-Betrieb, Übernahme der Clip-Prüfung und klare Trennung vom PC.
+
 - [[Clip-Qualitaetsaudit]] — nächste zehn Clips, sieben Qualitätskategorien und Zwölf-Stunden-Check.
 
 - [[Wiederinbetriebnahme]] — Diagnose, aktuelle Abhängigkeiten und reproduzierbarer Windows-Start (28.10.2026).
