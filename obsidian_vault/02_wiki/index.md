@@ -18,6 +18,8 @@ Startseite der vernetzten Projekt-Dokumentation. Diese Seite verlinkt die zentra
 
 ## Architektur-Entscheidungen
 
+- [[Serverbetrieb]] — produktiver Linux-Betrieb, Übernahme der Clip-Prüfung und klare Trennung vom PC.
+
 - [[Clip-Qualitaetsaudit]] — nächste zehn Clips, sieben Qualitätskategorien und Zwölf-Stunden-Check.
 
 - [[Projekt-Bewertung]] — kritische Bewertung in 17 Bereichen (1–100) mit Top-10-Maßnahmen (29.10.2026).
