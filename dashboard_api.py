@@ -54,6 +54,17 @@ def tiktok_upload_summary() -> dict:
         return {status: None for status in ('done', 'pending', 'failed')}
 
 
+def load_quality_audit_report(root: Optional[Path] = None) -> Optional[dict]:
+    root = root or Path('quality_audit')
+    try:
+        report = json.loads((root / 'report.json').read_text(encoding='utf-8'))
+        if not isinstance(report, dict) or not isinstance(report.get('clips'), list):
+            return None
+        return report
+    except (OSError, ValueError):
+        return None
+
+
 def list_agent_state_paths(root: Path = None) -> List[Path]:
     """Every agent-state file currently on disk: the legacy shared AGENT_STATE_PATH (a
     manual/standalone auto_pilot.py run with no --streamer-name) plus one

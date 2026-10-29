@@ -357,10 +357,33 @@ with st.sidebar:
             st.caption(f"Kontext: {selected_profile['context_prompt']}")
 
 
-tab_radar, tab_fleet, tab_brain, tab_analytics, tab_archive, tab_manual = st.tabs(
+tab_radar, tab_fleet, tab_brain, tab_analytics, tab_archive, tab_manual, tab_quality = st.tabs(
     ["📡 Live Radar & Status", "👥 Streamer Verwaltung & Fleet", "🧠 KI Gehirn (Memory)",
-     "📈 Viral Analytics", "🎞️ Clip Archiv", "🎛️ Manueller Modus"]
+     "📈 Viral Analytics", "🎞️ Clip Archiv", "🎛️ Manueller Modus", "Clip-Prüfung"]
 )
+
+with tab_quality:
+    st.subheader("Bewertung der nächsten zehn Clips")
+    audit_report = dashboard_api.load_quality_audit_report()
+    if audit_report is None:
+        st.info("Noch kein Qualitätsbericht auf diesem Rechner vorhanden.")
+    else:
+        st.write(f"Bewertet: {audit_report.get('completed', 0)} von {audit_report.get('target', 10)} Clips")
+        st.caption("KI-Einschätzungen sind keine Erfolgsgarantie. Nicht prüfbare Kategorien bleiben leer. Echte Aufrufe werden getrennt erfasst.")
+        audit_rows = []
+        for item in audit_report['clips']:
+            verdict = item.get('assessment', {}).get('verdict', {})
+            row = {'Clip': item.get('title'), 'Status': item.get('status')}
+            row.update({key: value.get('score') for key, value in verdict.get('categories', {}).items()})
+            row['Hinweise des Prüfers'] = '; '.join(verdict.get('critical_issues', []))
+            performance = item.get('performance', {})
+            row['TikTok-Aufrufe (gemessen)'] = performance.get('tiktok_views', performance.get('views'))
+            audit_rows.append(row)
+        st.dataframe(audit_rows, hide_index=True)
+        st.download_button('Vollständigen Bericht herunterladen (JSON)',
+                           json.dumps(audit_report, ensure_ascii=False, indent=2),
+                           file_name='clip-pruefung.json', mime='application/json', key='download_quality_audit')
+        st.caption(f"Zwölf-Stunden-Check (UTC): {audit_report.get('check_at', '–')}")
 
 # --- Tab 1: Live Radar & Status ------------------------------------------------------------
 
