@@ -61,3 +61,17 @@ def test_first_rating_is_final(tmp_path, fake_reviewers):
     again = council.reveal(job["job_id"], "zweite", 5, jobs_dir=tmp_path)
     assert again["rating"] == "erste" and again["contribution"] == 2
     assert "2 berechtigte neue Punkte" in council.status(jobs_dir=tmp_path)
+
+
+def test_auto_never_selects_paid_gpt_without_opt_in(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-value")
+    monkeypatch.delenv("COUNCIL_ALLOW_PAID", raising=False)
+    assert council.select_reviewers("auto") == ["gemini"]
+    with pytest.raises(ValueError):
+        council.select_reviewers("gpt")
+
+
+def test_paid_opt_in_enables_gpt(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-value")
+    monkeypatch.setenv("COUNCIL_ALLOW_PAID", "1")
+    assert council.select_reviewers("auto") == ["gpt", "gemini"]

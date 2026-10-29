@@ -1,17 +1,19 @@
-"""KI-Council for cloud and local sessions: asks GPT (OpenAI API) and Gemini (Gemini API) in
-parallel and returns their reviews as anonymous A/B, so Claude can grade them blind before
-`reveal` shows who wrote which.
+"""KI-Council for cloud and local sessions: asks Gemini (Gemini API) and optionally GPT (OpenAI
+API) in parallel and returns their reviews as anonymous A/B, so Claude can grade them blind
+before `reveal` shows who wrote which.
 
-Works anywhere the two HTTPS APIs are reachable — no Codex login or desktop app required:
-    GEMINI_API_KEY   (already used by the pipeline)   host: generativelanguage.googleapis.com
-    OPENAI_API_KEY                                     host: api.openai.com
+Free by default: only Gemini is called, on the free tier of GEMINI_API_KEY (free as long as the
+key's Google project has no billing enabled). GPT goes through the ChatGPT app instead — `ask`
+writes a ready-to-paste prompt for it. The OpenAI API bills per request, so it is only used when
+COUNCIL_ALLOW_PAID=1 *and* OPENAI_API_KEY are both set; an OpenAI key alone never costs money.
+Hosts: generativelanguage.googleapis.com (and api.openai.com only in paid mode).
 Optional: COUNCIL_GEMINI_MODEL, COUNCIL_OPENAI_MODEL, COUNCIL_BLOCKLIST (comma-separated terms
 that must never leave the machine, e.g. employer/customer names).
 
 Usage (see .claude/skills/council/SKILL.md):
     uv run --locked python scripts/council.py status
     uv run --locked python scripts/council.py ask --mode review --question-file q.md \
-        --context-file ctx.md --own-file own.md [--file analyze.py ...] [--reviewers both]
+        --context-file ctx.md --own-file own.md [--file analyze.py ...] [--reviewers auto]
     uv run --locked python scripts/council.py reveal --job <id> --rating-file rating.md --contribution 2
 """
 
@@ -150,6 +152,31 @@ def ask_gpt(prompt: str) -> str:
 REVIEWERS: Dict[str, Callable[[str], str]] = {"gpt": ask_gpt, "gemini": ask_gemini}
 
 
+def paid_allowed() -> bool:
+    return os.environ.get("COUNCIL_ALLOW_PAID") == "1"
+
+
+def select_reviewers(choice: str) -> List[str]:
+    """`auto` picks only reviewers that cost nothing (plus GPT when paid mode is opted into).
+    Asking for GPT explicitly without that opt-in is refused rather than silently billed."""
+    wants_gpt = choice in ("both", "gpt") or (choice == "auto" and bool(os.environ.get("OPENAI_API_KEY")))
+    if choice in ("both", "gpt") and not paid_allowed():
+        raise ValueError("GPT über die OpenAI-API kostet Geld und ist gesperrt. "
+                         "Kostenlos: ChatGPT-App mit der erzeugten Prompt-Datei. "
+                         "Bewusst bezahlen: COUNCIL_ALLOW_PAID=1 setzen.")
+    reviewers = []
+    if wants_gpt and paid_allowed():
+        reviewers.append("gpt")
+    if choice in ("auto", "both", "gemini"):
+        reviewers.append("gemini")
+    return reviewers
+
+
+def manual_prompt(mode: str, question: str, context: str) -> str:
+    return (f"{SYSTEM_PROMPT}\n\n{build_prompt(mode, question, context)}\n\n"
+            "(Hinweis an den Nutzer: keine Geheimnisse oder Firmendaten ergänzen.)")
+
+
 def _redact(text: str) -> str:
     for name in ("OPENAI_API_KEY", "GEMINI_API_KEY"):
         value = os.environ.get(name)
@@ -205,6 +232,8 @@ def status(jobs_dir: Path = JOBS_DIR) -> str:
     lines = ["Schlüssel:"]
     for name in ("GEMINI_API_KEY", "OPENAI_API_KEY"):
         lines.append(f"  {name}: {'gesetzt' if os.environ.get(name) else 'FEHLT'}")
+    lines.append("Modus: " + ("BEZAHLT erlaubt (OpenAI-API)" if paid_allowed()
+                              else "kostenlos (Gemini-Gratis-Tarif, GPT über ChatGPT-App)"))
     lines.append(f"Modelle: Gemini={os.environ.get('COUNCIL_GEMINI_MODEL', DEFAULT_GEMINI_MODEL)}, "
                  f"GPT={os.environ.get('COUNCIL_OPENAI_MODEL', DEFAULT_OPENAI_MODEL)}")
     jobs = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(jobs_dir.glob("*.json"))] if jobs_dir.exists() else []
@@ -243,7 +272,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ask.add_argument("--context-file")
     ask.add_argument("--file", action="append", default=[], help="Datei als Kontext anhängen (mehrfach)")
     ask.add_argument("--own-file", required=True, help="Eigene Antwort C, bleibt lokal")
-    ask.add_argument("--reviewers", choices=["both", "gpt", "gemini"], default="both")
+    ask.add_argument("--reviewers", choices=["auto", "both", "gpt", "gemini"], default="auto")
     rev = sub.add_parser("reveal")
     rev.add_argument("--job", required=True)
     rev.add_argument("--rating-file", required=True)
@@ -271,13 +300,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     context = _read(args.context_file)
     for f in args.file:
         context += f"\n\n### Datei: {f}\n```\n{Path(f).read_text(encoding='utf-8')}\n```"
-    reviewers = ["gpt", "gemini"] if args.reviewers == "both" else [args.reviewers]
     try:
+        reviewers = select_reviewers(args.reviewers)
         job = run_job(args.mode, question, context, _read(args.own_file), reviewers)
     except (SensitiveContentError, ValueError) as e:
         print(f"BLOCKIERT: {e}", file=sys.stderr)
         return 2
     print(f"Job-ID: {job['job_id']}")
+    if "gpt" not in reviewers:
+        # run_job already passed this exact text through the secret/blocklist guard.
+        prompt_path = JOBS_DIR / f"{job['job_id']}-chatgpt-prompt.md"
+        prompt_path.write_text(manual_prompt(args.mode, question, context), encoding="utf-8")
+        print(f"Kostenloses GPT-Gutachten: Inhalt von {prompt_path} in die ChatGPT-App einfügen "
+              "und die Antwort zurück in den Chat kopieren (nicht blind, als manuelles Gutachten werten).")
     usable = sum(r["ok"] for r in job["reviews"].values())
     if usable == 0:
         print("Hinweis: kein Gutachten verfügbar – Ursache mit `status` prüfen.")

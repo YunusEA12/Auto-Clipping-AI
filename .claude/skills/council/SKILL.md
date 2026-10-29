@@ -5,24 +5,35 @@ description: KI-Council aus Claude, GPT und Gemini, der auch in Cloud-Sitzungen 
 
 # Council (Cloud-tauglich)
 
-Claude ist Orchestrator und verantwortet das Ergebnis. GPT (OpenAI API) und Gemini (Gemini API)
+Claude ist Orchestrator und verantwortet das Ergebnis. Gemini (Gratis-API) und GPT (ChatGPT-App, manuell)
 sind unabhängige Gutachter. Ziel: mehr Fehler finden, blinde Flecken aufdecken, Behauptungen belegen.
 Gibt es die MCP-Werkzeuge `council`/`council_reveal` (lokaler Council-Server), nimm diese und den
 Skill `ki-council`. Sonst nutzt du dieses Skript, das überall läuft, wo die APIs erreichbar sind.
 
+## Kosten: standardmäßig kostenlos
+
+- **Gemini** läuft über den Gratis-Tarif von `GEMINI_API_KEY`. Kostenlos, solange im zugehörigen
+  Google-Projekt keine Abrechnung aktiviert ist. Kontingent pro Modell und Tag; der Council nutzt
+  `gemini-3.5-flash`, die Pipeline primär `gemini-3.5-flash-lite`.
+- **GPT** kostet über die OpenAI-API Geld und ist deshalb gesperrt. Stattdessen schreibt `ask` eine
+  fertige Prompt-Datei für die **ChatGPT-App** (kostenlos bzw. im vorhandenen Abo). Pfad dem Nutzer
+  nennen, Antwort zurückkopieren lassen und als *manuelles, nicht blindes* Gutachten werten.
+- Bezahlte GPT-Aufrufe nur, wenn der Nutzer ausdrücklich zustimmt und `COUNCIL_ALLOW_PAID=1`
+  sowie `OPENAI_API_KEY` gesetzt sind. Nie von dir aus aktivieren.
+
 ## Voraussetzungen
 
-- `GEMINI_API_KEY` und `OPENAI_API_KEY` als Umgebungsvariablen (Cloud: Umgebungseinstellungen;
-  lokal: `.env`). Nie nach Schlüsseln im Chat fragen.
-- Netzwerk: `generativelanguage.googleapis.com` und `api.openai.com` erlaubt.
-- Optional `COUNCIL_GEMINI_MODEL`, `COUNCIL_OPENAI_MODEL`, `COUNCIL_BLOCKLIST`.
+- `GEMINI_API_KEY` als Umgebungsvariable (Cloud: Umgebungseinstellungen; lokal: `.env`).
+  Nie nach Schlüsseln im Chat fragen.
+- Netzwerk: `generativelanguage.googleapis.com` erreichbar.
+- Optional `COUNCIL_GEMINI_MODEL`, `COUNCIL_BLOCKLIST`.
 - Zuerst `uv run --locked python scripts/council.py status`. Fehlt etwas, sag dem Nutzer genau
-  was, und arbeite mit dem verfügbaren Gutachter weiter („nur ein Gutachter“).
+  was. Mit nur Gemini klar sagen: „ein API-Gutachter, GPT folgt manuell über die ChatGPT-App“.
 
 ## Ablauf
 
-1. **Stufe wählen:** Triviales allein; mittlere Tragweite ein Gutachter (`--reviewers gpt` für
-   Code, `gemini` für Text); voller Council bei hoher Tragweite oder ausdrücklichem Wunsch.
+1. **Stufe wählen:** Triviales allein; mittlere Tragweite nur Gemini; voller Council (Gemini +
+   ChatGPT-App-Prompt) bei hoher Tragweite oder ausdrücklichem Wunsch.
 2. **Erst selbst denken:** Eigene vollständige Antwort C (bzw. bei Reviews eigene Fehlerliste)
    in eine Datei im Scratchpad schreiben, *bevor* du fragst. Frage und Kontext neutral
    formulieren, ohne deine Lösung (Ausnahme `review`: das Ergebnis ist Prüfgegenstand).
@@ -33,7 +44,7 @@ Skill `ki-council`. Sonst nutzt du dieses Skript, das überall läuft, wo die AP
    ```bash
    uv run --locked python scripts/council.py ask --mode review \
      --question-file <scratch>/q.md --context-file <scratch>/ctx.md \
-     --file pfad/zur/datei.py --own-file <scratch>/own.md --reviewers both
+     --file pfad/zur/datei.py --own-file <scratch>/own.md
    ```
    `--mode`: `answer` (eigene Lösung), `review` (strenge Kritik), `vote` (Empfehlung + Konfidenz).
    Läuft bis zu 5 Minuten; Bash-Timeout entsprechend setzen.
