@@ -138,7 +138,7 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 | Kriterium | Punkte | Befund |
 |---|---:|---|
 | Pipeline-Trennung | 65 | Phasen klar (Supervisor → Autopilot → Render → Upload) |
-| Paketstruktur | 30 | 28 Python-Dateien flach im Root, kein Paket |
+| Paketstruktur | 30 | 32 Python-Dateien flach im Root, kein Paket |
 | Dateigrößen | 40 | `process.py` 1.334, `auto_pilot.py` 1.094, `app.py` 1.039 Zeilen |
 | Zustandshaltung | 40 | ~25 JSON-State-Dateien + Locks statt einer Datenbank |
 | Konfiguration | 50 | Pfade und Modellnamen als Modul-Konstanten |
