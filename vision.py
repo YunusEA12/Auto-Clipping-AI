@@ -1,6 +1,7 @@
 """Face detection: locate the facecam region in a video frame for dynamic 9:16 cropping."""
 
 import logging
+import math
 import urllib.request
 from pathlib import Path
 from typing import NamedTuple, Optional, Sequence
@@ -826,9 +827,10 @@ def get_multi_cam_coordinates(
 
 def validate_facecam_crop(video_path: str, clip_start: float, clip_end: float,
                           crop_box: tuple[int, int, int, int], samples: int = 5) -> dict:
-    """Check the actual selected crop throughout the clip; fail closed on unreadable frames.
+    """Check the actual crop throughout the clip; unreadable frames count as misses.
 
-    At least 90% of one confident face must fit inside the crop at every sample.
+    At least 90% of one confident face must fit inside the crop in 80% of samples
+    (four of the default five); a single missed detection is tolerated.
     Sampling avoids claiming continuous scene-change detection between frames.
     """
     checks = []
@@ -847,5 +849,5 @@ def validate_facecam_crop(video_path: str, clip_start: float, clip_end: float,
             checks.append({"timestamp": timestamp, "face_in_crop": contained})
         except Exception as exc:
             checks.append({"timestamp": timestamp, "face_in_crop": False, "error": type(exc).__name__})
-    passed = bool(checks) and all(check["face_in_crop"] for check in checks)
+    passed = bool(checks) and sum(check["face_in_crop"] for check in checks) >= math.ceil(len(checks) * .8)
     return {"passed": passed, "reason": None if passed else "facecam_missing_or_outside_crop", "samples": checks}

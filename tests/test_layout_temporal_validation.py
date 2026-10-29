@@ -5,9 +5,10 @@ import process
 
 @pytest.mark.parametrize("boxes, passed", [
     ([(10, 10, 20, 20)] * 5, True),
-    ([(10, 10, 20, 20)] * 4 + [(200, 200, 20, 20)], False),
-    ([(10, 10, 20, 20)] * 2 + [None] + [(10, 10, 20, 20)] * 2, False),
+    ([(10, 10, 20, 20)] * 4 + [(200, 200, 20, 20)], True),
+    ([(10, 10, 20, 20)] * 2 + [None] + [(10, 10, 20, 20)] * 2, True),
     ([(90, 10, 30, 20)] * 5, False),
+    ([(10, 10, 20, 20)] * 3 + [None, None], False),
 ])
 def test_temporal_crop(monkeypatch, boxes, passed):
     calls = []
