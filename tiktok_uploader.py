@@ -47,6 +47,7 @@ import argparse
 import json
 import logging
 import random
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, NamedTuple, Optional, Tuple
@@ -346,7 +347,9 @@ def _confirm_publish_despite_pending_review(page) -> bool:
     the click), so a short timeout with no match is the expected common case, not an error.
     Returns whether the dialog was found and confirmed."""
     try:
-        confirm_button = page.get_by_role("button", name="Jetzt veröffentlichen")
+        confirm_button = page.get_by_role(
+            "button", name=re.compile(r"^(?:Jetzt veröffentlichen|Post now)$", re.IGNORECASE),
+        )
         confirm_button.click(timeout=PENDING_REVIEW_CONFIRM_TIMEOUT_MS)
         logger.info(
             "Content review hadn't finished yet — confirmed 'Jetzt veröffentlichen' to "
@@ -494,7 +497,7 @@ def _wait_for_post_confirmation(page) -> bool:
     # this from a generic failure matters: it's not a selector/logic bug to go fix, it's an
     # external rate limit that resets the next day.
     try:
-        quota_exhausted = page.get_by_text("check limit for today").count() > 0
+        quota_exhausted = page.get_by_text("check limit for today").first.is_visible()
     except Exception:
         quota_exhausted = False
 
@@ -503,8 +506,7 @@ def _wait_for_post_confirmation(page) -> bool:
             "Could not confirm the post succeeded — TikTok's own \"Content check lite\" "
             "daily quota is exhausted for this account (visible on the upload page itself: "
             "\"You've reached your check limit for today\"). This is not a bug on our side; "
-            "TikTok is silently declining to publish until the quota resets. Uploads will "
-            "keep failing this way until then."
+            "The post remains unconfirmed; this message alone does not prove why publishing failed."
         )
     else:
         logger.warning(
@@ -880,6 +882,8 @@ def upload_video(
                     _save_post_click_snapshot(page, "post_click_after_wait")
 
                 confirmed = _wait_for_post_confirmation(page)
+                if not confirmed:
+                    _save_post_click_snapshot(page, "post_unconfirmed")
 
                 logger.info(
                     "TikTok upload finished for %s (publish=%s, confirmed=%s)", video_path.name, publish, confirmed,

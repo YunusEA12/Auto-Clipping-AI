@@ -356,7 +356,7 @@ class FakeConfirmPage:
 
     def get_by_role(self, role, name=None):
         assert role == "button"
-        assert name == "Jetzt veröffentlichen"
+        assert name.fullmatch("Jetzt veröffentlichen")
         return self.confirm_button
 
 

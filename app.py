@@ -366,6 +366,11 @@ tab_radar, tab_fleet, tab_brain, tab_analytics, tab_archive, tab_manual = st.tab
 
 with tab_radar:
     st.subheader("📡 Live Radar & Status")
+    upload_summary = dashboard_api.tiktok_upload_summary()
+    upload_ok, upload_pending = st.columns(2)
+    upload_ok.metric("Bestätigte TikTok-Uploads im Protokoll", upload_summary['done'] if upload_summary['done'] is not None else '–')
+    upload_pending.metric("Upload-Abschluss ungeklärt", upload_summary['pending'] if upload_summary['pending'] is not None else '–')
+    st.caption("Diese protokollierten Upload-Ergebnisse bleiben bei einem Agent-Neustart erhalten. Ungeklärt bedeutet nicht veröffentlicht.")
 
     if not agent_states:
         st.info(
@@ -376,6 +381,7 @@ with tab_radar:
         # One card per running auto_pilot.py instance — with orchestrator.py driving several
         # streamers concurrently, "the agent" is no longer singular (see H-14 in the audit).
         multiple = len(agent_states) > 1
+        publication_settings = {entry['url']: entry for entry in dashboard_api.load_streamers()}
         for state_key, state in agent_states.items():
             age = state_age_seconds(state)
             target_streamer = state.get("target_streamer", "–")
@@ -383,6 +389,7 @@ with tab_radar:
             current_cycle = state.get("current_cycle", 0)
             kept_total = state.get("clips_kept_total", 0)
             purged_total = state.get("clips_purged_total", 0)
+            uploaded_total = state.get("clips_uploaded_total", 0)
 
             if multiple:
                 st.markdown(f"##### 🎯 {target_streamer}")
@@ -394,13 +401,18 @@ with tab_radar:
 
             st.markdown(f"### {current_action}")
 
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric("Zyklus", current_cycle)
             col2.metric("🏆 Clips behalten", kept_total)
             col3.metric("🗑️ Clips gelöscht", purged_total)
             total_scored = kept_total + purged_total
             survival_rate = f"{(kept_total / total_scored * 100):.0f}%" if total_scored else "–"
             col4.metric("Überlebensrate", survival_rate)
+            col5.metric("TikTok bestätigt", uploaded_total)
+            st.caption("Behalten = Qualitätsauswahl bestanden. Erst ein bestätigter Upload zählt als veröffentlicht. Zähler gelten seit Agent-Start.")
+            publication = publication_settings.get(target_streamer)
+            if publication is not None and not (publication.get('auto_upload') and publication.get('publish')):
+                st.info("Nur lokale Clips: Automatisches Veröffentlichen ist für diesen Streamer ausgeschaltet.")
 
             if state.get("purge_threshold") is not None:
                 st.caption(

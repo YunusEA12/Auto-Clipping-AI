@@ -36,6 +36,13 @@ die Metrikerfassung. Das Dashboard allein startet keine Hintergrundverarbeitung.
 Beenden mit Strg+C; Fleet-Pause/Start erfolgt im Dashboard. Automatische Veröffentlichungen
 richten sich nach `auto_upload` und `publish` je Streamer in `streamers.json`.
 
+„Clips behalten“ bedeutet nur, dass der Critic den Clip akzeptiert hat. Der separate
+Radar-Zähler „TikTok bestätigt“ zählt bestätigte Veröffentlichungen seit Agent-Start.
+Für lokale Verarbeitung erscheint ein eigener Hinweis. In der Streamer-Verwaltung müssen
+für echte Posts sowohl Auto-Upload als auch Veröffentlichen eingeschaltet sein; laufende
+Agenten laden geänderte Startoptionen erst beim Neustart. Nicht bestätigte Post-Klicks
+bleiben lokal und werden niemals als erfolgreiche Veröffentlichung gezählt.
+
 Die Startdatei verwendet immer `uv.lock` und `.venv`, unabhängig von einer eventuell noch
 vorhandenen alten `venv`. Keine manuelle Aktivierung erforderlich. Alternativ direkt:
 `uv run --locked python process_supervisor.py` bzw.

@@ -17,6 +17,7 @@ below, not functions to wrap.
 """
 
 import subprocess
+import json
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -40,6 +41,17 @@ AGENT_STATE_PATH = auto_pilot.AGENT_STATE_PATH
 AI_GUIDELINES_PATH = analyze.AI_GUIDELINES_PATH
 ORCHESTRATOR_STATE_PATH = orchestrator.ORCHESTRATOR_STATE_PATH
 VIRAL_MEMORY_PATH = train_loop.VIRAL_MEMORY_PATH
+
+
+def tiktok_upload_summary() -> dict:
+    """Persisted outcomes survive agent restarts; pending is never a confirmed post."""
+    try:
+        ledger = json.loads(upload_ledger.LEDGER_PATH.read_text(encoding='utf-8'))
+        entries = [row.get('tiktok', {}) for row in ledger.values() if isinstance(row, dict)]
+        return {status: sum(entry.get('status') == status for entry in entries)
+                for status in ('done', 'pending', 'failed')}
+    except (OSError, ValueError, AttributeError):
+        return {status: None for status in ('done', 'pending', 'failed')}
 
 
 def list_agent_state_paths(root: Path = None) -> List[Path]:
