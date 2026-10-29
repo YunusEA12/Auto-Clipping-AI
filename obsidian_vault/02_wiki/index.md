@@ -20,6 +20,8 @@ Startseite der vernetzten Projekt-Dokumentation. Diese Seite verlinkt die zentra
 
 - [[Clip-Qualitaetsaudit]] — nächste zehn Clips, sieben Qualitätskategorien und Zwölf-Stunden-Check.
 
+- [[Projekt-Bewertung]] — kritische Bewertung in 18 Bereichen (1–100) mit Top-10-Maßnahmen (29.10.2026).
+
 - [[Wiederinbetriebnahme]] — Diagnose, aktuelle Abhängigkeiten und reproduzierbarer Windows-Start (28.10.2026).
 
 Wichtige Architektur-Entscheidungen werden hier automatisch als eigene Markdown-Seiten abgelegt (siehe `claude.md` — Abschnitt "Fable-Orchestrator-Regeln").
