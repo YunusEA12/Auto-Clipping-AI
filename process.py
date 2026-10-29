@@ -18,6 +18,7 @@ from filelock import FileLock
 import auto_qc
 import atomic_io
 import optimization_engine
+import text_placement
 import streamers
 import vision
 
@@ -202,7 +203,7 @@ def _escape_ass_text(text: str) -> str:
     return text.replace("{", "").replace("}", "")
 
 
-def _fallback_segment_event(seg: dict, clip_start: float, clip_end: float, position_tag: str) -> Optional[str]:
+def _fallback_segment_event(seg: dict, clip_start: float, clip_end: float, position_tag: str, margin_r: int = 0) -> Optional[str]:
     """Whole-segment subtitle line used when word-level timestamps are unavailable."""
     rel_start = max(seg["start"], clip_start) - clip_start
     rel_end = min(seg["end"], clip_end) - clip_start
@@ -213,10 +214,10 @@ def _fallback_segment_event(seg: dict, clip_start: float, clip_end: float, posit
     if not text:
         return None
 
-    return f"Dialogue: 0,{format_ass_timestamp(rel_start)},{format_ass_timestamp(rel_end)},Default,,0,0,0,,{position_tag}{text}"
+    return f"Dialogue: 0,{format_ass_timestamp(rel_start)},{format_ass_timestamp(rel_end)},Default,,0,{margin_r},0,,{position_tag}{text}"
 
 
-def _word_block_events(words: list, clip_start: float, clip_end: float, position_tag: str, highlight_color: str) -> List[str]:
+def _word_block_events(words: list, clip_start: float, clip_end: float, position_tag: str, highlight_color: str, margin_r: int = 0) -> List[str]:
     """Karaoke-style word-by-word highlighting: one Dialogue line per word, timed to that word."""
     events = []
     for block_start in range(0, len(words), WORDS_PER_BLOCK):
@@ -241,7 +242,7 @@ def _word_block_events(words: list, clip_start: float, clip_end: float, position
             line_text = " ".join(rendered)
 
             events.append(
-                f"Dialogue: 0,{format_ass_timestamp(rel_start)},{format_ass_timestamp(rel_end)},Default,,0,0,0,,{position_tag}{line_text}"
+                f"Dialogue: 0,{format_ass_timestamp(rel_start)},{format_ass_timestamp(rel_end)},Default,,0,{margin_r},0,,{position_tag}{line_text}"
             )
 
     return events
@@ -255,14 +256,28 @@ def build_ass_for_clip(
     output_w: int = 1080,
     output_h: int = 1920,
     layout: str = LAYOUT_SPLIT_SCREEN,
+    facecam_box: Optional[Tuple[int, int, int, int]] = None,
+    multi_cam_boxes: Optional[list] = None,
 ) -> Path:
     clip_start = clip["start_time"]
     clip_end = clip["end_time"]
     segments = transcript.get("segments", [])
 
-    # Lower third, where TikTok viewers expect captions (e.g. y=1350-1400 at 1080x1920).
-    pos_x = output_w // 2
-    pos_y = int(output_h * SUBTITLE_Y_RATIO)
+    # Lower third, where TikTok viewers expect captions (e.g. y=1350-1400 at 1080x1920),
+    # nudged clear of the face(s) this layout puts on the canvas and of TikTok's right-hand
+    # button column (see text_placement.py). Without face boxes the legacy ratios apply.
+    rects = text_placement.face_rects(
+        layout, output_w, output_h, facecam_box, multi_cam_boxes, face_zone_ratio=SPLIT_SCREEN_FACE_RATIO,
+    )
+    title_y_ratio = SPLIT_SCREEN_TITLE_Y_RATIO if layout == LAYOUT_SPLIT_SCREEN else TITLE_BOX_Y_RATIO
+    placement = text_placement.compute_text_placement(
+        layout, output_w, output_h, clip.get("title") or "", SUBTITLE_Y_RATIO, title_y_ratio,
+        rects, face_zone_ratio=SPLIT_SCREEN_FACE_RATIO,
+    )
+    column = text_placement.subtitle_column(output_w)
+    pos_x = column["x"]
+    pos_y = placement["subtitle_y"]
+    margin_r = column["margin_r"]
     position_tag = f"{{\\an5\\pos({pos_x},{pos_y})}}"
 
     events = []
@@ -272,12 +287,12 @@ def build_ass_for_clip(
 
         words = seg.get("words") or []
         if not words:
-            event = _fallback_segment_event(seg, clip_start, clip_end, position_tag)
+            event = _fallback_segment_event(seg, clip_start, clip_end, position_tag, margin_r)
             if event:
                 events.append(event)
             continue
 
-        events.extend(_word_block_events(words, clip_start, clip_end, position_tag, highlight_color))
+        events.extend(_word_block_events(words, clip_start, clip_end, position_tag, highlight_color, margin_r))
 
     if not events:
         logger.warning(
@@ -295,9 +310,8 @@ def build_ass_for_clip(
         # split_screen uses its own safe top-margin ratio instead of TITLE_BOX_Y_RATIO — see
         # SPLIT_SCREEN_TITLE_Y_RATIO's own docstring for why (must clear the facecam zone
         # entirely, not sit on the seam).
-        title_y_ratio = SPLIT_SCREEN_TITLE_Y_RATIO if layout == LAYOUT_SPLIT_SCREEN else TITLE_BOX_Y_RATIO
-        title_pos_y = int(output_h * title_y_ratio)
-        title_tag = f"{{\\an5\\pos({pos_x},{title_pos_y})}}"
+        title_pos_y = placement["title_y"]
+        title_tag = f"{{\\an5\\pos({output_w // 2},{title_pos_y})}}"
         clip_duration = clip_end - clip_start
         events.append(
             f"Dialogue: 0,{format_ass_timestamp(0)},{format_ass_timestamp(clip_duration)},TitleBox,,0,0,0,,{title_tag}{title_text}"
@@ -1310,7 +1324,14 @@ def process_clips_iter(
         # independent random picks.
         music_path = pick_background_track()
 
-        ass_path = build_ass_for_clip(clip, transcript, i, highlight_color, output_w, output_h, effective_layout)
+        ass_path = build_ass_for_clip(
+            clip, transcript, i, highlight_color, output_w, output_h, effective_layout,
+            facecam_box=facecam_box, multi_cam_boxes=multi_cam_boxes,
+        )
+        qc_face_rects = text_placement.face_rects(
+            effective_layout, output_w, output_h, facecam_box, multi_cam_boxes,
+            face_zone_ratio=SPLIT_SCREEN_FACE_RATIO,
+        )
         try:
             # Separate streamer processes share one CPU/iGPU. Serialize final renders
             # across processes, while acquisition/transcription can continue in parallel.
@@ -1320,7 +1341,7 @@ def process_clips_iter(
                     output_dir=output_dir, music_path=music_path, has_source_audio=has_source_audio,
                     multi_cam_boxes=multi_cam_boxes,
                 )
-            clip["auto_qc"] = auto_qc.check_render(output_path, layout=effective_layout, subtitle_path=ass_path)
+            clip["auto_qc"] = auto_qc.check_render(output_path, layout=effective_layout, subtitle_path=ass_path, face_rects=qc_face_rects)
         finally:
             ass_path.unlink(missing_ok=True)
 
