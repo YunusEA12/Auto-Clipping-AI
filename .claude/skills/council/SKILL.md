@@ -1,39 +1,35 @@
 ---
 name: council
-description: KI-Council aus Claude, GPT und Gemini, der auch in Cloud-Sitzungen läuft. Nutzen bei "/council", "Council", "Gremium", "zweite Meinung", "Kreuzprüfung", "Cross-Review", "Konsens", "lass GPT/Gemini drüberschauen" und bei wichtigen Entscheidungen, Architektur, sicherheitsrelevantem Code oder Projektbewertungen.
+description: Kostenloser KI-Council aus Claude, Gemini und GPT, der auch in Cloud-Sitzungen läuft. Nutzen bei "/council", "Council", "Gremium", "zweite Meinung", "Kreuzprüfung", "Cross-Review", "Konsens", "lass GPT/Gemini drüberschauen" und bei wichtigen Entscheidungen, Architektur, sicherheitsrelevantem Code oder Projektbewertungen.
 ---
 
-# Council (Cloud-tauglich)
+# Council (kostenlos, Cloud-tauglich)
 
-Claude ist Orchestrator und verantwortet das Ergebnis. Gemini (Gratis-API) und GPT (ChatGPT-App, manuell)
-sind unabhängige Gutachter. Ziel: mehr Fehler finden, blinde Flecken aufdecken, Behauptungen belegen.
-Gibt es die MCP-Werkzeuge `council`/`council_reveal` (lokaler Council-Server), nimm diese und den
-Skill `ki-council`. Sonst nutzt du dieses Skript, das überall läuft, wo die APIs erreichbar sind.
+Claude ist Orchestrator und verantwortet das Ergebnis. Gemini und GPT sind unabhängige Gutachter.
+Ziel: mehr Fehler finden, blinde Flecken aufdecken, Behauptungen belegen.
+Gibt es die MCP-Werkzeuge `council`/`council_reveal` (lokaler ki-council-Server), nimm diese und
+den Skill `ki-council`. Sonst nutzt du `scripts/council.py`.
 
-## Kosten: standardmäßig kostenlos
+## Kosten: nichts
 
-- **Gemini** läuft über den Gratis-Tarif von `GEMINI_API_KEY`. Kostenlos, solange im zugehörigen
-  Google-Projekt keine Abrechnung aktiviert ist. Kontingent pro Modell und Tag; der Council nutzt
-  `gemini-3.5-flash`, die Pipeline primär `gemini-3.5-flash-lite`.
-- **GPT** kostet über die OpenAI-API Geld und ist deshalb gesperrt. Stattdessen schreibt `ask` eine
-  fertige Prompt-Datei für die **ChatGPT-App** (kostenlos bzw. im vorhandenen Abo). Pfad dem Nutzer
-  nennen, Antwort zurückkopieren lassen und als *manuelles, nicht blindes* Gutachten werten.
-- Bezahlte GPT-Aufrufe nur, wenn der Nutzer ausdrücklich zustimmt und `COUNCIL_ALLOW_PAID=1`
-  sowie `OPENAI_API_KEY` gesetzt sind. Nie von dir aus aktivieren.
+- **Gemini** automatisch über den Gratis-Tarif von `GEMINI_API_KEY` (kostenlos, solange im
+  Google-Projekt des Schlüssels keine Abrechnung aktiviert ist; Tageskontingent pro Modell).
+- **GPT** über die **ChatGPT-App**: `ask` schreibt eine fertige Prompt-Datei. Inhalt dem Nutzer in
+  einem Codeblock zum Kopieren geben, Antwort zurückkopieren lassen.
+- Es gibt bewusst keinen Weg über kostenpflichtige APIs. Nie einen einbauen oder vorschlagen,
+  ohne dass der Nutzer ausdrücklich Kosten akzeptiert.
 
 ## Voraussetzungen
 
 - `GEMINI_API_KEY` als Umgebungsvariable (Cloud: Umgebungseinstellungen; lokal: `.env`).
   Nie nach Schlüsseln im Chat fragen.
-- Netzwerk: `generativelanguage.googleapis.com` erreichbar.
-- Optional `COUNCIL_GEMINI_MODEL`, `COUNCIL_BLOCKLIST`.
-- Zuerst `uv run --locked python scripts/council.py status`. Fehlt etwas, sag dem Nutzer genau
-  was. Mit nur Gemini klar sagen: „ein API-Gutachter, GPT folgt manuell über die ChatGPT-App“.
+- Zuerst `uv run --locked python scripts/council.py status`. Fehlt der Schlüssel oder fällt Gemini
+  aus, klar sagen und mit dem ChatGPT-Gutachten allein weitermachen („kein voller Council“).
 
 ## Ablauf
 
 1. **Stufe wählen:** Triviales allein; mittlere Tragweite nur Gemini; voller Council (Gemini +
-   ChatGPT-App-Prompt) bei hoher Tragweite oder ausdrücklichem Wunsch.
+   ChatGPT-App) bei hoher Tragweite oder ausdrücklichem Wunsch.
 2. **Erst selbst denken:** Eigene vollständige Antwort C (bzw. bei Reviews eigene Fehlerliste)
    in eine Datei im Scratchpad schreiben, *bevor* du fragst. Frage und Kontext neutral
    formulieren, ohne deine Lösung (Ausnahme `review`: das Ergebnis ist Prüfgegenstand).
@@ -47,16 +43,15 @@ Skill `ki-council`. Sonst nutzt du dieses Skript, das überall läuft, wo die AP
      --file pfad/zur/datei.py --own-file <scratch>/own.md
    ```
    `--mode`: `answer` (eigene Lösung), `review` (strenge Kritik), `vote` (Empfehlung + Konfidenz).
-   Läuft bis zu 5 Minuten; Bash-Timeout entsprechend setzen.
-5. **Blind bewerten:** Tabelle für A, B und C (je 1–5): Korrektheit · Vollständigkeit · Belege ·
-   Umsetzbarkeit · Risiken erkannt. Gleicher Maßstab für C. Stärksten Punkt nennen, an dem A oder
-   B besser war als C. Selbstauskünfte zur Herkunft ignorieren.
-6. **Aufdecken:** Bewertung in Datei schreiben, dann
-   `uv run --locked python scripts/council.py reveal --job <id> --rating-file <scratch>/rating.md --contribution <n>`
-   (`n` = berechtigte Punkte aus A/B, die in C fehlten; 0 ist gültig). Die erste Bewertung ist endgültig.
+   Danach den ChatGPT-Prompt (Pfad steht in der Ausgabe) an den Nutzer geben und auf die Antwort warten.
+5. **Bewerten:** Tabelle für Gemini, ChatGPT und C (je 1–5): Korrektheit · Vollständigkeit ·
+   Belege · Umsetzbarkeit · Risiken erkannt. Gleicher Maßstab für C. Stärksten Punkt nennen, an
+   dem ein Gutachter besser war als C. (Blind ist das hier nicht – um so strenger mit C sein.)
+6. **Festhalten:** Bewertung in Datei schreiben, dann
+   `uv run --locked python scripts/council.py rate --job <id> --rating-file <scratch>/rating.md --contribution <n>`
+   (`n` = berechtigte Punkte aus den Gutachten, die in C fehlten; 0 ist gültig). Die erste Bewertung ist endgültig.
 7. **Belegen statt zählen:** Die 3–7 tragenden Aussagen selbst prüfen (Tests ausführen, Code lesen,
-   Primärquellen). Übereinstimmung ist kein Beweis. Höchstens eine gezielte Rückfrage-Runde
-   (`ask --reviewers <einer>` mit der strittigen Aussage und dem Gegenargument).
+   Primärquellen). Übereinstimmung ist kein Beweis. Höchstens eine gezielte Rückfrage-Runde.
 
 ## Ausgabe an den Nutzer
 
@@ -64,5 +59,4 @@ Skill `ki-council`. Sonst nutzt du dieses Skript, das überall läuft, wo die AP
 - **Geprüfte Kernaussagen:** belegt / widerlegt / offen, und wie geprüft.
 - **Wo die Modelle abweichen** und wie entschieden wurde (Minderheitsmeinungen nennen).
 - **Offene Unsicherheiten.**
-- **Beitrag der Gutachter:** passend zur Zahl in `--contribution`; ehrlich sagen, wenn nichts Neues kam.
-- Fiel ein Gutachter aus: klar „nur ein Gutachter, kein voller Council“ sagen.
+- **Beitrag der Gutachter:** passend zu `--contribution`; ehrlich sagen, wenn nichts Neues kam.

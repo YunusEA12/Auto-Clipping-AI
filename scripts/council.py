@@ -1,41 +1,32 @@
-"""KI-Council for cloud and local sessions: asks Gemini (Gemini API) and optionally GPT (OpenAI
-API) in parallel and returns their reviews as anonymous A/B, so Claude can grade them blind
-before `reveal` shows who wrote which.
+"""Free KI-Council for cloud and local sessions: Gemini reviews automatically over the free tier
+of the Gemini API, and GPT reviews through the ChatGPT app with a ready-to-paste prompt that `ask`
+writes. Nothing here calls a paid API.
 
-Free by default: only Gemini is called, on the free tier of GEMINI_API_KEY (free as long as the
-key's Google project has no billing enabled). GPT goes through the ChatGPT app instead — `ask`
-writes a ready-to-paste prompt for it. The OpenAI API bills per request, so it is only used when
-COUNCIL_ALLOW_PAID=1 *and* OPENAI_API_KEY are both set; an OpenAI key alone never costs money.
-Hosts: generativelanguage.googleapis.com (and api.openai.com only in paid mode).
-Optional: COUNCIL_GEMINI_MODEL, COUNCIL_OPENAI_MODEL, COUNCIL_BLOCKLIST (comma-separated terms
-that must never leave the machine, e.g. employer/customer names).
+Gemini is free as long as GEMINI_API_KEY belongs to a Google project without billing enabled.
+Host: generativelanguage.googleapis.com.
+Optional: COUNCIL_GEMINI_MODEL, COUNCIL_BLOCKLIST (comma-separated terms that must never leave
+the machine, e.g. employer/customer names; also read from .council/blocklist.txt).
 
 Usage (see .claude/skills/council/SKILL.md):
     uv run --locked python scripts/council.py status
     uv run --locked python scripts/council.py ask --mode review --question-file q.md \
-        --context-file ctx.md --own-file own.md [--file analyze.py ...] [--reviewers auto]
-    uv run --locked python scripts/council.py reveal --job <id> --rating-file rating.md --contribution 2
+        --context-file ctx.md --own-file own.md [--file analyze.py ...]
+    uv run --locked python scripts/council.py rate --job <id> --rating-file rating.md --contribution 2
 """
 
 import argparse
 import json
 import os
-import random
 import re
 import secrets
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
-
-import requests
+from typing import List, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 JOBS_DIR = ROOT / ".council"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
-DEFAULT_OPENAI_MODEL = "gpt-5"
-TIMEOUT_SECONDS = 300
 MAX_CONTEXT_CHARS = 400_000
 
 SECRET_PATTERNS = [
@@ -68,7 +59,7 @@ SYSTEM_PROMPT = (
     "Du bist ein unabhängiger, strenger Gutachter in einem Gremium. Antworte auf Deutsch. "
     "Trenne klar zwischen Belegtem (mit Fundstelle im Kontext) und Vermutetem. "
     "Dein Wissen kann veraltet sein: kennzeichne zeitabhängige Fakten (Preise, Versionen, "
-    "Plattformregeln) als 'aktuell prüfen'. Nenne nicht, welches Modell du bist."
+    "Plattformregeln) als 'aktuell prüfen'."
 )
 
 
@@ -89,9 +80,9 @@ def check_sensitive(text: str, blocklist: List[str]) -> None:
                 f"Begriff von der Sperrliste gefunden: {term!r}. Inhalt weglassen oder Nutzer fragen.")
 
 
-def load_blocklist() -> List[str]:
+def load_blocklist(jobs_dir: Path = JOBS_DIR) -> List[str]:
     terms = [t.strip() for t in os.environ.get("COUNCIL_BLOCKLIST", "").split(",")]
-    path = JOBS_DIR / "blocklist.txt"
+    path = jobs_dir / "blocklist.txt"
     if path.exists():
         terms += [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
     return [t for t in terms if t and not t.startswith("#")]
@@ -102,6 +93,10 @@ def build_prompt(mode: str, question: str, context: str) -> str:
     if context.strip():
         parts.append(f"## Kontext\n{context.strip()}")
     return "\n\n".join(parts)
+
+
+def chatgpt_prompt(prompt: str) -> str:
+    return f"{SYSTEM_PROMPT}\n\n{prompt}"
 
 
 def ask_gemini(prompt: str) -> str:
@@ -122,134 +117,62 @@ def ask_gemini(prompt: str) -> str:
     return response.text
 
 
-def ask_gpt(prompt: str) -> str:
-    key = os.environ.get("OPENAI_API_KEY")
-    if not key:
-        raise RuntimeError("OPENAI_API_KEY fehlt")
-    resp = requests.post(
-        "https://api.openai.com/v1/responses",
-        headers={"Authorization": f"Bearer {key}"},
-        json={
-            "model": os.environ.get("COUNCIL_OPENAI_MODEL", DEFAULT_OPENAI_MODEL),
-            "instructions": SYSTEM_PROMPT,
-            "input": prompt,
-        },
-        timeout=TIMEOUT_SECONDS,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
-    data = resp.json()
-    texts = [
-        c.get("text", "")
-        for item in data.get("output", []) if item.get("type") == "message"
-        for c in item.get("content", []) if c.get("type") == "output_text"
-    ]
-    if not any(texts):
-        raise RuntimeError("leere Antwort")
-    return "\n".join(texts)
-
-
-REVIEWERS: Dict[str, Callable[[str], str]] = {"gpt": ask_gpt, "gemini": ask_gemini}
-
-
-def paid_allowed() -> bool:
-    return os.environ.get("COUNCIL_ALLOW_PAID") == "1"
-
-
-def select_reviewers(choice: str) -> List[str]:
-    """`auto` picks only reviewers that cost nothing (plus GPT when paid mode is opted into).
-    Asking for GPT explicitly without that opt-in is refused rather than silently billed."""
-    wants_gpt = choice in ("both", "gpt") or (choice == "auto" and bool(os.environ.get("OPENAI_API_KEY")))
-    if choice in ("both", "gpt") and not paid_allowed():
-        raise ValueError("GPT über die OpenAI-API kostet Geld und ist gesperrt. "
-                         "Kostenlos: ChatGPT-App mit der erzeugten Prompt-Datei. "
-                         "Bewusst bezahlen: COUNCIL_ALLOW_PAID=1 setzen.")
-    reviewers = []
-    if wants_gpt and paid_allowed():
-        reviewers.append("gpt")
-    if choice in ("auto", "both", "gemini"):
-        reviewers.append("gemini")
-    return reviewers
-
-
-def manual_prompt(mode: str, question: str, context: str) -> str:
-    return (f"{SYSTEM_PROMPT}\n\n{build_prompt(mode, question, context)}\n\n"
-            "(Hinweis an den Nutzer: keine Geheimnisse oder Firmendaten ergänzen.)")
-
-
 def _redact(text: str) -> str:
-    for name in ("OPENAI_API_KEY", "GEMINI_API_KEY"):
-        value = os.environ.get(name)
-        if value:
-            text = text.replace(value, "<SECRET>")
-    return text
+    value = os.environ.get("GEMINI_API_KEY")
+    return text.replace(value, "<SECRET>") if value else text
 
 
-def run_job(mode: str, question: str, context: str, own_answer: str, reviewers: List[str],
-            jobs_dir: Path = JOBS_DIR, rng: Optional[random.Random] = None) -> dict:
+def run_job(mode: str, question: str, context: str, own_answer: str,
+            jobs_dir: Path = JOBS_DIR, gemini=ask_gemini) -> dict:
     prompt = build_prompt(mode, question, context)
     if len(prompt) > MAX_CONTEXT_CHARS:
         raise ValueError(f"Kontext zu groß ({len(prompt)} Zeichen, max. {MAX_CONTEXT_CHARS}). Auszüge senden.")
-    check_sensitive(prompt, load_blocklist())
+    # Guards both outputs: the Gemini call and the ChatGPT prompt file the user will paste.
+    check_sensitive(prompt, load_blocklist(jobs_dir))
 
-    def call(name: str) -> dict:
-        try:
-            return {"ok": True, "text": REVIEWERS[name](prompt)}
-        except Exception as e:  # any provider failure is reported neutrally, never fatal
-            # The error detail could reveal the provider, so it stays in the job file only.
-            return {"ok": False, "text": "Gutachten nicht verfügbar.",
-                    "error": f"{type(e).__name__}: {_redact(str(e))[:300]}"}
+    try:
+        review = {"ok": True, "text": gemini(prompt)}
+    except Exception as e:  # a provider failure is reported, never fatal
+        review = {"ok": False, "text": "Gemini-Gutachten nicht verfügbar.",
+                  "error": f"{type(e).__name__}: {_redact(str(e))[:300]}"}
 
-    with ThreadPoolExecutor(max_workers=len(reviewers)) as pool:
-        results = dict(zip(reviewers, pool.map(call, reviewers)))
-
-    order = list(reviewers)
-    (rng or random.SystemRandom()).shuffle(order)
-    labels = {chr(ord("A") + i): name for i, name in enumerate(order)}
     job_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    prompt_path = jobs_dir / f"{job_id}-chatgpt-prompt.md"
+    prompt_path.write_text(chatgpt_prompt(prompt), encoding="utf-8")
     job = {
         "job_id": job_id, "created_at": datetime.now(timezone.utc).isoformat(), "mode": mode,
-        "question": question, "own_answer": own_answer, "labels": labels,
-        "reviews": {label: results[name] for label, name in labels.items()},
+        "question": question, "own_answer": own_answer, "gemini": review,
+        "chatgpt_prompt": str(prompt_path),
     }
-    jobs_dir.mkdir(parents=True, exist_ok=True)
     (jobs_dir / f"{job_id}.json").write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
     return job
 
 
-def reveal(job_id: str, rating: str, contribution: int, jobs_dir: Path = JOBS_DIR) -> dict:
+def rate(job_id: str, rating: str, contribution: int, jobs_dir: Path = JOBS_DIR) -> dict:
     path = jobs_dir / f"{job_id}.json"
     job = json.loads(path.read_text(encoding="utf-8"))
     if "rating" not in job:  # the first rating is final, so later edits can't rewrite history
         job["rating"] = rating
         job["contribution"] = contribution
-        job["revealed_at"] = datetime.now(timezone.utc).isoformat()
+        job["rated_at"] = datetime.now(timezone.utc).isoformat()
         path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
     return job
 
 
 def status(jobs_dir: Path = JOBS_DIR) -> str:
-    lines = ["Schlüssel:"]
-    for name in ("GEMINI_API_KEY", "OPENAI_API_KEY"):
-        lines.append(f"  {name}: {'gesetzt' if os.environ.get(name) else 'FEHLT'}")
-    lines.append("Modus: " + ("BEZAHLT erlaubt (OpenAI-API)" if paid_allowed()
-                              else "kostenlos (Gemini-Gratis-Tarif, GPT über ChatGPT-App)"))
-    lines.append(f"Modelle: Gemini={os.environ.get('COUNCIL_GEMINI_MODEL', DEFAULT_GEMINI_MODEL)}, "
-                 f"GPT={os.environ.get('COUNCIL_OPENAI_MODEL', DEFAULT_OPENAI_MODEL)}")
-    jobs = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(jobs_dir.glob("*.json"))] if jobs_dir.exists() else []
-    stats = {name: {"ok": 0, "fail": 0, "last_error": None} for name in REVIEWERS}
-    for job in jobs:
-        for label, name in job["labels"].items():
-            review = job["reviews"][label]
-            stats[name]["ok" if review["ok"] else "fail"] += 1
-            if not review["ok"]:
-                stats[name]["last_error"] = review.get("error")
-    lines.append(f"Jobs: {len(jobs)}")
-    for name, s in stats.items():
-        line = f"  {name}: {s['ok']} erfolgreich, {s['fail']} ausgefallen"
-        if s["last_error"]:
-            line += f" (letzter Fehler: {s['last_error']})"
-        lines.append(line)
+    lines = [
+        f"GEMINI_API_KEY: {'gesetzt' if os.environ.get('GEMINI_API_KEY') else 'FEHLT'}",
+        f"Gemini-Modell: {os.environ.get('COUNCIL_GEMINI_MODEL', DEFAULT_GEMINI_MODEL)} (Gratis-Tarif)",
+        "GPT: manuell über die ChatGPT-App (kostenlos)",
+    ]
+    jobs = ([json.loads(p.read_text(encoding="utf-8")) for p in sorted(jobs_dir.glob("*.json"))]
+            if jobs_dir.exists() else [])
+    ok = sum(1 for j in jobs if j["gemini"]["ok"])
+    lines.append(f"Jobs: {len(jobs)} (Gemini: {ok} erfolgreich, {len(jobs) - ok} ausgefallen)")
+    failed = [j["gemini"].get("error") for j in jobs if not j["gemini"]["ok"]]
+    if failed:
+        lines.append(f"Letzter Gemini-Fehler: {failed[-1]}")
     rated = [j for j in jobs if "contribution" in j]
     if rated:
         total = sum(j["contribution"] for j in rated)
@@ -272,11 +195,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ask.add_argument("--context-file")
     ask.add_argument("--file", action="append", default=[], help="Datei als Kontext anhängen (mehrfach)")
     ask.add_argument("--own-file", required=True, help="Eigene Antwort C, bleibt lokal")
-    ask.add_argument("--reviewers", choices=["auto", "both", "gpt", "gemini"], default="auto")
-    rev = sub.add_parser("reveal")
-    rev.add_argument("--job", required=True)
-    rev.add_argument("--rating-file", required=True)
-    rev.add_argument("--contribution", type=int, required=True)
+    rt = sub.add_parser("rate")
+    rt.add_argument("--job", required=True)
+    rt.add_argument("--rating-file", required=True)
+    rt.add_argument("--contribution", type=int, required=True)
     sub.add_parser("status")
     args = parser.parse_args(argv)
 
@@ -289,11 +211,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.cmd == "status":
         print(status())
         return 0
-    if args.cmd == "reveal":
-        job = reveal(args.job, _read(args.rating_file), args.contribution)
-        for label, name in job["labels"].items():
-            print(f"Gutachten {label} = {name}")
-        print(f"Bewertung gespeichert am {job['revealed_at']} (unveränderlich), Beitrag: {job['contribution']}")
+    if args.cmd == "rate":
+        job = rate(args.job, _read(args.rating_file), args.contribution)
+        print(f"Bewertung gespeichert am {job['rated_at']} (unveränderlich), Beitrag: {job['contribution']}")
         return 0
 
     question = args.question or _read(args.question_file)
@@ -301,25 +221,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     for f in args.file:
         context += f"\n\n### Datei: {f}\n```\n{Path(f).read_text(encoding='utf-8')}\n```"
     try:
-        reviewers = select_reviewers(args.reviewers)
-        job = run_job(args.mode, question, context, _read(args.own_file), reviewers)
+        job = run_job(args.mode, question, context, _read(args.own_file))
     except (SensitiveContentError, ValueError) as e:
         print(f"BLOCKIERT: {e}", file=sys.stderr)
         return 2
     print(f"Job-ID: {job['job_id']}")
-    if "gpt" not in reviewers:
-        # run_job already passed this exact text through the secret/blocklist guard.
-        prompt_path = JOBS_DIR / f"{job['job_id']}-chatgpt-prompt.md"
-        prompt_path.write_text(manual_prompt(args.mode, question, context), encoding="utf-8")
-        print(f"Kostenloses GPT-Gutachten: Inhalt von {prompt_path} in die ChatGPT-App einfügen "
-              "und die Antwort zurück in den Chat kopieren (nicht blind, als manuelles Gutachten werten).")
-    usable = sum(r["ok"] for r in job["reviews"].values())
-    if usable == 0:
-        print("Hinweis: kein Gutachten verfügbar – Ursache mit `status` prüfen.")
-    elif usable == 1:
-        print("Hinweis: nur ein verwertbares Gutachten – kein voller Council.")
-    for label, review in job["reviews"].items():
-        print(f"\n===== Gutachten {label} =====\n{review['text']}")
+    print(f"ChatGPT-Prompt (für die App, kostenlos): {job['chatgpt_prompt']}")
+    print(f"\n===== Gutachten Gemini =====\n{job['gemini']['text']}")
+    if not job["gemini"]["ok"]:
+        print("\nHinweis: Gemini ausgefallen – Ursache mit `status` prüfen.")
     return 0
 
 

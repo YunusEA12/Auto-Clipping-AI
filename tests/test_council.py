@@ -1,6 +1,5 @@
 import importlib.util
 import json
-import random
 from pathlib import Path
 
 import pytest
@@ -11,67 +10,57 @@ council = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(council)
 
 
-@pytest.fixture
-def fake_reviewers(monkeypatch):
-    monkeypatch.setitem(council.REVIEWERS, "gpt", lambda prompt: "gpt says")
-    monkeypatch.setitem(council.REVIEWERS, "gemini", lambda prompt: "gemini says")
+@pytest.fixture(autouse=True)
+def no_env_blocklist(monkeypatch):
     monkeypatch.delenv("COUNCIL_BLOCKLIST", raising=False)
 
 
-def test_job_is_anonymous_and_keeps_own_answer_local(tmp_path, fake_reviewers):
-    job = council.run_job("review", "Frage", "Kontext", "meine Antwort", ["gpt", "gemini"],
-                          jobs_dir=tmp_path, rng=random.Random(1))
-    assert set(job["reviews"]) == {"A", "B"}
-    assert {r["text"] for r in job["reviews"].values()} == {"gpt says", "gemini says"}
+def test_job_stores_review_own_answer_and_chatgpt_prompt(tmp_path):
+    job = council.run_job("review", "Frage", "Kontext", "meine Antwort",
+                          jobs_dir=tmp_path, gemini=lambda p: "gemini says")
+    assert job["gemini"] == {"ok": True, "text": "gemini says"}
     stored = json.loads((tmp_path / f"{job['job_id']}.json").read_text(encoding="utf-8"))
     assert stored["own_answer"] == "meine Antwort"
+    prompt = Path(job["chatgpt_prompt"]).read_text(encoding="utf-8")
+    assert "Frage" in prompt and "Kontext" in prompt and "meine Antwort" not in prompt
 
 
-def test_secret_in_context_blocks_before_any_call(tmp_path, monkeypatch):
+def test_secret_blocks_before_gemini_and_prompt_file(tmp_path):
     calls = []
-    monkeypatch.setitem(council.REVIEWERS, "gpt", lambda p: calls.append(p) or "x")
     with pytest.raises(council.SensitiveContentError):
-        council.run_job("answer", "Frage", "GEMINI_API_KEY=AIzaSyA1234567890abcdefghijklmnopqrstu",
-                        "", ["gpt"], jobs_dir=tmp_path)
+        council.run_job("answer", "Frage", "GEMINI_API_KEY=AIzaSyA1234567890abcdefghijklmnopqrstu", "",
+                        jobs_dir=tmp_path, gemini=lambda p: calls.append(p) or "x")
     assert calls == []
+    assert not list(tmp_path.glob("*"))
 
 
-def test_blocklist_term_blocks(tmp_path, fake_reviewers, monkeypatch):
+def test_blocklist_term_blocks(tmp_path, monkeypatch):
     monkeypatch.setenv("COUNCIL_BLOCKLIST", "Geheimkunde GmbH")
     with pytest.raises(council.SensitiveContentError):
-        council.run_job("answer", "Analyse für geheimkunde gmbh", "", "", ["gpt"], jobs_dir=tmp_path)
+        council.run_job("answer", "Analyse für geheimkunde gmbh", "", "",
+                        jobs_dir=tmp_path, gemini=lambda p: "x")
 
 
-def test_failed_reviewer_is_neutral_and_redacted(tmp_path, fake_reviewers, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-value")
+def test_gemini_failure_is_reported_and_redacted(tmp_path, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "AIza-test-value")
 
     def boom(prompt):
-        raise RuntimeError("HTTP 401 for key sk-test-value")
+        raise RuntimeError("HTTP 429 for key AIza-test-value")
 
-    monkeypatch.setitem(council.REVIEWERS, "gpt", boom)
-    job = council.run_job("answer", "Frage", "", "", ["gpt", "gemini"], jobs_dir=tmp_path)
-    failed = [r for r in job["reviews"].values() if not r["ok"]]
-    assert failed[0]["text"] == "Gutachten nicht verfügbar."
-    assert "sk-test-value" not in failed[0]["error"]
+    job = council.run_job("answer", "Frage", "", "", jobs_dir=tmp_path, gemini=boom)
+    assert not job["gemini"]["ok"]
+    assert "AIza-test-value" not in job["gemini"]["error"]
+    assert "429" in council.status(jobs_dir=tmp_path)
 
 
-def test_first_rating_is_final(tmp_path, fake_reviewers):
-    job = council.run_job("vote", "Frage", "", "C", ["gpt", "gemini"], jobs_dir=tmp_path)
-    council.reveal(job["job_id"], "erste", 2, jobs_dir=tmp_path)
-    again = council.reveal(job["job_id"], "zweite", 5, jobs_dir=tmp_path)
+def test_first_rating_is_final(tmp_path):
+    job = council.run_job("vote", "Frage", "", "C", jobs_dir=tmp_path, gemini=lambda p: "x")
+    council.rate(job["job_id"], "erste", 2, jobs_dir=tmp_path)
+    again = council.rate(job["job_id"], "zweite", 5, jobs_dir=tmp_path)
     assert again["rating"] == "erste" and again["contribution"] == 2
     assert "2 berechtigte neue Punkte" in council.status(jobs_dir=tmp_path)
 
 
-def test_auto_never_selects_paid_gpt_without_opt_in(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-value")
-    monkeypatch.delenv("COUNCIL_ALLOW_PAID", raising=False)
-    assert council.select_reviewers("auto") == ["gemini"]
-    with pytest.raises(ValueError):
-        council.select_reviewers("gpt")
-
-
-def test_paid_opt_in_enables_gpt(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-value")
-    monkeypatch.setenv("COUNCIL_ALLOW_PAID", "1")
-    assert council.select_reviewers("auto") == ["gpt", "gemini"]
+def test_no_paid_api_is_referenced():
+    source = Path(council.__file__).read_text(encoding="utf-8")
+    assert "api.openai.com" not in source and "OPENAI_API_KEY" not in source
