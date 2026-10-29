@@ -44,6 +44,7 @@ import tiktok_uploader
 import upload as youtube_uploader
 import upload_instagram_playwright as instagram_uploader
 import upload_ledger
+import auto_qc
 
 import logging_setup
 
@@ -241,6 +242,8 @@ class MultiPlatformOutcome(NamedTuple):
 def _upload_to_youtube(
     video_path: Path, title: str, description: str, tags: Optional[List[str]], publish: bool,
 ) -> YouTubeOutcome:
+    if auto_qc.upload_blocked(video_path):
+        return YouTubeOutcome(attempted=False, success=False, detail="auto_qc blocked")
     if not YOUTUBE_UPLOADS_ENABLED:
         logger.debug("YouTube uploads disabled (TikTok-only mode) — skipping %s", video_path.name)
         return YouTubeOutcome(attempted=False, success=False, detail="YouTube uploads disabled (TikTok-only mode)")
@@ -368,6 +371,8 @@ def _upload_to_instagram(
     Share button, so a second attempt risks posting a real duplicate Reel over a first attempt
     that may well have gone through — the same "don't guess on ambiguity" rule
     upload_ledger.mark_unresolved() already applies one layer down for the NEXT cycle's retry."""
+    if auto_qc.upload_blocked(video_path):
+        return InstagramOutcome(attempted=False, success=False, detail="auto_qc blocked")
     if not publish or not instagram_enabled:
         reason = "publish=False" if not publish else "instagram not enabled for this streamer"
         logger.info("%s — skipping Instagram upload for %s", reason, video_path.name)
@@ -462,6 +467,8 @@ def _upload_to_tiktok(
     the single most likely source of a genuine duplicate post. publish=False stays a complete
     no-op, mirroring tiktok_uploader.try_upload_clip()'s own contract — no ledger interaction
     for a call that never touches the browser at all."""
+    if auto_qc.upload_blocked(video_path):
+        return tiktok_uploader.UploadOutcome(success=False, confirmed=False)
     if not publish:
         return tiktok_uploader.try_upload_clip(
             video_path, description, hashtags, publish=publish, add_background_sound=add_background_sound,
@@ -540,6 +547,13 @@ def upload_clip_everywhere(
     docstring for the two real production incidents this replaced/closes (an earlier, narrower
     fix here — skip_youtube/skip_instagram params reading a per-clip output/ sidecar,
     commit 0aa31b1 — is now redundant and has been removed in favor of this global mechanism)."""
+    if auto_qc.upload_blocked(video_path):
+        logger.warning("Auto-QC blocks all platform uploads for %s", video_path)
+        return MultiPlatformOutcome(
+            tiktok=tiktok_uploader.UploadOutcome(success=False, confirmed=False),
+            youtube=YouTubeOutcome(attempted=False, success=False, detail="auto_qc blocked"),
+            instagram=InstagramOutcome(attempted=False, success=False, detail="auto_qc blocked"),
+        )
     tiktok_outcome = _upload_to_tiktok(video_path, description, hashtags, publish, add_background_sound)
 
     if publish and YOUTUBE_UPLOADS_ENABLED:

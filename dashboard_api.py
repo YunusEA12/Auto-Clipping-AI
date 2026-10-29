@@ -65,6 +65,26 @@ def load_quality_audit_report(root: Optional[Path] = None) -> Optional[dict]:
         return None
 
 
+def list_auto_qc_failures(root: Optional[Path] = None) -> List[dict]:
+    """Locally retained technical failures, independent of the ten-clip AI campaign."""
+    import auto_qc
+    rows = []
+    for path in sorted((root or Path('output')).rglob('*.json')):
+        if not path.with_suffix('.mp4').is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(data, dict) or not auto_qc.metadata_blocked(data):
+                continue
+            qc = data.get('auto_qc') or {}
+            rows.append({'Clip': data.get('title', path.stem), 'Datei': str(path.with_suffix('.mp4')),
+                         'Gründe': '; '.join(qc.get('reasons', ['Ungültiger QC-Bericht'])) if isinstance(qc, dict) else 'Ungültiger QC-Bericht',
+                         'Geprüft': qc.get('checked_at') if isinstance(qc, dict) else None})
+        except (OSError, ValueError):
+            continue
+    return rows
+
+
 def list_agent_state_paths(root: Path = None) -> List[Path]:
     """Every agent-state file currently on disk: the legacy shared AGENT_STATE_PATH (a
     manual/standalone auto_pilot.py run with no --streamer-name) plus one
@@ -185,6 +205,9 @@ def tiktok_cookies_status() -> Tuple[bool, str]:
 def upload_clip_to_tiktok(
     video_path: Path, description: str, hashtags: Optional[List[str]] = None, publish: bool = False
 ) -> tiktok_uploader.UploadOutcome:
+    import auto_qc
+    if auto_qc.upload_blocked(video_path):
+        return tiktok_uploader.UploadOutcome(success=False, confirmed=False)
     return tiktok_uploader.try_upload_clip(video_path, description, hashtags, publish=publish)
 
 

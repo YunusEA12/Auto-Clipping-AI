@@ -788,6 +788,47 @@ def find_longest_segment_fallback(transcript: dict, streamer_name: Optional[str]
     return ClipSelection(clips=[fallback_clip])
 
 
+def align_clip_boundaries(selection: ClipSelection, transcript: dict, source_duration: float) -> ClipSelection:
+    """Expand selected spans to real Whisper sentences, then pad and recheck limits.
+
+    Word punctuation supplies sentence edges inside a segment. Without word timing,
+    the segment itself is the smallest trustworthy boundary. Never shorten a sentence
+    to fit MAX_CLIP_DURATION: discard that candidate instead.
+    """
+    spans = []
+    for segment in transcript.get("segments", []):
+        words = segment.get("words") or []
+        if not words:
+            spans.append((float(segment["start"]), float(segment["end"])))
+            continue
+        sentence_start = float(words[0]["start"])
+        for index, word in enumerate(words):
+            text = word.get("text", word.get("word", "")).rstrip().rstrip('"\'»”’')
+            if text.endswith((".", "!", "?")) or index == len(words) - 1:
+                spans.append((sentence_start, float(word["end"])))
+                if index + 1 < len(words):
+                    sentence_start = float(words[index + 1]["start"])
+    spans = sorted((start, end) for start, end in spans if 0 <= start < end <= source_duration)
+    result = []
+    for clip in selection.clips:
+        if not spans or clip.start_time < 0 or clip.end_time > source_duration + 1:
+            logger.warning("Discarding clip without trustworthy source boundaries: %s", clip.title)
+            continue
+        # Outward rounding preserves every word selected by the model. Silence is
+        # assigned to the nearest real edge, without inventing word timestamps.
+        starts = [start for start, end in spans if start <= clip.start_time < end]
+        ends = [end for start, end in spans if start < clip.end_time <= end]
+        start = starts[-1] if starts else min((s for s, _ in spans), key=lambda s: abs(s - clip.start_time))
+        end = ends[0] if ends else min((e for _, e in spans), key=lambda e: abs(e - clip.end_time))
+        start = max(0.0, start - 0.3)
+        end = min(source_duration, end + 0.5)
+        if MIN_CLIP_DURATION <= end - start <= MAX_CLIP_DURATION:
+            result.append(clip.model_copy(update={"start_time": start, "end_time": end}))
+        else:
+            logger.warning("Discarding clip outside duration bounds after sentence alignment: %s", clip.title)
+    return ClipSelection(clips=result)
+
+
 def find_audio_path() -> Optional[Path]:
     """Best-effort discovery of the extracted .wav when the caller doesn't pass one explicitly."""
     candidates = list(TEMP_DIR.glob("*.wav"))
@@ -834,6 +875,13 @@ def analyze(
     except LLMResponseIncomplete as e:
         logger.warning("%s; falling back to the longest available segment instead of failing.", e)
         selection = find_longest_segment_fallback(transcript, streamer_name)
+
+    source_duration = transcript.get("duration") or transcript_duration
+    if audio_path is not None and audio_path.exists():
+        with wave.open(str(audio_path), "rb") as source_audio:
+            source_duration = source_audio.getnframes() / source_audio.getframerate()
+    if source_duration is not None:
+        selection = align_clip_boundaries(selection, transcript, float(source_duration))
 
     if not selection.clips:
         logger.info(

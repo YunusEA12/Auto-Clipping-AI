@@ -15,6 +15,7 @@ from typing import Iterator, List, Optional, Tuple
 import cv2
 from filelock import FileLock
 
+import auto_qc
 import atomic_io
 import optimization_engine
 import streamers
@@ -132,7 +133,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 TITLE_BOX_Y_RATIO = 0.16
 
 # Where split_screen's title sits, as a fraction of canvas height — a safe top-edge margin
-# (~80-120px at 1920 canvas height), NOT SPLIT_SCREEN_FACE_RATIO (the facecam/gameplay seam).
+# (180px at 1920 canvas height), NOT SPLIT_SCREEN_FACE_RATIO (the facecam/gameplay seam).
 # 2026-08-19's original design centered the title ON that seam deliberately (see this file's
 # git history), on the assumption it would read as a natural "hook caption" spot. Account-owner
 # report, 2026-08-22, with a real render attached: since the title is center-anchored (\an5),
@@ -141,7 +142,8 @@ TITLE_BOX_Y_RATIO = 0.16
 # sits. Moved to a fixed near-top margin instead: clears the whole facecam zone regardless of
 # exactly how a given face crop is framed within it, rather than depending on box-height math
 # staying below whatever fraction of the seam a particular render's title text happens to need.
-SPLIT_SCREEN_TITLE_Y_RATIO = 100 / 1920
+# Allow title half-height (58px font + 24px box border) below the 5% safe top edge.
+SPLIT_SCREEN_TITLE_Y_RATIO = 180 / 1920
 
 # Where the subtitle block sits vertically, as a fraction of the canvas height — the TikTok
 # "lower third", clear of both the top facecam split and bottom platform UI icons. Empirical
@@ -863,6 +865,8 @@ def resolve_layout(
     layout: str, video_path: Path, clip_start: float, clip_end: float | None = None,
     has_static_override: bool = False,
     facecam_scan: "vision.FacecamScan | None" = None,
+    crop_box: tuple[int, int, int, int] | None = None,
+    validation_result: dict | None = None,
 ) -> tuple[str, float]:
     """Returns (resolved_layout, detection_ts) — NOT just the layout string (2026-08-22 fix).
     Previously process_clips_iter() always called vision.get_facecam_coordinates() at
@@ -926,6 +930,14 @@ def resolve_layout(
     FACECAM_MIN_PERSISTENCE legitimately — vetoing it would risk downgrading real talking-head
     clips to fix a defect that has not actually been observed there.
     """
+    if crop_box is not None and layout in (LAYOUT_SPLIT_SCREEN, LAYOUT_FULL_CAM):
+        result = vision.validate_facecam_crop(str(video_path), clip_start, clip_end or clip_start, crop_box)
+        if validation_result is not None:
+            validation_result.update(result)
+        if not result["passed"]:
+            logger.warning("Layout changed/unsafe crop at %.2fs: %s -> %s", clip_start, result["reason"], LAYOUT_BLUR_BACKGROUND)
+            return LAYOUT_BLUR_BACKGROUND, clip_start
+        return layout, clip_start
     if layout != LAYOUT_AUTO:
         return layout, clip_start
 
@@ -1234,6 +1246,31 @@ def process_clips_iter(
                 )
                 effective_layout = LAYOUT_CENTER_CROP
 
+        if facecam_box is not None:
+            validation = {}
+            effective_layout, _ = resolve_layout(
+                effective_layout, video_path, clip["start_time"], clip["end_time"],
+                crop_box=facecam_box, validation_result=validation,
+            )
+            clip["layout_validation"] = validation
+            if validation.get("passed") is False:
+                facecam_box = None
+
+        if multi_cam_boxes is not None:
+            slot_checks = [
+                vision.validate_facecam_crop(str(video_path), clip["start_time"], clip["end_time"], box)
+                for box in multi_cam_boxes
+            ]
+            passed = all(item["passed"] for item in slot_checks)
+            clip["layout_validation"] = {
+                "passed": passed, "slots": slot_checks,
+                "reason": None if passed else "multi_cam_face_missing_or_outside_crop",
+            }
+            if not passed:
+                logger.warning("Layout changed/unsafe multi-cam slots: falling back to %s", LAYOUT_BLUR_BACKGROUND)
+                effective_layout = LAYOUT_BLUR_BACKGROUND
+                multi_cam_boxes = None
+
         # Final safety net (2026-08-24 incident) — verify the ACTUAL pixel content of whatever
         # box(es) were just computed before committing to split_screen/full_cam/multi_cam, no
         # matter how the box was chosen (dynamic detection or a streamer's static override):
@@ -1278,6 +1315,7 @@ def process_clips_iter(
                     output_dir=output_dir, music_path=music_path, has_source_audio=has_source_audio,
                     multi_cam_boxes=multi_cam_boxes,
                 )
+            clip["auto_qc"] = auto_qc.check_render(output_path, layout=effective_layout, subtitle_path=ass_path)
         finally:
             ass_path.unlink(missing_ok=True)
 
