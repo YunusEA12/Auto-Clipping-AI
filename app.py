@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,12 +27,6 @@ from dotenv import load_dotenv
 import dashboard_api
 
 load_dotenv()
-
-try:
-    from streamlit_autorefresh import st_autorefresh
-    HAS_AUTOREFRESH = True
-except ImportError:
-    HAS_AUTOREFRESH = False
 
 import logging_setup
 
@@ -273,13 +268,18 @@ with st.sidebar:
 
     st.divider()
 
-    if HAS_AUTOREFRESH:
-        refresh_seconds = st.slider("🔄 Auto-Refresh (Sek.)", 3, 30, 5, key="autorefresh_interval")
-        st_autorefresh(interval=refresh_seconds * 1000, key="dashboard_autorefresh")
-    else:
-        st.caption("Tipp: `pip install streamlit-autorefresh` für automatische Live-Updates.")
-        if st.button("🔄 Jetzt aktualisieren", width="stretch"):
+    refresh_seconds = st.slider("🔄 Auto-Refresh (Sek.)", 3, 30, 5, key="autorefresh_interval")
+
+    @st.fragment(run_every=refresh_seconds)
+    def _refresh_dashboard():
+        # Native timer avoids the third-party iframe failing behind the server proxy.
+        now = time.monotonic()
+        previous = st.session_state.setdefault('_dashboard_refreshed_at', now)
+        if now - previous >= refresh_seconds:
+            st.session_state['_dashboard_refreshed_at'] = now
             st.rerun()
+
+    _refresh_dashboard()
 
     st.divider()
     st.header("Systemstatus")
