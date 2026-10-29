@@ -363,6 +363,14 @@ tab_radar, tab_fleet, tab_brain, tab_analytics, tab_archive, tab_manual, tab_qua
 )
 
 with tab_quality:
+    st.subheader("Automatische Render-Prüfung")
+    qc_failures = dashboard_api.list_auto_qc_failures()
+    if qc_failures:
+        st.warning(f"{len(qc_failures)} Clips für Upload gesperrt und lokal zur Prüfung behalten.")
+        st.dataframe(qc_failures, hide_index=True)
+    else:
+        st.info("Keine lokal gespeicherten Clips mit fehlgeschlagener Render-Prüfung.")
+    st.caption("Prüft Schwarzbilder, Standbilder, Lautheit, Facecam und ASS-Textgeometrie. Die Textprüfung ist eine konservative Schätzung, keine OCR.")
     st.subheader("Bewertung der nächsten zehn Clips")
     audit_report = dashboard_api.load_quality_audit_report()
     if audit_report is None:

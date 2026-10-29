@@ -822,3 +822,30 @@ def get_multi_cam_coordinates(
         padded = _pad_and_clamp_box(b, frame_w, frame_h, padding_factor)
         result.append(padded if padded is not None else b)
     return result
+
+
+def validate_facecam_crop(video_path: str, clip_start: float, clip_end: float,
+                          crop_box: tuple[int, int, int, int], samples: int = 5) -> dict:
+    """Check the actual selected crop throughout the clip; fail closed on unreadable frames.
+
+    At least 90% of one confident face must fit inside the crop at every sample.
+    Sampling avoids claiming continuous scene-change detection between frames.
+    """
+    checks = []
+    x, y, width, height = crop_box
+    duration = max(0.0, clip_end - clip_start)
+    for index in range(samples):
+        timestamp = clip_start + duration * (index + 0.5) / samples
+        try:
+            boxes, scores, _, _ = _detect_faces(video_path, timestamp)
+            contained = False
+            for (fx, fy, fw, fh), confidence in zip(boxes, scores):
+                intersection = max(0, min(x + width, fx + fw) - max(x, fx)) * max(0, min(y + height, fy + fh) - max(y, fy))
+                if confidence >= FACE_COUNT_MIN_CONFIDENCE and fw * fh > 0 and intersection / (fw * fh) >= 0.9:
+                    contained = True
+                    break
+            checks.append({"timestamp": timestamp, "face_in_crop": contained})
+        except Exception as exc:
+            checks.append({"timestamp": timestamp, "face_in_crop": False, "error": type(exc).__name__})
+    passed = bool(checks) and all(check["face_in_crop"] for check in checks)
+    return {"passed": passed, "reason": None if passed else "facecam_missing_or_outside_crop", "samples": checks}

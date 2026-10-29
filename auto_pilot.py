@@ -45,6 +45,7 @@ from typing import Dict, List, Optional, Tuple
 
 import analyze
 import atomic_io
+import auto_qc
 import ingest
 import process as process_module
 import profiles
@@ -190,6 +191,8 @@ def purge_old_local_only_clips(output_dir: Path, retention_days: int = OUTPUT_RE
     cutoff = time.time() - retention_days * 86400
     deleted = 0
     for mp4_path in output_dir.glob("*.mp4"):
+        if auto_qc.upload_blocked(mp4_path):
+            continue
         try:
             if mp4_path.stat().st_mtime >= cutoff:
                 continue
@@ -255,6 +258,8 @@ def find_backlog_clips(
         except (OSError, json.JSONDecodeError):
             continue
         if "reward_score" not in clip:
+            continue
+        if auto_qc.metadata_blocked(clip):
             continue
         backlog.append((clip, mp4_path, clip.get("reward_score")))
 
@@ -518,6 +523,12 @@ def purge_low_scoring_clips(
         score = score_by_title.get(title)
         output_path = rendered.get(title)
 
+        if auto_qc.metadata_blocked(clip):
+            # Failed technical QC is evidence for manual review, never critic garbage.
+            surviving_clips.append(clip)
+            kept += 1
+            logger.warning("Auto-QC: '%s' bleibt lokal zur Prüfung", title)
+            continue
         if score is not None and score < threshold:
             if output_path and output_path.exists():
                 output_path.unlink()
@@ -589,6 +600,9 @@ def run_deployment_phase(
 
     for i, (clip, output_path, reward_score) in enumerate(survivors, start=1):
         title = clip.get("title", output_path.name)
+        if auto_qc.metadata_blocked(clip) or auto_qc.upload_blocked(output_path):
+            logger.warning("Auto-QC blocks deployment of '%s'; retained locally", title)
+            continue
         # Heartbeat (2026-08-24 dashboard-stall fix): the caller only sets current_action once,
         # before this whole loop starts. A single clip's own upload can legitimately run
         # 1-4+ minutes (pacing waits on 2+ platforms, Instagram's own up to-3-attempt retry
@@ -660,6 +674,8 @@ def run_deployment_phase(
                 # clips.json's own on-disk round-trip (see that function's comment) all the
                 # way to here. None for clips rendered before this feature existed.
                 "layout": clip.get("layout"),
+                **({"auto_qc": clip["auto_qc"]} if "auto_qc" in clip else {}),
+                "layout_validation": clip.get("layout_validation"),
                 "music_track": clip.get("music_track"),
                 "hook_style": clip.get("hook_style"),
                 "title_style": clip.get("title_style"),

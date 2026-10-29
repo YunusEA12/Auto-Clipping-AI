@@ -599,5 +599,6 @@ def test_split_screen_title_clears_the_facecam_zone_entirely():
     # not just a fixed pixel guess that could drift out of sync if that ratio is ever retuned.
     title_y = int(1920 * process.SPLIT_SCREEN_TITLE_Y_RATIO)
     facecam_zone_bottom = int(1920 * process.SPLIT_SCREEN_FACE_RATIO)
-    assert 80 <= title_y <= 120
+    assert title_y == 180
+    assert title_y - (58 / 2 + 24) >= 1920 * 0.05
     assert title_y < facecam_zone_bottom * 0.5  # well within the top half, clear of face center
