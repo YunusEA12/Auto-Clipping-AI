@@ -23,3 +23,9 @@ Offizielle Referenzen: [Headless CLI](https://antigravity.google/docs/cli/headle
 ## Lokaler Betrieb unter Windows
 
 `install_guardian.ps1` installiert die Benutzeraufgabe Auto-Clipping-Antigravity-Guardian alle 30 Minuten und startet einen ersten Lauf. Kein Administrator oder gespeichertes Windows-Passwort notwendig. Sie laeuft nur unter dem angemeldeten Benutzer bei eingeschaltetem PC. `install_guardian.ps1 -Stop` entfernt ausschliesslich diese Aufgabe. Sie startet weder die lokale Fleet noch einen Serverdienst. Diese lokale Einrichtung prueft nur lokale Projektdaten; bei pausierter Fleet ist ein gesunder Bericht keine Aussage ueber den Serverbetrieb. Automatische Reparaturkandidaten und Uebernahmen sind dort nicht aktiviert.
+
+## Aktuelle Einrichtung direkt in Antigravity
+
+Am 29.10.2026 wurde im Antigravity-Projekt tiktok unter Scheduled Tasks der Auftrag Auto-Clipping - Wartung und Verbesserung aktiviert (alle 30 Minuten, Flash). Dieser native Auftrag ersetzt den Windows-Pruefjob; die Windows-Aufgabe Auto-Clipping-Antigravity-Guardian wurde deaktiviert. Die Regeln erlauben belegte Korrekturen in einem getrennten Checkout mit Regressionstest und kompletter pytest-Suite vor einem Push. Produktionszugang und ein vollstaendiger Reparatur-/Deployment-Lauf sind dadurch nicht automatisch bestaetigt. Der Auftrag darf fehlende Serverdaten nicht als gesunden Produktionsbetrieb ausgeben.
+
+Die Acht-Aufrufe-Grenze des Python-Wrappers gilt NICHT fuer Antigravity Scheduled Tasks: hier startet Antigravity selbst halbstuendlich eine Modellaufgabe innerhalb seines Abo-Kontingents. Laufzeitvorgaben im Auftrag sind Anweisungen, keine technisch erzwungene Tokenobergrenze. Die native Zeitplanung benoetigt den laufenden PC beziehungsweise die Antigravity-Instanz; ein ausgeschalteter PC wird dadurch nicht zum Serverdienst.
