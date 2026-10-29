@@ -1,0 +1,22 @@
+[Unit]
+Description=Auto-Clipping project guardian using Antigravity subscription
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=autoclip
+Group=autoclip
+WorkingDirectory=/opt/auto-clipping-ai
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/opt/auto-clipping-ai/.tools/bin:/opt/auto-clipping-ai/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/auto-clipping-ai/venv/bin/python project_guardian.py --watch --enable-agent
+Restart=on-failure
+RestartSec=60
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/auto-clipping-ai
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
