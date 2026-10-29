@@ -9,49 +9,34 @@ Skala: **1–30** kritisch · **31–50** schwach · **51–70** solide mit Lüc
 
 | # | Bereich | Punkte | Gewicht | Kurzurteil |
 |---|---|---:|---:|---|
-| 1 | Recht, Rechte & Plattform-Compliance | **20** | 15 % | Größtes Einzelrisiko: fremde Streams ohne dokumentierte Erlaubnis |
-| 2 | Geschäftsmodell & Monetarisierung | **25** | 10 % | Kein definierter Weg zu Einnahmen |
-| 3 | Produktvision & Zielklarheit | **45** | 5 % | Technisch klar, geschäftlich unklar |
-| 4 | Datenbasis & Feedback-Loop | **35** | 10 % | Nur Views/Likes, kaum Volumen |
-| 5 | Wachstum, Distribution & Content-Strategie | **40** | 10 % | Ein Kanal, keine Posting-Strategie |
-| 6 | KI-Clip-Auswahl (Analyse + Critic) | **60** | 10 % | Durchdacht, aber unbelegt (*Schätzung*) |
-| 7 | Rendering, Layout & Untertitel | **70** | 8 % | Stärkster Produktteil (*Schätzung*) |
-| 8 | Upload-Automatisierung | **50** | 7 % | Sehr sorgfältig, aber prinzipiell fragil |
-| 9 | Architektur & Modularität | **50** | 5 % | Flache Skriptsammlung, Großdateien |
-| 10 | Codequalität & Lesbarkeit | **55** | 4 % | Robust, aber Kommentar-Überladung |
-| 11 | Tests & CI | **82** | 4 % | Klare Stärke |
-| 12 | Betrieb, Deploy & 24/7 | **45** | 4 % | Hängt am Windows-PC, Server halb fertig |
-| 13 | Skalierbarkeit | **35** | 3 % | JSON-Dateien, Browser-Slots, ein Account |
-| 14 | Kosten & LLM-Abhängigkeit | **55** | 2 % | Günstig, aber Free-Tier-Hopping |
-| 15 | Sicherheit & Secrets | **65** | 2 % | Gute Regeln, riskantes `git add -A` |
-| 16 | Dokumentation & Wissensmanagement | **72** | 1 % | Ausführlich, teils veraltet |
-| 17 | Dashboard & Bedienbarkeit | **60** | — | *Schätzung*, nicht im Browser geprüft |
-| 18 | Entwicklungsprozess & Fokus | **55** | — | Viel Feuerwehr, wenig Roadmap |
+| 1 | Geschäftsmodell & Monetarisierung | **25** | 15 % | Kein definierter Weg zu Einnahmen |
+| 2 | Produktvision & Zielklarheit | **45** | 5 % | Technisch klar, geschäftlich unklar |
+| 3 | Datenbasis & Feedback-Loop | **35** | 12 % | Nur Views/Likes, kaum Volumen |
+| 4 | Wachstum, Distribution & Content-Strategie | **40** | 12 % | Ein Kanal, keine Posting-Strategie |
+| 5 | KI-Clip-Auswahl (Analyse + Critic) | **60** | 12 % | Durchdacht, aber unbelegt (*Schätzung*) |
+| 6 | Rendering, Layout & Untertitel | **70** | 10 % | Stärkster Produktteil (*Schätzung*) |
+| 7 | Upload-Automatisierung | **50** | 8 % | Sehr sorgfältig, aber prinzipiell fragil |
+| 8 | Architektur & Modularität | **50** | 5 % | Flache Skriptsammlung, Großdateien |
+| 9 | Codequalität & Lesbarkeit | **55** | 4 % | Robust, aber Kommentar-Überladung |
+| 10 | Tests & CI | **82** | 4 % | Klare Stärke |
+| 11 | Betrieb, Deploy & 24/7 | **45** | 5 % | Hängt am Windows-PC, Server halb fertig |
+| 12 | Skalierbarkeit | **35** | 3 % | JSON-Dateien, Browser-Slots, ein Account |
+| 13 | Kosten & LLM-Abhängigkeit | **55** | 2 % | Günstig, aber Free-Tier-Hopping |
+| 14 | Sicherheit & Secrets | **65** | 2 % | Gute Regeln, riskantes `git add -A` |
+| 15 | Dokumentation & Wissensmanagement | **72** | 1 % | Ausführlich, teils veraltet |
+| 16 | Dashboard & Bedienbarkeit | **60** | — | *Schätzung*, nicht im Browser geprüft |
+| 17 | Entwicklungsprozess & Fokus | **55** | — | Viel Feuerwehr, wenig Roadmap |
 
-**Gewichteter Gesamtwert: 44 / 100.**
-Ungewichtet (Technik zählt gleich viel wie Geschäft): 51 / 100.
+**Gewichteter Gesamtwert: 48 / 100.**
+Ungewichtet (Technik zählt gleich viel wie Geschäft): 53 / 100.
 
-Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftlich ein 25-Punkte-Projekt.** Der Engpass ist nicht der Code, sondern Rechte, Monetarisierung und Messdaten. Weitere Technik-Arbeit erhöht den Erfolg kaum, solange diese drei Punkte offen sind.
+Rechte sind geklärt: Die geclippten Streamer erlauben Clips ausdrücklich. Der Bereich ist deshalb nicht Teil der Bewertung.
+
+Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftlich ein 25-Punkte-Projekt.** Der Engpass ist nicht der Code, sondern Monetarisierung, Messdaten und Reichweite. Weitere Technik-Arbeit erhöht den Erfolg kaum, solange diese drei Punkte offen sind.
 
 ---
 
-## 1 · Recht, Rechte & Plattform-Compliance — 20/100
-
-| Kriterium | Punkte | Befund |
-|---|---:|---|
-| Erlaubnis der Streamer | 10 | Profile für eliasn97, Trymacs, montanablack88; nirgends ist eine Erlaubnis, ein Clipping-Programm oder eine Vereinbarung dokumentiert |
-| Urheberrecht Musik/Spiele | 30 | Eigene Hintergrundmusik im Repo (gut); Spiel- und Stream-Musik im Originalton wird nicht geprüft |
-| Plattform-AGB (Automatisierung) | 20 | TikTok-Upload und Metriken per Playwright-Browsersteuerung und Cookie-Sitzungen statt offizieller API; Kontosperre möglich |
-| „Unoriginal Content“-Regeln | 20 | Reine Re-Uploads fremder Streams gelten auf TikTok/YouTube/Instagram oft als unoriginell → Reichweite und Monetarisierung gedrosselt (Regeln vor Umsetzung aktuell prüfen) |
-| Kennzeichnung/Credits | 25 | Kein erkennbarer Pflicht-Credit („Clip von @streamer“) in Titel/Overlay |
-
-**Maßnahmen (höchste Priorität):**
-1. Nur Streamer clippen, die es schriftlich erlauben oder ein offizielles Clipping-Programm betreiben. Pro Profil Feld `permission: {source, date, terms}` und Pipeline-Sperre ohne Eintrag.
-2. Pflicht-Credit des Streamers in Caption und Overlay.
-3. TikTok Content Posting API prüfen und, wenn erreichbar, Playwright-Upload ablösen.
-4. Eigenleistung erhöhen (Kommentar-Hook, Kontext-Text, Schnitt), damit Clips nicht als reiner Re-Upload gelten.
-
-## 2 · Geschäftsmodell & Monetarisierung — 25/100
+## 1 · Geschäftsmodell & Monetarisierung — 25/100
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
@@ -61,11 +46,11 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 | Kosten-Nutzen-Messung | 30 | LLM-Kosten werden gezählt, Erträge nicht |
 
 **Drei realistische Wege (eine Entscheidung nötig):**
-- **A · Bezahltes Clipping für Streamer** (Agentur-Modell): Streamer zahlt pro Clip/Monat oder pro Views. Löst gleichzeitig das Rechteproblem. *Empfehlung.*
-- **B · Clipping-Kampagnen** (Bezahlung pro 1.000 Views durch Streamer/Marken): schnell startbar, Erlaubnis inklusive.
-- **C · SaaS für deutschsprachige Streamer:** größtes Potenzial, braucht aber Multi-Tenant-Architektur (siehe Bereich 13).
+- **A · Bezahltes Clipping für Streamer** (Agentur-Modell): Streamer zahlt pro Clip/Monat oder pro Views. Nutzt die bestehende Clip-Erlaubnis direkt. *Empfehlung.*
+- **B · Clipping-Kampagnen** (Bezahlung pro 1.000 Views durch Streamer/Marken): schnell startbar.
+- **C · SaaS für deutschsprachige Streamer:** größtes Potenzial, braucht aber Multi-Tenant-Architektur (siehe Bereich 12).
 
-## 3 · Produktvision & Zielklarheit — 45/100
+## 2 · Produktvision & Zielklarheit — 45/100
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
@@ -76,7 +61,7 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 
 **Maßnahmen:** Eine Seite „Ziele & Roadmap“ mit 3 messbaren Quartalszielen; README auf den echten Funktionsumfang bringen.
 
-## 4 · Datenbasis & Feedback-Loop — 35/100
+## 3 · Datenbasis & Feedback-Loop — 35/100
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
@@ -88,7 +73,7 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 
 **Maßnahmen:** YouTube Analytics API (Retention) anbinden; TikTok Business/Creator-Analytics prüfen; pro Woche ein klares Experiment (z. B. 15–30 s vs. 45–60 s); Volumen erhöhen, bevor der Loop Entscheidungen trifft.
 
-## 5 · Wachstum, Distribution & Content-Strategie — 40/100
+## 4 · Wachstum, Distribution & Content-Strategie — 40/100
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
@@ -100,7 +85,7 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 
 **Maßnahmen:** YouTube Shorts wieder einschalten (offizielle API = weniger Risiko); Serienformate („Elias' Ausraster der Woche“); Hook-Bibliothek aus eigenen Top-Clips statt Beispielen.
 
-## 6 · KI-Clip-Auswahl — 60/100 (*Schätzung*)
+## 5 · KI-Clip-Auswahl — 60/100 (*Schätzung*)
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
@@ -112,7 +97,7 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 
 **Maßnahmen:** Twitch-Chat-Aktivität als Signal; Critic-Urteil mit gemessener Performance korrelieren (sonst ist er Bauchgefühl); für die finale Auswahl ein stärkeres Modell testen, Lite nur zum Vorfiltern.
 
-## 7 · Rendering, Layout & Untertitel — 70/100 (*Schätzung*)
+## 6 · Rendering, Layout & Untertitel — 70/100 (*Schätzung*)
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
@@ -124,7 +109,7 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 
 **Maßnahmen:** Qualitätsaudit der nächsten 10 Clips wirklich auswerten; Lautheit auf ca. −14 LUFS normalisieren; `process.py` in Layout/Untertitel/Audio/Encode aufteilen.
 
-## 8 · Upload-Automatisierung — 50/100
+## 7 · Upload-Automatisierung — 50/100
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
@@ -133,7 +118,9 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 | Robustheit | 35 | Selektor- und Sprach-Abhängigkeit (Fix für englischen Publish-Dialog zeigt die Fragilität) |
 | Plattformrisiko | 25 | Browser-Automation + Cookies = Sperr- und Wartungsrisiko |
 
-## 9 · Architektur & Modularität — 50/100
+**Maßnahmen:** TikTok Content Posting API prüfen und, wenn erreichbar, den Playwright-Upload ablösen; bis dahin Selektor-Check täglich automatisch laufen lassen.
+
+## 8 · Architektur & Modularität — 50/100
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
@@ -145,7 +132,7 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 
 **Maßnahmen:** Paket `autoclip/` mit `ingest/`, `analysis/`, `render/`, `publish/`, `metrics/`; State nach SQLite (eine Datei, Transaktionen, Abfragen fürs Dashboard).
 
-## 10 · Codequalität & Lesbarkeit — 55/100
+## 9 · Codequalität & Lesbarkeit — 55/100
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
@@ -156,7 +143,7 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 
 **Maßnahmen:** Kommentare auf das „Warum heute“ kürzen; `ruff` + `mypy` (oder `pyright`) in CI.
 
-## 11 · Tests & CI — 82/100
+## 10 · Tests & CI — 82/100
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
@@ -165,7 +152,7 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 | Integration | 65 | Echter Audio-Decode-Test; kein End-to-End-Render mit Beispielvideo |
 | Lint/Typen/Coverage | 40 | Nicht in CI |
 
-## 12 · Betrieb, Deploy & 24/7 — 45/100
+## 11 · Betrieb, Deploy & 24/7 — 45/100
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
@@ -176,11 +163,11 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 
 **Maßnahmen:** VPS-Umzug abschließen; externer Uptime-/Heartbeat-Check mit Push-Alarm.
 
-## 13 · Skalierbarkeit — 35/100
+## 12 · Skalierbarkeit — 35/100
 
 Ein TikTok-Account, Browser-Slots als Engpass, JSON-State, serielles Rendering auf einer CPU. Für 3 Streamer okay, für 30 nicht. Erst relevant, wenn Weg A/C gewählt wird.
 
-## 14 · Kosten & LLM-Abhängigkeit — 55/100
+## 13 · Kosten & LLM-Abhängigkeit — 55/100
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
@@ -190,19 +177,19 @@ Ein TikTok-Account, Browser-Slots als Engpass, JSON-State, serielles Rendering a
 
 **Maßnahmen:** Bezahlten Tarif mit festem Modell; Modellname in Konfiguration statt Code.
 
-## 15 · Sicherheit & Secrets — 65/100
+## 14 · Sicherheit & Secrets — 65/100
 
 Gute `.gitignore`, Redaction in Logs, Secret-Regeln in `claude.md`. Risiko: `scripts/git_auto_sync.sh` macht `git add -A` und verlässt sich allein auf `.gitignore` — ein neuer, unbekannter Cookie-Dateiname landet automatisch im Repo (der Fall `youtube_studio_cookies.json` ist schon einmal passiert). **Maßnahme:** Allowlist statt `add -A` oder Secret-Scan (z. B. gitleaks) als Pre-Commit/CI.
 
-## 16 · Dokumentation — 72/100
+## 15 · Dokumentation — 72/100
 
 README, Server-Setup, Upload-README, Obsidian-Wiki. Schwächen: README widerspricht dem TikTok-only-Modus; `Status.md` ist eine Dateiliste statt Status; Doku-Mix Deutsch/Englisch.
 
-## 17 · Dashboard — 60/100 (*Schätzung*)
+## 16 · Dashboard — 60/100 (*Schätzung*)
 
 Streamlit, sauber über `dashboard_api.py` entkoppelt, Qualitätsbericht sichtbar. Fehlt vermutlich: Geschäftskennzahlen (Follower, Views/Clip, Kosten/Clip, Umsatz).
 
-## 18 · Entwicklungsprozess & Fokus — 55/100
+## 17 · Entwicklungsprozess & Fokus — 55/100
 
 Viele `fix:`-Commits zu Vorfällen, schubweise Arbeit (Pausen von Wochen). Die Energie fließt in Zuverlässigkeit, nicht in Wachstum. Regel „automatisch `git add .` und push nach jeder Aufgabe“ in `claude.md` widerspricht sauberem Review.
 
@@ -212,32 +199,31 @@ Viele `fix:`-Commits zu Vorfällen, schubweise Arbeit (Pausen von Wochen). Die E
 
 | Prio | Maßnahme | Bereich | Aufwand | Wirkung |
 |---|---|---|---|---|
-| 1 | Geschäftsmodell wählen (Empfehlung: bezahltes Clipping für Streamer mit Erlaubnis) | 1, 2 | klein | sehr hoch |
-| 2 | Erlaubnis-Feld pro Streamer + Pipeline-Sperre + Pflicht-Credit | 1 | klein | sehr hoch |
-| 3 | 3 messbare Ziele für 90 Tage festlegen und im Dashboard anzeigen | 3, 17 | klein | hoch |
-| 4 | YouTube Shorts per offizieller API wieder einschalten + Retention-Daten holen | 4, 5 | mittel | hoch |
-| 5 | Qualitätsaudit der 10 Clips auswerten, Critic gegen echte Views prüfen | 6, 7 | klein | hoch |
-| 6 | Twitch-Chat-Spikes als Auswahlsignal | 6 | mittel | mittel–hoch |
-| 7 | Auf VPS umziehen + externer Ausfall-Alarm | 12 | mittel | mittel |
-| 8 | Bezahlter LLM-Tarif mit festem Modell | 14 | klein | mittel |
-| 9 | Secret-Scan statt blindem `git add -A` | 15 | klein | mittel |
-| 10 | Paketstruktur + SQLite + Kommentare entschlacken | 9, 10, 13 | groß | mittel (erst bei Skalierung) |
+| 1 | Geschäftsmodell wählen (Empfehlung: bezahltes Clipping für Streamer) | 1 | klein | sehr hoch |
+| 2 | 3 messbare Ziele für 90 Tage festlegen und im Dashboard anzeigen | 2, 16 | klein | hoch |
+| 3 | YouTube Shorts per offizieller API wieder einschalten + Retention-Daten holen | 3, 4 | mittel | hoch |
+| 4 | Qualitätsaudit der 10 Clips auswerten, Critic gegen echte Views prüfen | 5, 6 | klein | hoch |
+| 5 | Twitch-Chat-Spikes als Auswahlsignal | 5 | mittel | mittel–hoch |
+| 6 | TikTok Content Posting API statt Browser-Upload prüfen | 7 | mittel | mittel–hoch |
+| 7 | Auf VPS umziehen + externer Ausfall-Alarm | 11 | mittel | mittel |
+| 8 | Bezahlter LLM-Tarif mit festem Modell | 13 | klein | mittel |
+| 9 | Secret-Scan statt blindem `git add -A` | 14 | klein | mittel |
+| 10 | Paketstruktur + SQLite + Kommentare entschlacken | 8, 9, 12 | groß | mittel (erst bei Skalierung) |
 
 ## Zielwerte nach 90 Tagen
 
 | Bereich | Heute | Ziel |
 |---|---:|---:|
-| Recht & Compliance | 20 | 70 |
 | Geschäftsmodell | 25 | 60 |
 | Datenbasis | 35 | 60 |
 | Wachstum | 40 | 60 |
 | Betrieb | 45 | 70 |
-| **Gesamt (gewichtet)** | **44** | **≈ 65** |
+| **Gesamt (gewichtet)** | **48** | **≈ 63** |
 
 ## Methodik und Grenzen
 
 - Einzelbewertung durch Claude; das Multi-Modell-Gremium (GPT/Gemini) war in dieser Sitzung nicht verbunden. Eine Zweitmeinung kann manuell eingeholt werden.
 - Code, Tests und Konfiguration wurden direkt geprüft; Videoqualität, Dashboard-Bedienung und Plattform-Performance nicht.
-- Aussagen zu Plattformregeln (Unoriginal Content, Content Posting API) vor Umsetzung an aktuellen offiziellen Richtlinien prüfen.
+- Aussagen zu Plattformregeln (Content Posting API) vor Umsetzung an aktuellen offiziellen Richtlinien prüfen.
 
 Verwandt: [[System-Architektur]] · [[Clip-Qualitaetsaudit]] · [[Status]]
