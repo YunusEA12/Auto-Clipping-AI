@@ -29,3 +29,5 @@ Wichtige Architektur-Entscheidungen werden hier automatisch als eigene Markdown-
 - [[Render-Qualitaet]] — Satzgrenzen, Layoutwechsel und technische Upload-Sperre.
 
 - [[Projektwaechter]] — Antigravity-Abo, Betriebspruefung und getestete Verbesserungskandidaten.
+
+- [[Facecam-Quellenschutz]] — Inhaltsgesichter von separaten Kamerabereichen unterscheiden, sichere Vollbild-Fallbacks.

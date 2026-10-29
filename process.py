@@ -1197,6 +1197,16 @@ def process_clips_iter(
             facecam_scan=facecam_scan,
         )
 
+        # Presence is not provenance: a persistent face in a reacted interview can
+        # otherwise be duplicated above that same interview. Require a plausible
+        # overlay region before making a separate face panel, even in forced split mode.
+        source_evidence = vision.assess_facecam_source(facecam_scan, override_box_ratio)
+        clip["facecam_source"] = source_evidence
+        if effective_layout == LAYOUT_SPLIT_SCREEN and not source_evidence["passed"]:
+            logger.warning("Facecam source unverified: %s; preserving whole source", source_evidence["reason"])
+            effective_layout = LAYOUT_BLUR_BACKGROUND
+            clip["layout_validation"] = source_evidence.copy()
+
         # detection_ts (not clip["start_time"]) — the exact frame resolve_layout()'s own
         # detection succeeded at, which may be a LAYOUT_RETRY_FRACTIONS retry rather than
         # clip_start. Re-detecting at clip["start_time"] here unconditionally used to be able
@@ -1221,6 +1231,7 @@ def process_clips_iter(
                 str(video_path), detection_ts, padding_factor=padding_factor,
                 clip_end=clip["end_time"], override_box_ratio=override_box_ratio,
                 verified_box_ratio=verified_box_ratio,
+                configured_roi_only=override_box_ratio is not None,
             )
         elif effective_layout == LAYOUT_FULL_CAM:
             padding_factor = (
@@ -1321,6 +1332,11 @@ def process_clips_iter(
                     multi_cam_boxes=multi_cam_boxes,
                 )
             clip["auto_qc"] = auto_qc.check_render(output_path, layout=effective_layout, subtitle_path=ass_path)
+            clip["auto_qc"].setdefault("checks", {})["facecam_source"] = {
+                **source_evidence,
+                "applicable": effective_layout == LAYOUT_SPLIT_SCREEN,
+                "passed": effective_layout != LAYOUT_SPLIT_SCREEN or source_evidence["passed"],
+            }
         finally:
             ass_path.unlink(missing_ok=True)
 

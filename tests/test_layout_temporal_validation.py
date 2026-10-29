@@ -54,7 +54,8 @@ def test_pipeline_records_fallback_in_sidecar(tmp_path, monkeypatch):
     data = {"clips": [{"start_time": 0.0, "end_time": 20.0, "title": "Clip"}]}
     _process_clips_iter_common_mocks(monkeypatch, tmp_path, data)
     monkeypatch.setattr(process, "resolve_layout", real_resolve)
-    monkeypatch.setattr(vision, "locate_persistent_facecam", lambda *args: None)
+    monkeypatch.setattr(vision, "locate_persistent_facecam", lambda *args:
+                        vision.FacecamScan((.82, .05, .92, .2), 1., 16, 16, .9))
     monkeypatch.setattr(vision, "get_facecam_coordinates", lambda *args, **kwargs: (0, 0, 100, 100))
     monkeypatch.setattr(vision, "validate_facecam_crop", lambda *args: {
         "passed": False, "reason": "facecam_missing_or_outside_crop", "samples": []})
