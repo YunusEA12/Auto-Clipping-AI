@@ -15,6 +15,18 @@ import pytest
 import process_supervisor
 
 
+@pytest.fixture(autouse=True)
+def windows_constants_for_simulated_platform(monkeypatch):
+    """Simulating sys.platform does not add Windows-only stdlib constants on Linux."""
+    for module, name, value in (
+        (process_supervisor.signal, 'CTRL_BREAK_EVENT', 1),
+        (subprocess, 'CREATE_NEW_PROCESS_GROUP', 0x00000200),
+        (subprocess, 'CREATE_NO_WINDOW', 0x08000000),
+    ):
+        if not hasattr(module, name):
+            monkeypatch.setattr(module, name, value, raising=False)
+
+
 def test_watchdog_import_resolves_to_the_real_package_not_ours():
     import watchdog
     assert "site-packages" in watchdog.__file__.replace("\\", "/")
