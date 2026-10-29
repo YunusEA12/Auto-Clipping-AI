@@ -25,6 +25,11 @@ def main() -> int:
             failures.append(name)
 
     report('Python', sys.version_info >= (3, 11), sys.executable)
+    for name in ('temp', 'output', 'models', 'uploaded_clips', 'selector_audit'):
+        directory = ROOT / name
+        target = directory if directory.exists() else ROOT
+        report(f'Writable {name}', os.access(target, os.W_OK),
+               'writable by current user' if os.access(target, os.W_OK) else 'fix ownership/permissions for the service user')
     for module, package in (
         ('streamlit', 'streamlit'), ('psutil', 'psutil'),
         ('faster_whisper', 'faster-whisper'), ('google.genai', 'google-genai'),
