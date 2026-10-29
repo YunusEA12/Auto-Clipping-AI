@@ -1,6 +1,6 @@
 # Projekt-Bewertung (kritisch, 1–100)
 
-Stand: 29.10.2026, **Version 2** · Grundlage: Code auf `main`-Stand cf443e0, 53 Commits, 731 Tests (alle grün, lokal ausgeführt), Wiki, README, Deploy-Dateien, Branch `feature/agent-automated-refactoring`.
+Stand: 29.10.2026, **Version 3** · Grundlage: Code auf `main`-Stand bc0e65d, 55 Commits, 777 Tests (alle grün, lokal ausgeführt), Wiki, README, Deploy-Dateien, Branch `feature/agent-automated-refactoring`.
 Nicht geprüft: echte gerenderte Clips, Live-Performance auf TikTok, das Dashboard im Browser. Bereiche, die davon abhängen, sind als *Schätzung* markiert.
 
 Skala: **1–30** kritisch · **31–50** schwach · **51–70** solide mit Lücken · **71–85** gut · **86–100** herausragend.
@@ -13,22 +13,24 @@ Skala: **1–30** kritisch · **31–50** schwach · **51–70** solide mit Lüc
 | 2 | Produktvision & Zielklarheit | **45** | 5 % | Technisch klar, geschäftlich unklar |
 | 3 | Datenbasis & Feedback-Loop | **35** | 12 % | Nur Views/Likes, kaum Volumen |
 | 4 | Wachstum, Distribution & Content-Strategie | **40** | 12 % | Ein Kanal, keine Posting-Strategie |
-| 5 | KI-Clip-Auswahl (Analyse + Critic) | **60** | 12 % | Durchdacht, aber unbelegt (*Schätzung*) |
-| 6 | Rendering, Layout & Untertitel | **72** | 10 % | Stärkster Produktteil (*Schätzung*) |
-| 7 | Upload-Automatisierung | **50** | 8 % | Sehr sorgfältig, aber prinzipiell fragil |
+| 5 | KI-Clip-Auswahl (Analyse + Critic) | **63** | 12 % | Schnitte jetzt auf Satzgrenzen; Treffsicherheit unbelegt (*Schätzung*) |
+| 6 | Rendering, Layout & Untertitel | **74** | 10 % | Layoutprüfung über den ganzen Clip; Fallback evtl. zu streng (*Schätzung*) |
+| 7 | Upload-Automatisierung | **35** | 8 % | **Neue Qualitätssperre blockiert derzeit jeden Clip mit Untertiteln** |
 | 8 | Architektur & Modularität | **50** | 5 % | Flache Skriptsammlung, Großdateien |
 | 9 | Codequalität & Lesbarkeit | **55** | 4 % | Robust, aber Kommentar-Überladung |
-| 10 | Tests & CI | **82** | 4 % | Klare Stärke |
+| 10 | Tests & CI | **80** | 4 % | Viele Tests, aber der Sperr-Fehler rutschte durch |
 | 11 | Betrieb, Deploy & 24/7 | **68** | 5 % | Läuft jetzt auf dem VPS; Alarm und Deploy noch manuell |
 | 12 | Skalierbarkeit | **35** | 3 % | JSON-Dateien, Browser-Slots, ein Account |
 | 13 | Kosten & LLM-Abhängigkeit | **55** | 2 % | Günstig, aber Free-Tier-Hopping |
 | 14 | Sicherheit & Secrets | **67** | 2 % | Gute Regeln, riskantes `git add -A` |
-| 15 | Dokumentation & Wissensmanagement | **74** | 1 % | Ausführlich, teils veraltet |
+| 15 | Dokumentation & Wissensmanagement | **75** | 1 % | Ausführlich, teils veraltet |
 | 16 | Dashboard & Bedienbarkeit | **63** | — | Refresh hinter Proxy repariert; *Schätzung* |
 | 17 | Entwicklungsprozess & Fokus | **58** | — | Viel Feuerwehr, wenig Roadmap |
 
-**Gewichteter Gesamtwert: 50 / 100** (Version 1: 48).
-Ungewichtet (Technik zählt gleich viel wie Geschäft): 55 / 100 (Version 1: 53).
+**Gewichteter Gesamtwert: 49 / 100** (Version 2: 50, Version 1: 48). **Nach Behebung des Sperr-Fehlers: ≈ 51.**
+Ungewichtet (Technik zählt gleich viel wie Geschäft): 55 / 100 (Version 2: 55).
+
+> **Kritischer Befund (V3):** `auto_qc.check_subtitles()` schätzt jede Untertitelzeile als 1 em pro Zeichen breit und kennt keinen Zeilenumbruch. Ein normaler 4-Wort-Block bei Schriftgröße 80 (z. B. „DIGGA WAS IST DAS“) gilt damit schon als zu breit. Nachgestellt mit `process.build_ass_for_clip()`: 13 von 13 Untertitel-Events verletzen die Grenze, auch bei kurzem Titel → `auto_qc.passed = false` → **kein Upload mehr**. Der Fehler blieb unentdeckt, weil die Tests nur kurze Kunsttexte prüfen. Vor dem nächsten Server-Update beheben.
 
 Rechte sind geklärt: Die geclippten Streamer erlauben Clips ausdrücklich. Der Bereich ist deshalb nicht Teil der Bewertung.
 
@@ -87,7 +89,7 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 
 **Maßnahmen:** YouTube Shorts wieder einschalten (offizielle API = weniger Risiko); Serienformate („Elias' Ausraster der Woche“); Hook-Bibliothek aus eigenen Top-Clips statt Beispielen.
 
-## 5 · KI-Clip-Auswahl — 60/100 (*Schätzung*)
+## 5 · KI-Clip-Auswahl — 63/100 (*Schätzung*)
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
@@ -96,22 +98,23 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 | Vision-Critic | 55 | ~52 % Überlebensrate laut Code-Kommentar; Treffsicherheit nicht gegen echte Performance validiert |
 | Modellwahl | 45 | Billigstes Lite-Modell als Selektor *und* Critic |
 | Halluzinationsschutz | 70 | Zeitstempel-Grenzen und Dauerprüfung vorhanden |
+| Schnittgrenzen | 75 | Neu: `align_clip_boundaries()` erweitert Clips auf Whisper-Satzgrenzen (+0,3 s Vorlauf, +0,5 s Nachlauf), prüft danach erneut die Länge. Rest-Risiko: ohne Satzzeichen gilt das ganze Whisper-Segment, `wave.Error` bei defekter Audiodatei wird nicht abgefangen |
 
 **Maßnahmen:** Twitch-Chat-Aktivität als Signal; Critic-Urteil mit gemessener Performance korrelieren (sonst ist er Bauchgefühl); für die finale Auswahl ein stärkeres Modell testen, Lite nur zum Vorfiltern.
 
-## 6 · Rendering, Layout & Untertitel — 72/100 (*Schätzung*)
+## 6 · Rendering, Layout & Untertitel — 74/100 (*Schätzung*)
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
-| Layout-Logik | 78 | Split-Screen, Multi-Cam-Grids, Facecam-Agent gegen Spielgesichter — stark |
+| Layout-Logik | 80 | Split-Screen, Multi-Cam-Grids, Facecam-Agent gegen Spielgesichter; neu: Ausschnitt wird an 5 Zeitpunkten geprüft, sonst Vollbild mit Unschärfe. Risiko: Ein einziger verpasster Gesichtstreffer (Kopf gedreht, Hand vor dem Gesicht) reicht schon für den Fallback — evtl. zu streng, Quote im Betrieb beobachten |
 | Untertitel | 72 | Wortgenaue `.ass`, Escaping und Isolation getestet |
-| Audio | 65 | Musik-Mixing getestet; Lautheits-Normalisierung (LUFS) prüfen |
+| Audio | 60 | Lautheit wird jetzt gemessen (Ziel −14 ±3 LUFS), aber nicht normalisiert. Liegen Streams typischerweise leiser, sperrt die Prüfung viele Clips — vorher an echten Clips messen oder `loudnorm` im Render ergänzen |
 | Wartbarkeit | 50 | `process.py` 1.334 Zeilen |
 | Nachweis | 60 | Echter 1080×1920-Render von Live-Aufnahme auf dem VPS validiert; 10 Audit-Bewertungen liegen auf dem Server (nicht im Repo, hier nicht eingesehen) |
 
 **Maßnahmen:** Qualitätsaudit der nächsten 10 Clips wirklich auswerten; Lautheit auf ca. −14 LUFS normalisieren; `process.py` in Layout/Untertitel/Audio/Encode aufteilen.
 
-## 7 · Upload-Automatisierung — 50/100
+## 7 · Upload-Automatisierung — 35/100
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
@@ -119,6 +122,7 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 | Duplikatschutz | 85 | Globales Content-Hash-Ledger |
 | Robustheit | 35 | Selektor- und Sprach-Abhängigkeit (Fix für englischen Publish-Dialog zeigt die Fragilität) |
 | Plattformrisiko | 25 | Browser-Automation + Cookies = Sperr- und Wartungsrisiko |
+| Qualitätssperre (neu) | 10 | Idee richtig (technisch fehlerhafte Clips bleiben lokal, Gründe im Dashboard), aber die Untertitel-Schätzung sperrt derzeit alle Clips (siehe Befund oben). Nach Korrektur realistisch 60–70 |
 
 **Maßnahmen:** TikTok Content Posting API prüfen und, wenn erreichbar, den Playwright-Upload ablösen; bis dahin Selektor-Check täglich automatisch laufen lassen.
 
@@ -145,11 +149,11 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 
 **Maßnahmen:** Kommentare auf das „Warum heute“ kürzen; `ruff` + `mypy` (oder `pyright`) in CI.
 
-## 10 · Tests & CI — 82/100
+## 10 · Tests & CI — 80/100
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
-| Umfang | 88 | 731 Tests, 55 Testdateien, 8 s Laufzeit |
+| Umfang | 85 | 777 Tests, ca. 12 s Laufzeit. Aber: Tests mit Kunstdaten haben den Sperr-Fehler nicht gefunden — es fehlt ein Test mit echter `build_ass_for_clip()`-Ausgabe |
 | CI | 85 | Windows + Ubuntu, gepinnte Actions, `uv --locked` |
 | Integration | 65 | Echter Audio-Decode-Test; kein End-to-End-Render mit Beispielvideo |
 | Lint/Typen/Coverage | 40 | Nicht in CI |
@@ -202,10 +206,11 @@ Viele `fix:`-Commits zu Vorfällen, schubweise Arbeit (Pausen von Wochen). Posit
 
 | Prio | Maßnahme | Bereich | Aufwand | Wirkung |
 |---|---|---|---|---|
+| 0 | **Untertitel-Prüfung in `auto_qc.py` reparieren, bevor der Server aktualisiert wird** (sonst keine Uploads) | 6, 7 | klein | kritisch |
 | 1 | Geschäftsmodell wählen und TICKET-001 (Creator Rewards, ≥ 61 s) entscheiden | 1 | klein | sehr hoch |
 | 2 | 3 messbare Ziele für 90 Tage festlegen und im Dashboard anzeigen | 2, 16 | klein | hoch |
 | 3 | YouTube Shorts per offizieller API wieder einschalten + Retention-Daten holen | 3, 4 | mittel | hoch |
-| 4 | Qualitätsaudit der 10 Clips auswerten, Critic gegen echte Views prüfen | 5, 6 | klein | hoch |
+| 4 | Qualitätsaudit der 10 Clips auswerten, Critic gegen echte Views prüfen; Sperr- und Fallback-Quote von `auto_qc` beobachten | 5, 6 | klein | hoch |
 | 5 | Twitch-Chat-Spikes als Auswahlsignal | 5 | mittel | mittel–hoch |
 | 6 | TikTok Content Posting API statt Browser-Upload prüfen | 7 | mittel | mittel–hoch |
 | 7 | Externer Ausfall-Alarm + Deploy-Skript für den VPS (Umzug selbst erledigt ✓) | 11 | klein | mittel |
@@ -221,9 +226,19 @@ Viele `fix:`-Commits zu Vorfällen, schubweise Arbeit (Pausen von Wochen). Posit
 | Datenbasis | 35 | 60 |
 | Wachstum | 40 | 60 |
 | Betrieb | 68 | 80 |
-| **Gesamt (gewichtet)** | **50** | **≈ 64** |
+| **Gesamt (gewichtet)** | **49** | **≈ 64** |
 
-## Änderungen seit Version 1
+## Änderungen Version 2 → 3
+
+| Bereich | V2 | V3 | Grund |
+|---|---:|---:|---|
+| Upload-Automatisierung | 50 | 35 | Neue Qualitätssperre blockiert jeden Clip mit Untertiteln |
+| KI-Clip-Auswahl | 60 | 63 | Schnitte auf Satzgrenzen |
+| Rendering | 72 | 74 | Layoutprüfung über den ganzen Clip, Titel aus der oberen Gefahrenzone |
+| Tests & CI | 82 | 80 | +46 Tests, aber kritischer Fehler unentdeckt |
+| Dokumentation | 74 | 75 | `Render-Qualitaet.md` dokumentiert Grenzen ehrlich |
+
+## Änderungen Version 1 → 2
 
 | Bereich | V1 | V2 | Grund |
 |---|---:|---:|---|
@@ -237,7 +252,7 @@ Viele `fix:`-Commits zu Vorfällen, schubweise Arbeit (Pausen von Wochen). Posit
 
 ## Methodik und Grenzen
 
-- Einzelbewertung durch Claude; das Multi-Modell-Gremium (GPT/Gemini) war in dieser Sitzung nicht verbunden. Eine Zweitmeinung kann manuell eingeholt werden.
+- Bewertung durch Claude; Gemini war mangels Schlüssel nicht verfügbar, GPT-Gutachten über die ChatGPT-App angefordert (`/council`).
 - Code, Tests und Konfiguration wurden direkt geprüft; Videoqualität, Dashboard-Bedienung und Plattform-Performance nicht.
 - Aussagen zu Plattformregeln (Content Posting API) vor Umsetzung an aktuellen offiziellen Richtlinien prüfen.
 
