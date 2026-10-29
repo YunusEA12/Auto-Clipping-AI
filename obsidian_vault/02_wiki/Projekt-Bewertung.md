@@ -1,6 +1,6 @@
 # Projekt-Bewertung (kritisch, 1–100)
 
-Stand: 29.10.2026 · Grundlage: Code auf `main`-Stand f829a75, 50 Commits, 731 Tests (alle grün, lokal ausgeführt), Wiki, README, Deploy-Dateien.
+Stand: 29.10.2026, **Version 2** · Grundlage: Code auf `main`-Stand cf443e0, 53 Commits, 731 Tests (alle grün, lokal ausgeführt), Wiki, README, Deploy-Dateien, Branch `feature/agent-automated-refactoring`.
 Nicht geprüft: echte gerenderte Clips, Live-Performance auf TikTok, das Dashboard im Browser. Bereiche, die davon abhängen, sind als *Schätzung* markiert.
 
 Skala: **1–30** kritisch · **31–50** schwach · **51–70** solide mit Lücken · **71–85** gut · **86–100** herausragend.
@@ -9,26 +9,26 @@ Skala: **1–30** kritisch · **31–50** schwach · **51–70** solide mit Lüc
 
 | # | Bereich | Punkte | Gewicht | Kurzurteil |
 |---|---|---:|---:|---|
-| 1 | Geschäftsmodell & Monetarisierung | **25** | 15 % | Kein definierter Weg zu Einnahmen |
+| 1 | Geschäftsmodell & Monetarisierung | **30** | 15 % | Creator-Rewards-Idee liegt ungemergt, keine Entscheidung |
 | 2 | Produktvision & Zielklarheit | **45** | 5 % | Technisch klar, geschäftlich unklar |
 | 3 | Datenbasis & Feedback-Loop | **35** | 12 % | Nur Views/Likes, kaum Volumen |
 | 4 | Wachstum, Distribution & Content-Strategie | **40** | 12 % | Ein Kanal, keine Posting-Strategie |
 | 5 | KI-Clip-Auswahl (Analyse + Critic) | **60** | 12 % | Durchdacht, aber unbelegt (*Schätzung*) |
-| 6 | Rendering, Layout & Untertitel | **70** | 10 % | Stärkster Produktteil (*Schätzung*) |
+| 6 | Rendering, Layout & Untertitel | **72** | 10 % | Stärkster Produktteil (*Schätzung*) |
 | 7 | Upload-Automatisierung | **50** | 8 % | Sehr sorgfältig, aber prinzipiell fragil |
 | 8 | Architektur & Modularität | **50** | 5 % | Flache Skriptsammlung, Großdateien |
 | 9 | Codequalität & Lesbarkeit | **55** | 4 % | Robust, aber Kommentar-Überladung |
 | 10 | Tests & CI | **82** | 4 % | Klare Stärke |
-| 11 | Betrieb, Deploy & 24/7 | **45** | 5 % | Hängt am Windows-PC, Server halb fertig |
+| 11 | Betrieb, Deploy & 24/7 | **68** | 5 % | Läuft jetzt auf dem VPS; Alarm und Deploy noch manuell |
 | 12 | Skalierbarkeit | **35** | 3 % | JSON-Dateien, Browser-Slots, ein Account |
 | 13 | Kosten & LLM-Abhängigkeit | **55** | 2 % | Günstig, aber Free-Tier-Hopping |
-| 14 | Sicherheit & Secrets | **65** | 2 % | Gute Regeln, riskantes `git add -A` |
-| 15 | Dokumentation & Wissensmanagement | **72** | 1 % | Ausführlich, teils veraltet |
-| 16 | Dashboard & Bedienbarkeit | **60** | — | *Schätzung*, nicht im Browser geprüft |
-| 17 | Entwicklungsprozess & Fokus | **55** | — | Viel Feuerwehr, wenig Roadmap |
+| 14 | Sicherheit & Secrets | **67** | 2 % | Gute Regeln, riskantes `git add -A` |
+| 15 | Dokumentation & Wissensmanagement | **74** | 1 % | Ausführlich, teils veraltet |
+| 16 | Dashboard & Bedienbarkeit | **63** | — | Refresh hinter Proxy repariert; *Schätzung* |
+| 17 | Entwicklungsprozess & Fokus | **58** | — | Viel Feuerwehr, wenig Roadmap |
 
-**Gewichteter Gesamtwert: 48 / 100.**
-Ungewichtet (Technik zählt gleich viel wie Geschäft): 53 / 100.
+**Gewichteter Gesamtwert: 50 / 100** (Version 1: 48).
+Ungewichtet (Technik zählt gleich viel wie Geschäft): 55 / 100 (Version 1: 53).
 
 Rechte sind geklärt: Die geclippten Streamer erlauben Clips ausdrücklich. Der Bereich ist deshalb nicht Teil der Bewertung.
 
@@ -36,14 +36,16 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 
 ---
 
-## 1 · Geschäftsmodell & Monetarisierung — 25/100
+## 1 · Geschäftsmodell & Monetarisierung — 30/100
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
-| Definierte Einnahmequelle | 15 | Nirgends beschrieben |
+| Definierte Einnahmequelle | 30 | Branch `feature/agent-automated-refactoring` (TICKET-001, 06.09.) hebt die Mindestlänge auf 61 s für TikTok Creator Rewards. Nicht gemergt: `main` erlaubt weiter 15-s-Clips, die dafür nicht zählen. Ziel und Code widersprechen sich |
 | Zielgruppe/Kunde | 25 | Unklar, ob eigener Clip-Kanal, Dienstleistung für Streamer oder SaaS |
 | Wettbewerbsabgrenzung | 30 | Markt hat etablierte Clipping-Tools (z. B. Opus Clip, Vizard, StreamLadder); Alleinstellung (deutsche Streams, Facecam-Agent, Critic) nicht formuliert |
 | Kosten-Nutzen-Messung | 30 | LLM-Kosten werden gezählt, Erträge nicht |
+
+**Sofort entscheiden:** TICKET-001 mergen oder verwerfen. Wenn Creator Rewards das Ziel ist, müssen Selektor-Prompt, Critic und Qualitätsaudit auf Clips über 1 Minute ausgerichtet werden (Teilnahmebedingungen vorher aktuell prüfen).
 
 **Drei realistische Wege (eine Entscheidung nötig):**
 - **A · Bezahltes Clipping für Streamer** (Agentur-Modell): Streamer zahlt pro Clip/Monat oder pro Views. Nutzt die bestehende Clip-Erlaubnis direkt. *Empfehlung.*
@@ -97,7 +99,7 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 
 **Maßnahmen:** Twitch-Chat-Aktivität als Signal; Critic-Urteil mit gemessener Performance korrelieren (sonst ist er Bauchgefühl); für die finale Auswahl ein stärkeres Modell testen, Lite nur zum Vorfiltern.
 
-## 6 · Rendering, Layout & Untertitel — 70/100 (*Schätzung*)
+## 6 · Rendering, Layout & Untertitel — 72/100 (*Schätzung*)
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
@@ -105,7 +107,7 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 | Untertitel | 72 | Wortgenaue `.ass`, Escaping und Isolation getestet |
 | Audio | 65 | Musik-Mixing getestet; Lautheits-Normalisierung (LUFS) prüfen |
 | Wartbarkeit | 50 | `process.py` 1.334 Zeilen |
-| Nachweis | 50 | Qualitätsaudit eingerichtet, Ergebnisse noch ausstehend |
+| Nachweis | 60 | Echter 1080×1920-Render von Live-Aufnahme auf dem VPS validiert; 10 Audit-Bewertungen liegen auf dem Server (nicht im Repo, hier nicht eingesehen) |
 
 **Maßnahmen:** Qualitätsaudit der nächsten 10 Clips wirklich auswerten; Lautheit auf ca. −14 LUFS normalisieren; `process.py` in Layout/Untertitel/Audio/Encode aufteilen.
 
@@ -152,16 +154,17 @@ Kernaussage: **Technisch ein ernstzunehmendes 65–70-Punkte-Projekt, geschäftl
 | Integration | 65 | Echter Audio-Decode-Test; kein End-to-End-Render mit Beispielvideo |
 | Lint/Typen/Coverage | 40 | Nicht in CI |
 
-## 11 · Betrieb, Deploy & 24/7 — 45/100
+## 11 · Betrieb, Deploy & 24/7 — 68/100
 
 | Kriterium | Punkte | Befund |
 |---|---:|---|
 | Supervisor & Self-Healing | 70 | Prozess-Supervisor, Heartbeats, Backoff |
-| Laufumgebung | 30 | Läuft auf privatem Windows-PC; README sagt selbst: PC muss an sein |
-| Server-Deploy | 45 | systemd-Units vorhanden, Betrieb nicht nachgewiesen |
-| Monitoring/Alarme | 40 | `notify.py` und Health-Check vorhanden, kein externer Alarm bei Ausfall |
+| Laufumgebung | 80 | Dauerbetrieb auf Linux-VPS, Windows-Fleet pausiert, PC nicht mehr nötig |
+| Server-Deploy | 65 | Supervisor, Dashboard, Audit als systemd-Dienste; Ende-zu-Ende-Lauf (Aufnahme → Transkription → Render) nachgewiesen. Updates aber manuell: Push aktualisiert den Server nicht |
+| Health-Check | 70 | Prüft jetzt Schreibrechte der Laufzeitordner (Ursache des Root-Ordner-Ausfalls) |
+| Monitoring/Alarme | 40 | Weiterhin kein externer Alarm bei Ausfall |
 
-**Maßnahmen:** VPS-Umzug abschließen; externer Uptime-/Heartbeat-Check mit Push-Alarm.
+**Maßnahmen:** Externer Heartbeat-Check mit Push-Alarm; ein Deploy-Skript (`git pull` → `uv sync --locked` → Health-Check → Dienste neu starten), damit Updates reproduzierbar sind; README auf Serverbetrieb umstellen (sagt noch „PC muss an sein“).
 
 ## 12 · Skalierbarkeit — 35/100
 
@@ -177,21 +180,21 @@ Ein TikTok-Account, Browser-Slots als Engpass, JSON-State, serielles Rendering a
 
 **Maßnahmen:** Bezahlten Tarif mit festem Modell; Modellname in Konfiguration statt Code.
 
-## 14 · Sicherheit & Secrets — 65/100
+## 14 · Sicherheit & Secrets — 67/100
 
-Gute `.gitignore`, Redaction in Logs, Secret-Regeln in `claude.md`. Risiko: `scripts/git_auto_sync.sh` macht `git add -A` und verlässt sich allein auf `.gitignore` — ein neuer, unbekannter Cookie-Dateiname landet automatisch im Repo (der Fall `youtube_studio_cookies.json` ist schon einmal passiert). **Maßnahme:** Allowlist statt `add -A` oder Secret-Scan (z. B. gitleaks) als Pre-Commit/CI.
+Gute `.gitignore`, Redaction in Logs, Secret-Regeln in `claude.md`. Neu: Dashboard hinter Anmeldung und Firewall, Schlüssel bewusst nicht im Server-Archiv. Offen: Der temporäre Root-SSH-Wartungszugang soll laut `Serverbetrieb.md` entfernt werden — erledigen und abhaken. Risiko: `scripts/git_auto_sync.sh` macht `git add -A` und verlässt sich allein auf `.gitignore` — ein neuer, unbekannter Cookie-Dateiname landet automatisch im Repo (der Fall `youtube_studio_cookies.json` ist schon einmal passiert). **Maßnahme:** Allowlist statt `add -A` oder Secret-Scan (z. B. gitleaks) als Pre-Commit/CI.
 
-## 15 · Dokumentation — 72/100
+## 15 · Dokumentation — 74/100
 
-README, Server-Setup, Upload-README, Obsidian-Wiki. Schwächen: README widerspricht dem TikTok-only-Modus; `Status.md` ist eine Dateiliste statt Status; Doku-Mix Deutsch/Englisch.
+README, Server-Setup, Upload-README, Obsidian-Wiki, neu `Serverbetrieb.md` (gut: dokumentiert Grenzen ehrlich). Schwächen: README widerspricht dem TikTok-only-Modus; `Status.md` ist eine Dateiliste statt Status; Doku-Mix Deutsch/Englisch.
 
-## 16 · Dashboard — 60/100 (*Schätzung*)
+## 16 · Dashboard — 63/100 (*Schätzung*)
 
-Streamlit, sauber über `dashboard_api.py` entkoppelt, Qualitätsbericht sichtbar. Fehlt vermutlich: Geschäftskennzahlen (Follower, Views/Clip, Kosten/Clip, Umsatz).
+Streamlit, sauber über `dashboard_api.py` entkoppelt, Qualitätsbericht sichtbar. Auto-Refresh nutzt jetzt Streamlits eigenen Timer statt des iframe-Pakets, das hinter dem Proxy versagte. Rest: `streamlit-autorefresh` steht noch in `pyproject.toml`, wird aber nicht mehr importiert — entfernen. Fehlt vermutlich: Geschäftskennzahlen (Follower, Views/Clip, Kosten/Clip, Umsatz).
 
-## 17 · Entwicklungsprozess & Fokus — 55/100
+## 17 · Entwicklungsprozess & Fokus — 58/100
 
-Viele `fix:`-Commits zu Vorfällen, schubweise Arbeit (Pausen von Wochen). Die Energie fließt in Zuverlässigkeit, nicht in Wachstum. Regel „automatisch `git add .` und push nach jeder Aufgabe“ in `claude.md` widerspricht sauberem Review.
+Viele `fix:`-Commits zu Vorfällen, schubweise Arbeit (Pausen von Wochen). Positiv: Der Server-Umzug wurde zu Ende gebracht und dokumentiert. Negativ: Ein Branch mit geschäftsrelevanter Änderung (TICKET-001) liegt seit über sieben Wochen ungemergt. Die Energie fließt in Zuverlässigkeit, nicht in Wachstum. Regel „automatisch `git add .` und push nach jeder Aufgabe“ in `claude.md` widerspricht sauberem Review.
 
 ---
 
@@ -199,13 +202,13 @@ Viele `fix:`-Commits zu Vorfällen, schubweise Arbeit (Pausen von Wochen). Die E
 
 | Prio | Maßnahme | Bereich | Aufwand | Wirkung |
 |---|---|---|---|---|
-| 1 | Geschäftsmodell wählen (Empfehlung: bezahltes Clipping für Streamer) | 1 | klein | sehr hoch |
+| 1 | Geschäftsmodell wählen und TICKET-001 (Creator Rewards, ≥ 61 s) entscheiden | 1 | klein | sehr hoch |
 | 2 | 3 messbare Ziele für 90 Tage festlegen und im Dashboard anzeigen | 2, 16 | klein | hoch |
 | 3 | YouTube Shorts per offizieller API wieder einschalten + Retention-Daten holen | 3, 4 | mittel | hoch |
 | 4 | Qualitätsaudit der 10 Clips auswerten, Critic gegen echte Views prüfen | 5, 6 | klein | hoch |
 | 5 | Twitch-Chat-Spikes als Auswahlsignal | 5 | mittel | mittel–hoch |
 | 6 | TikTok Content Posting API statt Browser-Upload prüfen | 7 | mittel | mittel–hoch |
-| 7 | Auf VPS umziehen + externer Ausfall-Alarm | 11 | mittel | mittel |
+| 7 | Externer Ausfall-Alarm + Deploy-Skript für den VPS (Umzug selbst erledigt ✓) | 11 | klein | mittel |
 | 8 | Bezahlter LLM-Tarif mit festem Modell | 13 | klein | mittel |
 | 9 | Secret-Scan statt blindem `git add -A` | 14 | klein | mittel |
 | 10 | Paketstruktur + SQLite + Kommentare entschlacken | 8, 9, 12 | groß | mittel (erst bei Skalierung) |
@@ -214,11 +217,23 @@ Viele `fix:`-Commits zu Vorfällen, schubweise Arbeit (Pausen von Wochen). Die E
 
 | Bereich | Heute | Ziel |
 |---|---:|---:|
-| Geschäftsmodell | 25 | 60 |
+| Geschäftsmodell | 30 | 60 |
 | Datenbasis | 35 | 60 |
 | Wachstum | 40 | 60 |
-| Betrieb | 45 | 70 |
-| **Gesamt (gewichtet)** | **48** | **≈ 63** |
+| Betrieb | 68 | 80 |
+| **Gesamt (gewichtet)** | **50** | **≈ 64** |
+
+## Änderungen seit Version 1
+
+| Bereich | V1 | V2 | Grund |
+|---|---:|---:|---|
+| Betrieb | 45 | 68 | VPS-Dauerbetrieb, Ende-zu-Ende validiert, Rechte-Check im Health-Check |
+| Geschäftsmodell | 25 | 30 | Creator-Rewards-Ansatz gefunden (Branch), aber nicht entschieden |
+| Rendering | 70 | 72 | Echter Render auf dem Server nachgewiesen |
+| Dashboard | 60 | 63 | Refresh hinter Proxy repariert |
+| Entwicklungsprozess | 55 | 58 | Server-Umzug abgeschlossen |
+| Sicherheit | 65 | 67 | Dashboard-Anmeldung, Schlüssel nicht im Archiv |
+| Dokumentation | 72 | 74 | `Serverbetrieb.md` |
 
 ## Methodik und Grenzen
 

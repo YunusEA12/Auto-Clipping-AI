@@ -22,7 +22,7 @@ Startseite der vernetzten Projekt-Dokumentation. Diese Seite verlinkt die zentra
 
 - [[Clip-Qualitaetsaudit]] — nächste zehn Clips, sieben Qualitätskategorien und Zwölf-Stunden-Check.
 
-- [[Projekt-Bewertung]] — kritische Bewertung in 17 Bereichen (1–100) mit Top-10-Maßnahmen (29.10.2026).
+- [[Projekt-Bewertung]] — kritische Bewertung in 17 Bereichen (1–100) mit Top-10-Maßnahmen (29.10.2026, Version 2).
 
 - [[Wiederinbetriebnahme]] — Diagnose, aktuelle Abhängigkeiten und reproduzierbarer Windows-Start (28.10.2026).
 
