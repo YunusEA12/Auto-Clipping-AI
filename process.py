@@ -18,6 +18,7 @@ from filelock import FileLock
 import auto_qc
 import atomic_io
 import optimization_engine
+import music_matching
 import streamers
 import vision
 
@@ -580,8 +581,8 @@ def build_filter_complex(
     raise ValueError(f"Unknown layout: {layout}")
 
 
-def pick_background_track() -> Optional[Path]:
-    """Random track from MUSIC_DIR, or None if the folder is missing/empty — the "randomly,
+def pick_background_track(clip: Optional[dict] = None) -> Optional[Path]:
+    """Mood-weighted random track from MUSIC_DIR, or None if the folder is missing/empty — the "randomly,
     if any are configured" contract render_clip() relies on to fall back to the old
     music-free render untouched.
 
@@ -589,7 +590,11 @@ def pick_background_track() -> Optional[Path]:
     uploads exist to name a preferred track, most picks still land on it, but
     MUSIC_EXPLORATION_RATE of picks stay uniformly random regardless — every track keeps
     accumulating real samples instead of the picker locking onto whichever one got lucky
-    first with too little data to trust."""
+    first with too little data to trust.
+
+    Non-preferred picks are weighted by how well a track's tags (background_music/tags.json)
+    match the clip (energy_rating, hook_style, title keywords — see music_matching.py); with
+    no clip or no tags this is the old uniform random choice."""
     if not MUSIC_DIR.is_dir():
         return None
     tracks = [p for p in MUSIC_DIR.iterdir() if p.is_file() and p.suffix.lower() in MUSIC_EXTENSIONS]
@@ -602,7 +607,9 @@ def pick_background_track() -> Optional[Path]:
         if preferred_path in tracks:
             return preferred_path
 
-    return random.choice(tracks)
+    tracks.sort()
+    weights = music_matching.track_weights(tracks, music_matching.load_track_tags(MUSIC_DIR), clip)
+    return random.choices(tracks, weights=weights, k=1)[0]
 
 
 def _has_audio_stream(video_path: Path) -> bool:
@@ -796,7 +803,7 @@ def render_clip(
     # per encoder attempt) so a QSV->CPU fallback retries with the SAME track rather than
     # silently swapping to a different random one mid-render.
     if music_path == "unset":
-        music_path = pick_background_track()
+        music_path = pick_background_track(clip)
     # has_source_audio, when given, lets a caller that already knows the answer (e.g.
     # process_clips_iter() below, which re-renders the SAME source_video across an entire
     # batch) skip a redundant ffprobe subprocess per clip — found in review, 2026-08-21, the
@@ -1319,7 +1326,7 @@ def process_clips_iter(
         # optimization_engine.py's module docstring for why this attribute is tracked. Passed
         # into render_clip() explicitly so both are describing the SAME render, not two
         # independent random picks.
-        music_path = pick_background_track()
+        music_path = pick_background_track(clip)
 
         ass_path = build_ass_for_clip(clip, transcript, i, highlight_color, output_w, output_h, effective_layout)
         try:
