@@ -52,6 +52,7 @@ metrics_scrape_health.json
 .tiktok_browser_profile/
 logs/
 quality_audit/
+.council/
 guardian_state.json
 guardian_state.json.lock
 guardian_reports/
