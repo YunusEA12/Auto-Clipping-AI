@@ -1,6 +1,6 @@
 # Auto-Clipping-AI 🎬🤖
 
-Auto-Clipping-AI ist eine modulare, hardware-schonende Python-Pipeline, die den gesamten Prozess der Content-Erstellung für Plattformen wie TikTok, YouTube Shorts und Instagram Reels automatisiert. 
+Auto-Clipping-AI ist eine modulare, hardware-schonende Python-Pipeline, die den gesamten Prozess der Content-Erstellung für TikTok automatisiert. Aktuell läuft die Pipeline im TikTok-only-Modus: YouTube-Uploads sind abgeschaltet (`upload_manager.YOUTUBE_UPLOADS_ENABLED`), das 9:16-Format eignet sich aber technisch auch für andere Kurzvideo-Plattformen. 
 
 Das Tool nimmt lange Video-Dateien (oder Streams) entgegen, transkribiert diese lokal auf der CPU und nutzt Large Language Models (LLMs), um virale oder spannende Segmente semantisch zu erkennen. Anschließend wird das Video automatisch in ein 9:16 Split-Screen-Format (Facecam + Gameplay) gecroppt und mit dynamischen, wortgenauen Untertiteln versehen.
 
@@ -79,7 +79,12 @@ Performance; eine Viralitätsprognose ist keine Garantie und ersetzt keine Watch
 Weniger als zehn neue Clips werden ausdrücklich als unvollständige Stichprobe ausgewiesen.
 Eine vorhandene Kampagne wird durch erneutes `--init` nicht zurückgesetzt.
 
-Die Windows-Prozesse und ein lokaler Codex-Check benötigen einen eingeschalteten PC.
-Für PC-unabhängigen Betrieb muss die Pipeline samt Prüfer auf einem erreichbaren Server
-laufen. Dafür liegt `deploy/auto-clipping-quality-audit.service` bereit; Einrichtung siehe
-[SETUP_SERVER.md](SETUP_SERVER.md). Ein Git-Push allein aktualisiert keine laufenden Serverprozesse.
+## Serverbetrieb
+
+Der Dauerbetrieb läuft seit dem 29.10.2026 auf dem Linux-Server (systemd-Dienste für
+Supervisor, Dashboard und Audit); der PC muss dafür **nicht** mehr eingeschaltet sein. Die
+lokale Windows-Fleet bleibt pausiert. Nur ein lokaler Chat-Follow-up des Codex-Checks braucht
+weiterhin den PC und die Desktop-App. Details: `obsidian_vault/02_wiki/Serverbetrieb.md`,
+Einrichtung: [SETUP_SERVER.md](SETUP_SERVER.md), Audit-Dienst: `deploy/auto-clipping-quality-audit.service`.
+Ein Git-Push allein aktualisiert keine laufenden Serverprozesse – ein Update muss auf dem
+Server explizit installiert und validiert werden.
