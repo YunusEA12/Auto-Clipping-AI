@@ -31,3 +31,5 @@ Wichtige Architektur-Entscheidungen werden hier automatisch als eigene Markdown-
 - [[Projektwaechter]] — Antigravity-Abo, Betriebspruefung und getestete Verbesserungskandidaten.
 
 - [[Facecam-Quellenschutz]] — Inhaltsgesichter von separaten Kamerabereichen unterscheiden, sichere Vollbild-Fallbacks.
+
+- [[Chat-Signal]] — vorbereitetes Twitch-Chat-Spitzensignal für die Clip-Auswahl (noch nicht angebunden).
