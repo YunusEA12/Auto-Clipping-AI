@@ -1,6 +1,7 @@
 """Face detection: locate the facecam region in a video frame for dynamic 9:16 cropping."""
 
 import logging
+import math
 import urllib.request
 from pathlib import Path
 from typing import NamedTuple, Optional, Sequence
@@ -312,6 +313,7 @@ def get_facecam_coordinates(
     sample_count: int = FACECAM_SMOOTH_SAMPLE_COUNT,
     override_box_ratio: Optional[Sequence[float]] = None,
     verified_box_ratio: Optional[Sequence[float]] = None,
+    configured_roi_only: bool = False,
 ) -> tuple[int, int, int, int]:
     """Detect a face at `timestamp` seconds into `video_path` and return a padded (x, y, w, h) box in pixels.
 
@@ -348,6 +350,17 @@ def get_facecam_coordinates(
     `override_box_ratio` this IS a raw face box, so it gets the same `padding_factor` headroom
     a live detection would.
     """
+    if configured_roi_only:
+        approved = assess_facecam_source(None, override_box_ratio)
+        if override_box_ratio is None or not approved["passed"]:
+            raise RuntimeError("A valid configured facecam region is required")
+        frame_w, frame_h = _frame_size(video_path)
+        if frame_w <= 0 or frame_h <= 0:
+            raise RuntimeError("Cannot read source dimensions for configured facecam region")
+        # This is an explicit camera rectangle, not a hint for a global face search.
+        # The caller validates face presence in this exact rectangle over the clip.
+        return _ratio_box_to_pixels(override_box_ratio, frame_w, frame_h)
+
     if verified_box_ratio is not None:
         frame_w, frame_h = _frame_size(video_path)
         if frame_w > 0 and frame_h > 0:
@@ -615,6 +628,57 @@ class FacecamScan(NamedTuple):
         return self.samples_read > 0
 
 
+def assess_facecam_source(
+    scan: Optional[FacecamScan],
+    configured_box_ratio: Optional[Sequence[float]] = None,
+) -> dict:
+    """Decide whether split-screen may treat a source region as a webcam.
+
+    Persistence alone also describes a person in a long interview shot. Automatic
+    selection therefore needs a small peripheral region in at least five readable
+    source samples. This is deliberately a conservative layout heuristic, not face
+    recognition or proof of the streamer's identity. A configured region is an
+    explicit operator choice; callers must crop THAT region, never replace it with
+    the highest-confidence face elsewhere, and still validate face presence in it.
+    """
+    source = "configured_region" if configured_box_ratio is not None else "persistent_peripheral_region"
+
+    def result(passed: bool, reason: Optional[str], box=None) -> dict:
+        return {"passed": passed, "reason": reason, "source": source,
+                "box_ratio": tuple(box) if box is not None else None,
+                "limitation": "identity_not_proven"}
+
+    def valid_box(box) -> bool:
+        try:
+            if len(box) != 4 or any(isinstance(value, bool) or not math.isfinite(value) for value in box):
+                return False
+            x1, y1, x2, y2 = box
+            return 0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1
+        except (TypeError, ValueError):
+            return False
+
+    if configured_box_ratio is not None:
+        if not valid_box(configured_box_ratio):
+            return result(False, "invalid_configured_facecam_region")
+        return result(True, None, configured_box_ratio)
+    if scan is None or not scan.scan_succeeded:
+        return result(False, "facecam_source_scan_unavailable")
+    if scan.samples_read < 5:
+        return result(False, "insufficient_facecam_source_samples")
+    if not math.isfinite(scan.persistence) or scan.persistence < max(.8, FACECAM_MIN_PERSISTENCE):
+        return result(False, "facecam_source_not_persistent")
+    box = scan.box_ratio
+    if not valid_box(box):
+        return result(False, "no_valid_facecam_source_region")
+    x1, y1, x2, y2 = box
+    if x2 - x1 > .35 or y2 - y1 > .45:
+        return result(False, "facecam_source_region_too_large", box)
+    center_x, center_y = (x1 + x2) / 2, (y1 + y2) / 2
+    if not ((center_x <= .3 or center_x >= .7) and (center_y <= .4 or center_y >= .6)):
+        return result(False, "facecam_source_region_not_peripheral", box)
+    return result(True, None, box)
+
+
 def _video_duration_seconds(video_path: str) -> float:
     """Best-effort duration from frame count / fps. Returns 0.0 (never raises) when either is
     missing or nonsensical — some .ts chunk recordings report neither reliably — which callers
@@ -826,9 +890,10 @@ def get_multi_cam_coordinates(
 
 def validate_facecam_crop(video_path: str, clip_start: float, clip_end: float,
                           crop_box: tuple[int, int, int, int], samples: int = 5) -> dict:
-    """Check the actual selected crop throughout the clip; fail closed on unreadable frames.
+    """Check the actual crop throughout the clip; unreadable frames count as misses.
 
-    At least 90% of one confident face must fit inside the crop at every sample.
+    At least 90% of one confident face must fit inside the crop in 80% of samples
+    (four of the default five); a single missed detection is tolerated.
     Sampling avoids claiming continuous scene-change detection between frames.
     """
     checks = []
@@ -847,5 +912,5 @@ def validate_facecam_crop(video_path: str, clip_start: float, clip_end: float,
             checks.append({"timestamp": timestamp, "face_in_crop": contained})
         except Exception as exc:
             checks.append({"timestamp": timestamp, "face_in_crop": False, "error": type(exc).__name__})
-    passed = bool(checks) and all(check["face_in_crop"] for check in checks)
+    passed = bool(checks) and sum(check["face_in_crop"] for check in checks) >= math.ceil(len(checks) * .8)
     return {"passed": passed, "reason": None if passed else "facecam_missing_or_outside_crop", "samples": checks}

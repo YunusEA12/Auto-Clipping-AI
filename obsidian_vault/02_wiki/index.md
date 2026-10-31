@@ -29,3 +29,7 @@ Startseite der vernetzten Projekt-Dokumentation. Diese Seite verlinkt die zentra
 Wichtige Architektur-Entscheidungen werden hier automatisch als eigene Markdown-Seiten abgelegt (siehe `claude.md` — Abschnitt "Fable-Orchestrator-Regeln").
 
 - [[Render-Qualitaet]] — Satzgrenzen, Layoutwechsel und technische Upload-Sperre.
+
+- [[Projektwaechter]] — Antigravity-Abo, Betriebspruefung und getestete Verbesserungskandidaten.
+
+- [[Facecam-Quellenschutz]] — Inhaltsgesichter von separaten Kamerabereichen unterscheiden, sichere Vollbild-Fallbacks.

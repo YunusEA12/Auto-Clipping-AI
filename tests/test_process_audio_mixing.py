@@ -51,3 +51,20 @@ def test_build_audio_filter_without_source_audio_uses_music_only():
     assert "[0:a]" not in filt
     assert "[1:a]" in filt
     assert "atrim=duration=10.0" in filt
+
+
+def test_loudnorm_applies_to_voice_music_and_music_only():
+    for has_audio in (True, False):
+        filt = process.build_audio_filter(has_audio, 10.)
+        assert filt.endswith("loudnorm=I=-14:TP=-1:LRA=11[outa]")
+
+
+def test_source_only_audio_normalized_without_background_track():
+    cmd = process._build_render_cmd(process.Path("source.mp4"), 0, 10, "null[outv]", [], process.Path("out.mp4"))
+    assert cmd[cmd.index("-af") + 1] == "loudnorm=I=-14:TP=-1:LRA=11"
+
+
+def test_music_mix_normalized_once_in_filtergraph():
+    cmd = process._build_render_cmd(process.Path("source.mp4"), 0, 10, "null[outv]", [], process.Path("out.mp4"), music_path=process.Path("music.mp3"))
+    assert "-af" not in cmd
+    assert cmd[cmd.index("-filter_complex") + 1].count("loudnorm=I=-14:TP=-1:LRA=11") == 1

@@ -61,9 +61,12 @@ def check_subtitles(path: Path) -> dict:
     for line in text.splitlines():
         if line.startswith("Style:"):
             fields = line.split(":", 1)[1].strip().split(",")
-            styles[fields[0]] = (float(fields[2]), float(fields[16]))
+            styles[fields[0]] = (float(fields[2]), float(fields[16]), float(fields[19]), float(fields[20]))
+    wrap_match = re.search(r"WrapStyle:\s*([0-3])", text)
+    wrap_style = int(wrap_match[1]) if wrap_match else 0
     count = 0
     violations = []
+    line_counts = []
     for line in text.splitlines():
         if not line.startswith("Dialogue:"):
             continue
@@ -71,22 +74,51 @@ def check_subtitles(path: Path) -> dict:
         if len(fields) != 10:
             raise ValueError("Malformed ASS dialogue")
         style, body = fields[3], fields[9]
-        font, outline = styles[style]
+        font, outline, margin_l, margin_r = styles[style]
+        margin_l = float(fields[5]) or margin_l
+        margin_r = float(fields[6]) or margin_r
         position = re.search(r"\\pos\(([\d.]+),([\d.]+)\)", body)
         if position is None or "\\an5" not in body:
             raise ValueError("Unsupported subtitle positioning")
         x, y = map(float, position.groups())
         visible = re.sub(r"\{[^}]*\}", "", body)
-        # Arial Black uppercase worst-case width ~1 em; deliberately conservative.
-        lines = visible.split(r"\N")
-        half_width = max(map(len, lines), default=0) * font * .5 + outline
-        half_height = len(lines) * font * .65 + outline
+        # Arial Black uppercase average glyph advance is about .63 em. Libass
+        # wraps at spaces within script/style margins, not at the safe-zone edge.
+        # A long phrase is therefore not itself a horizontal overflow.
+        em = font * .63
+        available = width - margin_l - margin_r - 2 * outline
+        override = re.search(r"\\q([0-3])", body)
+        wrapping = int(override[1]) if override else wrap_style
+        lines = 0
+        too_wide = available <= 0
+        paragraphs = re.split(r"\\N", visible)
+        for paragraph in paragraphs:
+            paragraph = paragraph.replace(r"\h", " ")
+            if wrapping == 2:
+                too_wide |= len(paragraph) * em > available
+                lines += 1
+                continue
+            paragraph = paragraph.replace(r"\n", " ")
+            used = 0.
+            lines += 1
+            for word in paragraph.split():
+                word_width = len(word) * em
+                too_wide |= word_width > available
+                advance = word_width + (em if used else 0.)
+                if used and used + advance > available:
+                    lines += 1
+                    used = word_width
+                else:
+                    used += advance
+        # Center alignment: wrapped lines grow equally above/below the anchor.
+        half_height = lines * font * .5 + outline
         top = .05 if style == "TitleBox" else .10
-        if x - half_width < width * .05 or x + half_width > width * .90 or y - half_height < height * top or y + half_height > height * .85:
+        if too_wide or not width * .05 <= x <= width * .90 or y - half_height < height * top or y + half_height > height * .85:
             violations.append(count)
+        line_counts.append(lines)
         count += 1
     return {"passed": count > 0 and not violations, "events": count,
-            "violations": violations, "method": "conservative_ass_geometry"}
+            "violations": violations, "line_counts": line_counts, "method": "conservative_ass_geometry"}
 
 
 def check_render(path: Path, *, layout: str, subtitle_path: Path) -> dict:

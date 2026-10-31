@@ -627,6 +627,9 @@ def _has_audio_stream(video_path: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+AUDIO_LOUDNORM = "loudnorm=I=-14:TP=-1:LRA=11"
+
+
 def build_audio_filter(has_source_audio: bool, clip_duration: float) -> str:
     """Audio half of the filter graph when a background track is in play: the source clip's
     own audio (if any) at full volume, the (looped, via -stream_loop -1 on the music input so
@@ -635,15 +638,16 @@ def build_audio_filter(has_source_audio: bool, clip_duration: float) -> str:
     normalization would quietly halve the voice track, not just the music) and capped with a
     limiter as cheap insurance against the two signals summing past 0dBFS. duration=first trims
     the mix to the voice track's length; without a voice track there's nothing to trim against,
-    so clip_duration does that job explicitly instead."""
+    so clip_duration does that job explicitly instead. Normalize the final mix to
+    -14 LUFS / -1 dBTP, matching the post-render QC target."""
     if has_source_audio:
         return (
             "[0:a]volume=1.0[voice];"
             f"[1:a]volume={BACKGROUND_MUSIC_VOLUME}[bg];"
             "[voice][bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mixed];"
-            "[mixed]alimiter=limit=0.98[outa]"
+            f"[mixed]alimiter=limit=0.98,{AUDIO_LOUDNORM}[outa]"
         )
-    return f"[1:a]volume={BACKGROUND_MUSIC_VOLUME},atrim=duration={clip_duration},alimiter=limit=0.98[outa]"
+    return f"[1:a]volume={BACKGROUND_MUSIC_VOLUME},atrim=duration={clip_duration},alimiter=limit=0.98,{AUDIO_LOUDNORM}[outa]"
 
 
 # Intel Quick Sync hardware H.264 encoder — was tried as the encode step (usually the single
@@ -683,6 +687,7 @@ def _build_render_cmd(
         "-map", "[outv]",
         "-map", audio_map,
         *encode_args,
+        *(["-af", AUDIO_LOUDNORM] if music_path is None and has_source_audio else []),
         "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
         str(output_path),
     ]
@@ -1192,6 +1197,16 @@ def process_clips_iter(
             facecam_scan=facecam_scan,
         )
 
+        # Presence is not provenance: a persistent face in a reacted interview can
+        # otherwise be duplicated above that same interview. Require a plausible
+        # overlay region before making a separate face panel, even in forced split mode.
+        source_evidence = vision.assess_facecam_source(facecam_scan, override_box_ratio)
+        clip["facecam_source"] = source_evidence
+        if effective_layout == LAYOUT_SPLIT_SCREEN and not source_evidence["passed"]:
+            logger.warning("Facecam source unverified: %s; preserving whole source", source_evidence["reason"])
+            effective_layout = LAYOUT_BLUR_BACKGROUND
+            clip["layout_validation"] = source_evidence.copy()
+
         # detection_ts (not clip["start_time"]) — the exact frame resolve_layout()'s own
         # detection succeeded at, which may be a LAYOUT_RETRY_FRACTIONS retry rather than
         # clip_start. Re-detecting at clip["start_time"] here unconditionally used to be able
@@ -1216,6 +1231,7 @@ def process_clips_iter(
                 str(video_path), detection_ts, padding_factor=padding_factor,
                 clip_end=clip["end_time"], override_box_ratio=override_box_ratio,
                 verified_box_ratio=verified_box_ratio,
+                configured_roi_only=override_box_ratio is not None,
             )
         elif effective_layout == LAYOUT_FULL_CAM:
             padding_factor = (
@@ -1316,6 +1332,11 @@ def process_clips_iter(
                     multi_cam_boxes=multi_cam_boxes,
                 )
             clip["auto_qc"] = auto_qc.check_render(output_path, layout=effective_layout, subtitle_path=ass_path)
+            clip["auto_qc"].setdefault("checks", {})["facecam_source"] = {
+                **source_evidence,
+                "applicable": effective_layout == LAYOUT_SPLIT_SCREEN,
+                "passed": effective_layout != LAYOUT_SPLIT_SCREEN or source_evidence["passed"],
+            }
         finally:
             ass_path.unlink(missing_ok=True)
 

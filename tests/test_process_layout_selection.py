@@ -204,6 +204,8 @@ def test_resolve_layout_still_falls_back_to_center_crop_after_exhausting_retries
 # real, just-confirmed face -- live in the default LAYOUT_AUTO path. ------------------------
 
 def test_process_clips_iter_crops_at_resolve_layouts_detection_ts_not_clip_start(tmp_path, monkeypatch):
+    monkeypatch.setattr(process.vision, "locate_persistent_facecam", lambda *a, **k:
+                        process.vision.FacecamScan((.82, .05, .92, .2), 1., 16, 16, .9))
     monkeypatch.setattr(process, "TEMP_DIR", tmp_path / "temp")
     monkeypatch.setattr(process, "find_source_video", lambda explicit: tmp_path / "source.mp4")
     monkeypatch.setattr(process, "get_video_dimensions", lambda video_path: (1920, 1080))
@@ -240,6 +242,8 @@ def test_process_clips_iter_crops_at_resolve_layouts_detection_ts_not_clip_start
 
 
 def _process_clips_iter_common_mocks(monkeypatch, tmp_path, clips_data):
+    monkeypatch.setattr(process.vision, "locate_persistent_facecam", lambda *a, **k:
+                        process.vision.FacecamScan((.82, .05, .92, .2), 1., 16, 16, .9))
     monkeypatch.setattr(process, "TEMP_DIR", tmp_path / "temp")
     monkeypatch.setattr(process, "find_source_video", lambda explicit: tmp_path / "source.mp4")
     monkeypatch.setattr(process, "get_video_dimensions", lambda video_path: (1920, 1080))

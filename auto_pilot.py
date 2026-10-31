@@ -676,6 +676,7 @@ def run_deployment_phase(
                 "layout": clip.get("layout"),
                 **({"auto_qc": clip["auto_qc"]} if "auto_qc" in clip else {}),
                 "layout_validation": clip.get("layout_validation"),
+                "facecam_source": clip.get("facecam_source"),
                 "music_track": clip.get("music_track"),
                 "hook_style": clip.get("hook_style"),
                 "title_style": clip.get("title_style"),

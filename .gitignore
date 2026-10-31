@@ -53,3 +53,8 @@ metrics_scrape_health.json
 logs/
 quality_audit/
 .council/
+guardian_state.json
+guardian_state.json.lock
+guardian_reports/
+guardian_workspace/
+.tools/
