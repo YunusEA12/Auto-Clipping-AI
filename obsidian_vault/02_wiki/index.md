@@ -31,3 +31,5 @@ Wichtige Architektur-Entscheidungen werden hier automatisch als eigene Markdown-
 - [[Projektwaechter]] — Antigravity-Abo, Betriebspruefung und getestete Verbesserungskandidaten.
 
 - [[Facecam-Quellenschutz]] — Inhaltsgesichter von separaten Kamerabereichen unterscheiden, sichere Vollbild-Fallbacks.
+
+- [[TikTok-Accountwechsel]] — Umzug auf neuen TikTok-Account, Tageslimit und Warm-up (31.10.2026).

@@ -126,7 +126,16 @@ UPLOAD_DELAY_MAX_SECONDS = 60
 # 2026-08-25 TikTok-vs-YouTube discrepancy audit) is still the far tighter limit in practice,
 # so this mainly buys faster backlog drain during whatever window the quota IS open, not a
 # meaningfully earlier front-load. Tune per platform via env var if that changes.
-TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS = float(os.environ.get("TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS", "120"))
+#
+# 2026-10-31 (new TikTok account): the old account dropped out of the For-You distribution
+# after weeks of up to ~150 posts/day. Mass posting from one account is a well-known spam
+# signal, so the TikTok default spacing is now 3 hours and a hard per-day cap (below) applies.
+# Both stay overridable via env var once the new account has a stable posting history.
+TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS = float(os.environ.get("TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS", "10800"))
+# Maximum real TikTok upload ATTEMPTS per local calendar day, fleet-wide. 0 disables the cap.
+# Counts attempts (not only confirmed posts) so a broken session cannot hammer TikTok all day.
+# Rendered clips beyond the cap stay in output/ and are picked up on later days by the backlog.
+TIKTOK_DAILY_UPLOAD_CAP = int(os.environ.get("TIKTOK_DAILY_UPLOAD_CAP", "4"))
 YOUTUBE_MIN_UPLOAD_INTERVAL_SECONDS = float(os.environ.get("YOUTUBE_MIN_UPLOAD_INTERVAL_SECONDS", "120"))
 
 UPLOAD_PACING_STATE_PATH = Path("upload_pacing_state.json")
@@ -149,7 +158,7 @@ UPLOAD_PACING_LOCK_TIMEOUT_SECONDS = 10
 YOUTUBE_UPLOADS_ENABLED = os.environ.get("YOUTUBE_UPLOADS_ENABLED", "false").strip().lower() not in ("false", "0", "")
 
 
-def _try_reserve_upload_pacing_slot(platform: str, min_interval_seconds: float) -> bool:
+def _try_reserve_upload_pacing_slot(platform: str, min_interval_seconds: float, daily_cap: int = 0) -> bool:
     """2026-08-25 fix: this used to SLEEP out the remaining wait right here — found live the
     next day as a serious regression, not the intended pacing. auto_pilot.py's run_cycle() is
     single-threaded and fully synchronous per streamer (record chunk -> transcribe -> render
@@ -165,8 +174,11 @@ def _try_reserve_upload_pacing_slot(platform: str, min_interval_seconds: float) 
     genuinely elapsed since the last real attempt; otherwise returns False immediately with no
     side effect at all — no reservation, no wait. The caller skips this cycle's attempt exactly
     like a YouTube-backoff skip (logged, clip stays in output/, picked up by a later cycle),
-    letting recording/rendering continue uninterrupted in the meantime."""
-    if min_interval_seconds <= 0:
+    letting recording/rendering continue uninterrupted in the meantime.
+
+    daily_cap > 0 additionally limits granted slots per local calendar day (state key
+    "<platform>_daily": {"date", "count"}); a denied slot never increments the counter."""
+    if min_interval_seconds <= 0 and daily_cap <= 0:
         return True
     with FileLock(str(UPLOAD_PACING_STATE_PATH) + ".lock", timeout=UPLOAD_PACING_LOCK_TIMEOUT_SECONDS):
         try:
@@ -182,6 +194,15 @@ def _try_reserve_upload_pacing_slot(platform: str, min_interval_seconds: float) 
                 elapsed = min_interval_seconds  # unparseable timestamp: fail open, allow it
             if elapsed < min_interval_seconds:
                 return False
+        daily_key = f"{platform}_daily"
+        today = now.astimezone().date().isoformat()
+        daily = state.get(daily_key)
+        if not isinstance(daily, dict) or daily.get("date") != today:
+            daily = {"date": today, "count": 0}
+        if daily_cap > 0 and int(daily.get("count", 0)) >= daily_cap:
+            return False
+        daily["count"] = int(daily.get("count", 0)) + 1
+        state[daily_key] = daily
         state[platform] = now.isoformat()
         atomic_io.atomic_write_json(UPLOAD_PACING_STATE_PATH, state)
         return True
@@ -483,11 +504,13 @@ def _upload_to_tiktok(
         )
         return tiktok_uploader.UploadOutcome(success=True, confirmed=True)
 
-    if not _try_reserve_upload_pacing_slot("tiktok", TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS):
+    if not _try_reserve_upload_pacing_slot(
+        "tiktok", TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS, TIKTOK_DAILY_UPLOAD_CAP,
+    ):
         logger.info(
-            "Skipping TikTok upload for %s — within the fleet-wide daily-quota pacing "
-            "interval (another upload happened too recently); will retry a later cycle.",
-            video_path.name,
+            "Skipping TikTok upload for %s — fleet-wide pacing interval not elapsed or daily "
+            "cap (%d) reached; clip stays local and is retried in a later cycle.",
+            video_path.name, TIKTOK_DAILY_UPLOAD_CAP,
         )
         return tiktok_uploader.UploadOutcome(success=False, confirmed=False)
 

@@ -199,6 +199,55 @@ def test_zero_interval_always_grants(monkeypatch, tmp_path):
     assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 0) is True
 
 
+def test_daily_cap_denies_after_limit_and_resets_next_day(monkeypatch, tmp_path):
+    monkeypatch.setattr(upload_manager, "UPLOAD_PACING_STATE_PATH", tmp_path / "pacing.json")
+    fake_now = upload_manager.datetime(2026, 1, 1, 12, tzinfo=upload_manager.timezone.utc)
+
+    class _FakeDateTime(upload_manager.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fake_now
+
+    monkeypatch.setattr(upload_manager, "datetime", _FakeDateTime)
+
+    assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 0, daily_cap=2) is True
+    assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 0, daily_cap=2) is True
+    assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 0, daily_cap=2) is False
+    assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 0, daily_cap=2) is False
+
+    fake_now = fake_now + upload_manager.timedelta(days=1)
+    assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 0, daily_cap=2) is True
+
+
+def test_interval_denial_does_not_consume_daily_cap(monkeypatch, tmp_path):
+    monkeypatch.setattr(upload_manager, "UPLOAD_PACING_STATE_PATH", tmp_path / "pacing.json")
+    fake_now = upload_manager.datetime(2026, 1, 1, 12, tzinfo=upload_manager.timezone.utc)
+
+    class _FakeDateTime(upload_manager.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fake_now
+
+    monkeypatch.setattr(upload_manager, "datetime", _FakeDateTime)
+
+    assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 100, daily_cap=2) is True
+    for _ in range(5):
+        assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 100, daily_cap=2) is False
+    fake_now = fake_now + upload_manager.timedelta(seconds=101)
+    assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 100, daily_cap=2) is True
+
+
+def test_tiktok_upload_skipped_once_daily_cap_reached(monkeypatch, tmp_path, fake_tiktok_success, clip_path):
+    monkeypatch.setattr(upload_manager, "UPLOAD_PACING_STATE_PATH", tmp_path / "pacing.json")
+    monkeypatch.setattr(upload_manager, "TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(upload_manager, "TIKTOK_DAILY_UPLOAD_CAP", 1)
+    upload_manager._try_reserve_upload_pacing_slot("tiktok", 0, daily_cap=1)  # today's only slot
+
+    outcome = upload_manager._upload_to_tiktok(clip_path, "desc", [], publish=True, add_background_sound=False)
+
+    assert outcome.success is False
+
+
 def test_denied_slot_is_not_a_regression_to_blocking_the_caller(monkeypatch, tmp_path, fake_tiktok_success, clip_path):
     """The specific bug this fixes: upload_clip_everywhere() (called synchronously, once per
     clip, from auto_pilot.py's single-threaded per-streamer cycle) must return promptly even
