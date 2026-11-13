@@ -49,6 +49,21 @@ Ein neuer Account mit demselben Verhalten würde sehr wahrscheinlich genauso end
    in der App prüfen, ob der Post wirklich sichtbar ist.
 9. **Fleet wieder starten** und in den ersten zwei Wochen täglich die Aufrufe ansehen.
 
+## Profil des neuen Accounts (entschieden 13.11.2026)
+
+Bewusst eine eigene Kunstfigur statt eines Clip-Channels, der nach dem Streamer benannt ist:
+Ein Profil, das den Namen oder das Gesicht eines Streamers traegt, ist Identitaetsanmassung
+und faellt sowohl unter TikToks Impersonation-Regeln als auch unter das Problem
+"nicht originell" bei der Monetarisierung.
+
+- Kunstfigur, z. B. "Kartoffel schaut Twitch", Bio in der Art
+  "Ich bin eine Kartoffel. Ich schaue Twitch. Die besten Momente landen hier."
+- Profilbild: eigenes, lustiges Motiv — kein Streamer-Gesicht, kein fremdes Logo.
+- **Privates Konto, kein Business-Konto.** Business-Konten haben eingeschraenkte
+  Sound-Bibliothek und werden fuer Clip-Content schlechter ausgespielt.
+- 2–3 Tage Warm-up vor dem ersten Post: nur am Handy Nischen-Videos ansehen und liken.
+  Ein brandneuer Account, der sofort automatisiert postet, ist selbst ein Spam-Signal.
+
 ## Monetarisierung — wichtige Grenzen
 
 Stand meines Wissens (bitte in der TikTok-App unter Creator-Tools prüfen):
@@ -61,3 +76,21 @@ Das Creator Rewards Program verlangt mindestens 18 Jahre, 10.000 Follower,
   ausgespielt und sind nicht vergütungsfähig. Erlaubnis der Streamer und erkennbarer
   eigener Mehrwert (Kommentar, Einordnung, Zusammenschnitt) senken dieses Risiko.
 - Diese Punkte sind Produktentscheidungen und wurden noch nicht im Code geändert.
+
+**Entscheidung 13.11.2026:** `MIN_CLIP_DURATION` bleibt vorerst bei 15 Sekunden. Kurze Clips
+wachsen schneller, und ohne 10.000 Follower ist die Ein-Minuten-Regel ohnehin ohne Wirkung.
+Erst ab etwa 5.000–8.000 Followern schrittweise auf laengere Clips umstellen. Ein eigener
+Mehrwert pro Clip (Text-Hook, Einordnung) senkt parallel das "nicht originell"-Risiko.
+Ein alter Branch `feature/agent-automated-refactoring` haette den Wert sofort auf 61 gesetzt —
+bewusst nicht uebernommen.
+
+## Server-Zugang (Stand 13.11.2026)
+
+Die Pipeline laeuft produktiv auf dem Contabo-VPS `vmd204170`, erreichbar nur ueber Tailscale
+unter `root@100.64.239.23`. Der urspruengliche Wartungsschluessel `~/.ssh/id_ed25519` ist mit
+einer Passphrase verschluesselt, die nicht mehr bekannt ist; eine Passphrase laesst sich nicht
+wiederherstellen. Ersatz ist `~/.ssh/id_ed25519_contabo` (ohne Passphrase, damit die Wartung
+aus dem Chat heraus ohne Eingabe laeuft — vertretbar, weil der Server nicht aus dem offenen
+Internet erreichbar ist). Eingerichtet wird er mit `quality_audit/connect_server.ps1`, nachdem
+das root-Passwort unter my.contabo.com (VPS control -> Manage -> Password reset) neu gesetzt
+wurde.
