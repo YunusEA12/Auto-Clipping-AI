@@ -16,6 +16,12 @@ Note: close the target browser (or at least its TikTok tab) before running this 
 lock their cookie database file while running, which can make extraction fail or return stale
 data.
 
+Chrome 127 and newer may make this script unusable entirely: App-Bound Encryption ties the
+cookie key to the Chrome binary, so no other process can unwrap it. The script detects that
+and points at `verify_tiktok_selectors.py --manual-login`, which opens a browser window for
+a human to log into by hand. Same principle either way — a person logs in, this code only
+ever reads an existing session.
+
 Usage:
     python get_cookies.py                # tries chrome, then edge, then firefox
     python get_cookies.py --browser edge
@@ -48,6 +54,24 @@ except ImportError:
 TIKTOK_DOMAIN_FRAGMENT = "tiktok.com"
 REQUIRED_COOKIE_NAME = "sessionid"
 
+# Chrome 127+ (and Edge on the same engine) wrap the cookie encryption key in App-Bound
+# Encryption: the key is tied to the Chrome binary itself, so another process cannot unwrap
+# it even as the same OS user. browser_cookie3 then fails with this message. This is not a
+# misconfiguration and no amount of closing the browser or running as admin fixes it — the
+# only way left is to let a human log into a browser we drive ourselves.
+APP_BOUND_ENCRYPTION_MARKERS = (
+    "unable to get key for cookie decryption",
+    "failed to decrypt",
+)
+MANUAL_LOGIN_HINT = (
+    "Chrome/Edge encrypt their cookie key in a way other programs can no longer unwrap "
+    "(App-Bound Encryption, Chrome 127 and newer). Closing the browser or using admin "
+    "rights does not help. Use the manual route instead, which opens a real browser window "
+    "for you to log into by hand:\n"
+    "    python verify_tiktok_selectors.py --manual-login\n"
+    "Answer 'y' when it offers to save the session to cookies.json."
+)
+
 # Tried in this order when --browser isn't given.
 BROWSER_LOADERS = [
     ("chrome", browser_cookie3.chrome),
@@ -67,11 +91,19 @@ def _load_tiktok_cookiejar(browser: Optional[str] = None):
 
     last_error = None
     needed_admin_for: List[str] = []
+    app_bound_for: List[str] = []
     for label, loader in loaders:
         try:
             jar = loader(domain_name=TIKTOK_DOMAIN_FRAGMENT)
         except Exception as e:
-            if RequiresAdminError is not None and isinstance(e, RequiresAdminError):
+            message = str(e).lower()
+            if any(marker in message for marker in APP_BOUND_ENCRYPTION_MARKERS):
+                logger.warning(
+                    "%s: cookie key is protected by App-Bound Encryption and cannot be read "
+                    "by other programs.", label,
+                )
+                app_bound_for.append(label)
+            elif RequiresAdminError is not None and isinstance(e, RequiresAdminError):
                 # The single most likely real-world trigger for this: the browser is open
                 # (its cookie DB is locked, so browser_cookie3 fell back to a Shadow Copy
                 # read, which needs admin) — not some rare misconfiguration. Worth a distinct,
@@ -91,6 +123,11 @@ def _load_tiktok_cookiejar(browser: Optional[str] = None):
             logger.info("Found %d tiktok.com cookie(s) in %s", len(jar), label)
             return label, jar
         logger.info("No tiktok.com cookies found in %s, trying next browser...", label)
+
+    if app_bound_for:
+        raise RuntimeError(
+            f"Could not read cookies from {app_bound_for}. {MANUAL_LOGIN_HINT}"
+        ) from last_error
 
     if needed_admin_for:
         raise RuntimeError(

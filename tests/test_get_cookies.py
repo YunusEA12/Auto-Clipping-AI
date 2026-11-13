@@ -55,3 +55,40 @@ def test_second_browser_succeeds_after_first_needs_admin(monkeypatch):
     label, result_jar = get_cookies._load_tiktok_cookiejar()
     assert label == "edge"
     assert len(result_jar) == 1
+
+
+def test_app_bound_encryption_points_at_the_manual_login(monkeypatch):
+    """Chrome 127+ ties the cookie key to the browser binary, so no amount of closing the
+    browser or elevating fixes it — the message has to send the user somewhere that works."""
+    monkeypatch.setattr(
+        get_cookies, "BROWSER_LOADERS",
+        [("chrome", _loader_raising(Exception("Unable to get key for cookie decryption")))],
+    )
+    with pytest.raises(RuntimeError, match="--manual-login"):
+        get_cookies._load_tiktok_cookiejar()
+
+
+def test_app_bound_encryption_rules_out_the_admin_workaround(monkeypatch):
+    """The other failure branch tells the user to elevate, which here would fail in exactly
+    the same way — so this message has to say outright that it won't help, rather than
+    leaving them to try it."""
+    monkeypatch.setattr(
+        get_cookies, "BROWSER_LOADERS",
+        [("chrome", _loader_raising(Exception("Failed to decrypt cookie value")))],
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        get_cookies._load_tiktok_cookiejar()
+    assert "admin rights does not help" in str(excinfo.value)
+
+
+def test_app_bound_failure_still_tries_the_next_browser(monkeypatch):
+    monkeypatch.setattr(
+        get_cookies, "BROWSER_LOADERS",
+        [
+            ("chrome", _loader_raising(Exception("Unable to get key for cookie decryption"))),
+            ("firefox", lambda domain_name: ["a cookie"]),
+        ],
+    )
+    label, jar = get_cookies._load_tiktok_cookiejar()
+    assert label == "firefox"
+    assert len(jar) == 1
