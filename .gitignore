@@ -58,3 +58,6 @@ guardian_state.json.lock
 guardian_reports/
 guardian_workspace/
 .tools/
+
+# Archiv des alten TikTok-Accounts (Lerndaten, geparkte Clips)
+backup_alter_account/

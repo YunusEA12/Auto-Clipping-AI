@@ -29,14 +29,21 @@ Ein neuer Account mit demselben Verhalten würde sehr wahrscheinlich genauso end
    mit dem neuen anmelden, Browser schließen.
 5. **Neue Cookies exportieren:** `uv run --locked python get_cookies.py`
    (überschreibt `cookies.json`). Auf den Server kopieren, falls dort die Pipeline läuft.
-6. **Lokale Account-Zustände zurücksetzen** (nicht in Git, nur lokal/Server):
+6. **Lokale Account-Zustände zurücksetzen** — seit 13.11.2026 automatisiert:
+   `python scripts/switch_tiktok_account.py --dry-run` zeigt erst, was passiert,
+   ohne `--dry-run` wird es ausgeführt. Das Script weigert sich zu laufen, solange noch
+   Pipeline-Prozesse aktiv sind (ein laufender `auto_pilot.py` würde die archivierten
+   Dateien sofort neu schreiben), und rührt keine git-getrackte Datei an. `--clear-output`
+   parkt zusätzlich die gerenderten Clips. Was es im Einzelnen tut:
    - löschen: `upload_pacing_state.json`, `.tiktok_browser_profile/` (falls vorhanden)
    - in einen Ordner `backup_alter_account/` verschieben: `viral_memory.json`,
      `ai_guidelines.txt`, `optimization_state.json`. Die Zahlen stammen von einem
      gedrosselten Account und würden der KI falsche Muster beibringen.
    - **behalten:** `upload_ledger.json`. Er verhindert, dass bereits gepostete Clips
      erneut hochgeladen werden. Alte Clips auf dem neuen Account wären Duplicate Content.
-   - optional `output/` leeren, damit der neue Account mit frischen Clips startet.
+   - optional `output/` leeren, damit der neue Account mit frischen Clips startet (`--clear-output`).
+   - **nicht** angefasst wird `top_performers.json`: trotz des Namens ist das eine kuratierte,
+     git-getrackte Beispielsammlung von Hooks, kein Lernstand des alten Accounts.
 7. **Session prüfen:** `uv run --locked python verify_tiktok_selectors.py --headless`.
 8. **Ersten Upload beobachten:** einmal mit `--headed` (siehe README_UPLOAD.md) und danach
    in der App prüfen, ob der Post wirklich sichtbar ist.
