@@ -10,6 +10,7 @@ import auto_qc
 import auto_pilot
 import dashboard_api
 import process
+import text_placement
 import upload_manager
 
 
@@ -67,7 +68,7 @@ def test_safe_fallback_does_not_require_upper_face(ass, measured, monkeypatch):
 
 
 def test_subtitle_outside_safe_zone_fails(ass):
-    atomic_io.atomic_write_text(ass, ass.read_text(encoding='utf-8').replace(r'\pos(540,1497)', r'\pos(1050,1850)'))
+    atomic_io.atomic_write_text(ass, ass.read_text(encoding='utf-8').replace(rf'\pos({text_placement.subtitle_column(1080)["x"]},1497)', r'\pos(1050,1850)'))
     assert not auto_qc.check_subtitles(ass)['passed']
 
 

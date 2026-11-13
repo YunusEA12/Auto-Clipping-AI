@@ -1,0 +1,5 @@
+{
+  "ambient_pad_c_major.mp3": {"energy": 2, "moods": ["ambient", "mysterious", "chill"]},
+  "chill_pad_a_minor.mp3": {"energy": 3, "moods": ["chill", "mysterious", "dramatic"]},
+  "lofi_drift_g_minor.mp3": {"energy": 4, "moods": ["chill", "upbeat", "neutral"]}
+}

@@ -10,7 +10,9 @@ import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional, Sequence
 
+import text_placement
 import vision
 
 logger = logging.getLogger(__name__)
@@ -52,8 +54,12 @@ def measure_media(path: Path) -> dict:
             "longest_freeze_seconds": max(freezes, default=0.)}
 
 
-def check_subtitles(path: Path) -> dict:
-    """Validate generated ASS center anchors and conservative text extents in safe zones."""
+def check_subtitles(path: Path, face_rects: Optional[Sequence] = None) -> dict:
+    """Validate generated ASS center anchors and conservative text extents in safe zones.
+
+    Subtitles must also stay left of TikTok's right-hand button column
+    (text_placement.UI_RIGHT_X_RATIO) and, when `face_rects` (canvas-pixel rectangles from
+    text_placement.face_rects) are given, must not overlap any face."""
     text = Path(path).read_text(encoding="utf-8-sig")
     width = int(re.search(r"PlayResX:\s*(\d+)", text)[1])
     height = int(re.search(r"PlayResY:\s*(\d+)", text)[1])
@@ -90,12 +96,14 @@ def check_subtitles(path: Path) -> dict:
         override = re.search(r"\\q([0-3])", body)
         wrapping = int(override[1]) if override else wrap_style
         lines = 0
+        widest = 0.
         too_wide = available <= 0
         paragraphs = re.split(r"\\N", visible)
         for paragraph in paragraphs:
             paragraph = paragraph.replace(r"\h", " ")
             if wrapping == 2:
                 too_wide |= len(paragraph) * em > available
+                widest = max(widest, len(paragraph) * em)
                 lines += 1
                 continue
             paragraph = paragraph.replace(r"\n", " ")
@@ -104,24 +112,31 @@ def check_subtitles(path: Path) -> dict:
             for word in paragraph.split():
                 word_width = len(word) * em
                 too_wide |= word_width > available
+                widest = max(widest, min(word_width, available))
                 advance = word_width + (em if used else 0.)
                 if used and used + advance > available:
                     lines += 1
                     used = word_width
                 else:
                     used += advance
+                widest = max(widest, min(used, available))
         # Center alignment: wrapped lines grow equally above/below the anchor.
         half_height = lines * font * .5 + outline
         top = .05 if style == "TitleBox" else .10
         if too_wide or not width * .05 <= x <= width * .90 or y - half_height < height * top or y + half_height > height * .85:
             violations.append(count)
+        elif style != "TitleBox" and x + widest / 2 > width * text_placement.UI_RIGHT_X_RATIO + 1:
+            violations.append(count)  # runs into the TikTok button column
+        elif any(x - widest / 2 < x1 and x + widest / 2 > x0 and y - half_height < y1 and y + half_height > y0
+                 for x0, y0, x1, y1 in (face_rects or ())):
+            violations.append(count)  # covers a face
         line_counts.append(lines)
         count += 1
     return {"passed": count > 0 and not violations, "events": count,
             "violations": violations, "line_counts": line_counts, "method": "conservative_ass_geometry"}
 
 
-def check_render(path: Path, *, layout: str, subtitle_path: Path) -> dict:
+def check_render(path: Path, *, layout: str, subtitle_path: Path, face_rects: Optional[Sequence] = None) -> dict:
     result = {"version": 1, "checked_at": datetime.now(timezone.utc).isoformat(), "checks": {}, "reasons": []}
     try:
         measured = measure_media(Path(path))
@@ -137,7 +152,7 @@ def check_render(path: Path, *, layout: str, subtitle_path: Path) -> dict:
             checks["upper_face"] = {"passed": sum(present) >= 4, "present": present}
         else:
             checks["upper_face"] = {"passed": True, "applicable": False, "reason": "Layout does not promise an upper facecam"}
-        checks["subtitles_safezone"] = check_subtitles(subtitle_path)
+        checks["subtitles_safezone"] = check_subtitles(subtitle_path, face_rects)
         result["reasons"] = [name for name, check in checks.items() if not check["passed"]]
         result["passed"] = not result["reasons"]
     except Exception as exc:

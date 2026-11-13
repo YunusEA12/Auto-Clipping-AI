@@ -28,3 +28,25 @@ third party: this is the safest possible copyright position for content that upl
 automatically and unattended, at the cost of sounding more like a generic synth pad than a
 produced lo-fi track. Swap in real licensed music any time — see above for where to find it —
 this was a deliberate "verifiably safe over polished" tradeoff, not a permanent choice.
+
+## Mood tags (`tags.json`)
+
+`tags.json` maps each file name to `{"energy": 1-10, "moods": [...]}`. `pick_background_track(clip)`
+(via `music_matching.py`) uses it to weight the random choice by how well a track fits the clip:
+the clip's measured `energy_rating`, its `hook_style` and keywords in title/hook. Untagged tracks
+get a neutral weight; no track ever drops to zero, so the epsilon-greedy learning
+(`optimization_engine.preferred_music_track`) keeps sampling everything. **Add a tags entry for every
+new file.** Known moods: `chill`, `ambient`, `mysterious`, `upbeat`, `neutral`, `energetic`,
+`intense`, `dramatic`, `funny`.
+
+## Tracks that should be added (royalty-free, license checked by you)
+
+No files are downloaded automatically. Suggested additions, with tags:
+
+| Wanted track type | energy | moods |
+|---|---|---|
+| Driving electronic / phonk-light beat (clutch, fails, big plays) | 8-9 | `energetic`, `intense` |
+| Cinematic tension riser / dark pulse (shock moments, reveals) | 6-7 | `dramatic`, `mysterious` |
+| Upbeat playful chiptune or pop-instrumental (funny moments) | 6 | `upbeat`, `funny` |
+| Mellow acoustic / soft piano (stories, calm talk) | 2-3 | `chill`, `neutral` |
+| Dark ambient drone (curiosity-gap hooks) | 3 | `mysterious`, `ambient` |

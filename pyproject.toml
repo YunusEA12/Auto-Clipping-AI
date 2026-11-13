@@ -24,7 +24,6 @@ dependencies = [
     "numpy",
     "streamlink",
     "playwright",
-    "streamlit-autorefresh",
     "browser-cookie3",
     "filelock",
     "psutil",

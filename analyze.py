@@ -14,6 +14,7 @@ from google.genai import types as genai_types
 from pydantic import BaseModel, Field, field_validator
 
 import atomic_io
+import chat_signal
 import llm_utils
 import optimization_engine
 
@@ -603,10 +604,13 @@ def select_clips(
     streamer_name: Optional[str] = None,
     language: Optional[str] = None,
     transcript_duration: Optional[float] = None,
+    chat_spikes: Optional[List[dict]] = None,
 ) -> ClipSelection:
     client = genai.Client()
     system_prompt = build_system_prompt(profile, streamer_name, language)
     energy_section = build_energy_prompt_section(energy_spikes or [])
+    # Optional extra signal (chat_signal.py); empty string when no chat log was supplied.
+    energy_section += chat_signal.build_chat_prompt_section(chat_spikes or [])
 
     # `model` (a caller override, or MODEL by default) always goes first; the rest of
     # llm_utils.DEFAULT_MODEL_POOL follows as fallback if it's quota-exhausted for today (see
@@ -845,6 +849,7 @@ def analyze(
     audio_path: Optional[Path] = None,
     profile: Optional[dict] = None,
     streamer_name: Optional[str] = None,
+    chat_log_path: Optional[Path] = None,
 ) -> Path:
     if transcription_path is None:
         transcription_path = TRANSCRIPTION_PATH
@@ -864,13 +869,17 @@ def analyze(
     else:
         logger.info("No audio file available; skipping emotional-energy scoring")
 
+    chat_spikes: List[dict] = []
+    if chat_log_path is not None:
+        chat_spikes = chat_signal.find_chat_spikes(chat_signal.parse_chat_log(chat_log_path))
+
     language = transcript.get("language")
     segments = transcript.get("segments") or []
     transcript_duration = segments[-1]["end"] if segments else None
     try:
         selection = select_clips(
             transcript_text, energy_spikes, window_scores, model, profile, streamer_name, language,
-            transcript_duration=transcript_duration,
+            transcript_duration=transcript_duration, **({"chat_spikes": chat_spikes} if chat_spikes else {}),
         )
     except LLMResponseIncomplete as e:
         logger.warning("%s; falling back to the longest available segment instead of failing.", e)
