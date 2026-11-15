@@ -829,7 +829,7 @@ def run_cycle(
             update_agent_state(current_action=f"🎬 Rendering läuft ({len(batch_clips)} Clip(s))", **common_state)
             transcript = analyze.load_transcript(transcription_path)
             rendered: Dict[str, Path] = {}
-            for i, total, clip, output_path in process_module.process_clips_iter(
+            for _i, _total, clip, output_path in process_module.process_clips_iter(
                 video_path, layout=layout, video_format=video_format,
                 highlight_color=highlight_color, transcript=transcript,
                 output_dir=_output_dir_override, streamer_name=streamer_handle,

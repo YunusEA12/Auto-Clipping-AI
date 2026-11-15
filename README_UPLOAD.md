@@ -23,6 +23,14 @@ als du bei TikTok anmelden. Das ist gleichbedeutend mit einem Passwort.
 
 ## So bekommst du deine Cookies (empfohlen: get_cookies.py)
 
+Bei Chrome/Edge mit App-Bound Encryption stattdessen
+`uv run --locked python scripts/capture_tiktok_session.py` starten und im geöffneten
+Fenster selbst anmelden. Das Skript speichert erst, wenn das Upload-Formular erreichbar ist.
+Für den Serverbetrieb die neue `cookies.json` sicher auf den VPS übertragen und dort
+`venv/bin/python verify_tiktok_selectors.py --headless --skip-content-page` ausführen
+(mit dem `PLAYWRIGHT_BROWSERS_PATH` aus der systemd-Unit). Die Prüfung beendet sich bei
+ungültiger Sitzung mit Exitcode 1; ein vorhandener Cookie allein bestätigt keinen Login.
+
 Voraussetzung: Du bist in einem deiner normalen Browser (Chrome, Edge oder Firefox) bereits
 bei tiktok.com eingeloggt — ganz gewöhnlich, wie jeder andere Login auch.
 

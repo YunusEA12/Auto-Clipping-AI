@@ -22,4 +22,20 @@ jobs:
           version: '0.12.10'
           enable-cache: true
       - run: uv sync --locked --group dev
+
+      # requirements.txt is what the production server installs from, while everything
+      # here is tested against uv.lock. If the two drift, CI goes green for versions the
+      # server never runs — which is exactly how a silent Playwright upgrade broke every
+      # upload on 2026-11-15. Regenerate with the command in requirements.txt's header.
+      - name: requirements.txt matches uv.lock
+        if: runner.os == 'Linux'
+        run: |
+          uv export --no-dev --no-hashes --no-emit-project --format requirements-txt             | grep -v '^#' > /tmp/expected.txt
+          grep -v '^#' requirements.txt > /tmp/actual.txt
+          diff -u /tmp/expected.txt /tmp/actual.txt
+
+      - name: Lint
+        if: runner.os == 'Linux'
+        run: uv run --locked ruff check .
+
       - run: uv run --locked pytest -q

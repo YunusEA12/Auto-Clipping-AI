@@ -1,3 +1,4 @@
+import pytest
 import fnmatch
 import subprocess
 from pathlib import Path
@@ -130,7 +131,7 @@ def test_render_clip_raises_when_every_attempt_produces_an_unplayable_file(tmp_p
             tmp_path / "source.mp4", clip, tmp_path / "subs.ass", 1, process.LAYOUT_BLUR_BACKGROUND,
             1080, 1920, output_dir=tmp_path, music_path=None,
         )
-        assert False, "expected RuntimeError"
+        pytest.fail("expected RuntimeError")
     except RuntimeError as e:
         assert "FFmpeg failed for clip 1" in str(e)
 

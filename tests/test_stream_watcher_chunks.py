@@ -186,5 +186,7 @@ def test_orchestrator_style_call_is_blocked_by_default(monkeypatch):
     # iteration) WITHOUT locally restoring the real cleanup_stale_chunks() must raise, not
     # silently touch the real TEMP_DIR.
     import pytest
-    with pytest.raises(Exception):
+    # Absichtlich breit: geprueft wird, DASS es scheitert statt stillschweigend das
+    # echte TEMP_DIR anzufassen - welcher Fehlertyp dabei herauskommt, ist egal.
+    with pytest.raises(Exception):  # noqa: B017
         stream_watcher.run_periodic_chunk_cleanup(force=True)

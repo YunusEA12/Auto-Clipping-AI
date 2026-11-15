@@ -477,7 +477,7 @@ def build_filter_complex(
         slot_heights = [base_h] * (n - 1) + [output_h - base_h * (n - 1)]
         filters = []
         labels = []
-        for i, (box, slot_h) in enumerate(zip(multi_cam_boxes, slot_heights)):
+        for i, (box, slot_h) in enumerate(zip(multi_cam_boxes, slot_heights, strict=True)):
             bx, by, bw, bh = box
             label = f"cam{i}"
             filters.append(

@@ -159,7 +159,7 @@ def main():
         cookies = extract_instagram_cookies(args.browser)
     except (RuntimeError, ValueError) as e:
         logger.error("%s", e)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
     COOKIES_PATH.parent.mkdir(parents=True, exist_ok=True)
     atomic_io.atomic_write_json(COOKIES_PATH, cookies)

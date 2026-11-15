@@ -201,7 +201,7 @@ def _wait_for_manual_page_setup(page_label: str, url: str) -> None:
 
 def run_audit(
     headless: bool, check_upload: bool, check_content: bool, manual_login: bool, pause_before_check: bool
-) -> None:
+) -> bool:
     cookies = None
     if not manual_login:
         cookies = tiktok_uploader.load_cookies()
@@ -211,7 +211,7 @@ def run_audit(
                 "get_cookies.py first (see README_UPLOAD.md), or re-run this script with "
                 "--manual-login to log in by hand instead."
             )
-            return
+            return False
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=headless)
@@ -224,20 +224,20 @@ def run_audit(
             if manual_login:
                 if not _wait_for_manual_login(page):
                     print("Still on a login page — aborting the selector check.")
-                    return
+                    return False
                 _offer_to_save_session_cookies(context)
 
             if check_upload:
                 print(f"\n=== Upload page: {tiktok_uploader.UPLOAD_URL} ===")
                 page.goto(tiktok_uploader.UPLOAD_URL, wait_until="domcontentloaded")
-                page.wait_for_timeout(4000)
-                if "login" in page.url:
-                    print("  Redirected to login — the session is expired or wasn't accepted.")
-                else:
-                    if pause_before_check:
-                        _wait_for_manual_page_setup("the upload page", tiktok_uploader.UPLOAD_URL)
-                    _check_selectors(page, UPLOAD_PAGE_SELECTORS)
-                    _save_snapshot(page, "upload_page")
+                if not tiktok_uploader.wait_for_upload_form(page):
+                    print("  Upload form unavailable — refresh the session or inspect the snapshot.")
+                    _save_snapshot(page, "upload_page_unavailable")
+                    return False
+                if pause_before_check:
+                    _wait_for_manual_page_setup("the upload page", tiktok_uploader.UPLOAD_URL)
+                _check_selectors(page, UPLOAD_PAGE_SELECTORS)
+                _save_snapshot(page, "upload_page")
 
             if check_content:
                 print(f"\n=== Content list page: {metrics_tracker.CONTENT_URL} ===")
@@ -245,6 +245,7 @@ def run_audit(
                 page.wait_for_timeout(4000)
                 if "login" in page.url:
                     print("  Redirected to login — the session is expired or wasn't accepted.")
+                    return False
                 else:
                     if pause_before_check:
                         _wait_for_manual_page_setup("the content list page", metrics_tracker.CONTENT_URL)
@@ -259,6 +260,7 @@ def run_audit(
             if not headless:
                 print("Browser window will stay open for 15s so you can look around...")
                 page.wait_for_timeout(15000)
+            return True
         finally:
             context.close()
             browser.close()
@@ -286,13 +288,14 @@ def main():
     if args.pause_before_check and args.headless:
         parser.error("--pause-before-check needs a visible browser window — drop --headless")
 
-    run_audit(
+    ok = run_audit(
         headless=args.headless,
         check_upload=not args.skip_upload_page,
         check_content=not args.skip_content_page,
         manual_login=args.manual_login,
         pause_before_check=args.pause_before_check,
     )
+    raise SystemExit(0 if ok else 1)
 
 
 if __name__ == "__main__":

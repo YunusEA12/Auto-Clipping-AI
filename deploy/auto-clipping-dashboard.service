@@ -2,6 +2,7 @@
 Description=Auto-Clipping AI - Streamlit dashboard (Tailscale-only access, see SETUP_SERVER.md)
 After=network-online.target tailscaled.service
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -21,7 +22,6 @@ Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/auto-clipping-ai/.playwright-browsers
 ExecStart=/opt/auto-clipping-ai/venv/bin/streamlit run app.py --server.address 0.0.0.0 --server.port 8501 --server.headless true --browser.gatherUsageStats false
 Restart=on-failure
 RestartSec=15
-StartLimitIntervalSec=0
 
 NoNewPrivileges=true
 ProtectSystem=strict

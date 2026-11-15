@@ -32,4 +32,30 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest",
+    "ruff",
 ]
+
+[tool.ruff]
+# The codebase predates any formatter and uses long, explanatory lines in comments by
+# design; 120 keeps those intact instead of inviting a reflow of every file.
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# Starting deliberately narrow: real defects and unused imports/variables, not style
+# opinions. A first lint run that reports hundreds of cosmetic findings gets ignored,
+# and then the linter is worthless. Widen once this stays green.
+select = ["E4", "E7", "E9", "F", "B"]
+ignore = [
+    # Long lines: see line-length above — the existing comments are the documentation.
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Scripts put the repo root on sys.path before importing project modules, which is an
+# import that cannot come first.
+"scripts/*.py" = ["E402"]
+# app.py muss load_dotenv() vor den Projekt-Importen aufrufen: logging_setup und
+# dashboard_api lesen Umgebungsvariablen beim Import, nicht erst beim Aufruf.
+"app.py" = ["E402"]
+"tests/*.py" = ["E402"]

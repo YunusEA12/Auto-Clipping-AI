@@ -51,6 +51,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, NamedTuple, Optional, Tuple
+from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -239,6 +240,25 @@ def cookies_status() -> Tuple[bool, str]:
         return False, f"{len(cookies)} Cookie(s) gefunden, aber kein 'sessionid' — Login vermutlich unvollständig"
 
     return True, f"{len(cookies)} Cookie(s) gefunden, inkl. sessionid"
+
+
+def wait_for_upload_form(page, timeout_ms: int = NAV_TIMEOUT_MS) -> bool:
+    """Wait for the actual upload input, including client-side login redirects.
+
+    DOMContentLoaded can fire before TikTok decides whether a cookie session is
+    valid. Checking the URL immediately after goto() missed expired sessions.
+    """
+    for elapsed in range(0, timeout_ms, 500):
+        path = urlsplit(page.url).path
+        if path == "/login" or path.startswith("/login/"):
+            logger.error("TikTok session rejected: redirected to login; refresh cookies.json on this host.")
+            return False
+        if path.rstrip("/") == "/tiktokstudio/upload" and page.locator("input[type='file']").count():
+            return True
+        page.wait_for_timeout(min(500, timeout_ms - elapsed))
+    logger.error("TikTok upload form unavailable after %ds; session, challenge or selector needs attention.",
+                 timeout_ms // 1000)
+    return False
 
 
 def _wait_for_upload_complete(page) -> bool:
@@ -812,11 +832,8 @@ def upload_video(
                 logger.info("Opening TikTok upload page...")
                 page.goto(UPLOAD_URL, wait_until="domcontentloaded")
 
-                if "login" in page.url:
-                    logger.error(
-                        "Not logged in (redirected to %s). The cookies in %s are likely "
-                        "expired — re-export a fresh set (see README_UPLOAD.md).", page.url, COOKIES_PATH,
-                    )
+                if not wait_for_upload_form(page):
+                    _save_post_click_snapshot(page, "upload_form_unavailable")
                     return UploadOutcome(success=False, confirmed=False)
 
                 # The cookie-consent banner shows up on page load, before the upload even starts —

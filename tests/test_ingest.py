@@ -1,7 +1,6 @@
 """ingest.py against real ffmpeg on a tiny synthetic clip; yt-dlp is faked (no network)."""
 import subprocess
 import wave
-from pathlib import Path
 
 import pytest
 import yt_dlp

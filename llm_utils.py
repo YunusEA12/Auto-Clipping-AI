@@ -393,7 +393,7 @@ def call_with_fallback(
         model = pool[idx]
         try:
             result = call_with_retry(
-                lambda: make_request(model), f"{description}[{model}]",
+                lambda m=model: make_request(m), f"{description}[{model}]",
                 max_retries=max_retries, base_delay=base_delay, max_delay=max_delay,
                 max_calls_per_day=max_calls_per_day, model=model,
             )

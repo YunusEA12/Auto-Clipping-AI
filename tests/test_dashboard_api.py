@@ -14,7 +14,10 @@ import profiles
 
 
 def test_paths_are_reexported_from_the_real_modules():
-    import analyze, auto_pilot, orchestrator, train_loop
+    import analyze
+    import auto_pilot
+    import orchestrator
+    import train_loop
     assert dashboard_api.AGENT_STATE_PATH == auto_pilot.AGENT_STATE_PATH
     assert dashboard_api.AI_GUIDELINES_PATH == analyze.AI_GUIDELINES_PATH
     assert dashboard_api.ORCHESTRATOR_STATE_PATH == orchestrator.ORCHESTRATOR_STATE_PATH

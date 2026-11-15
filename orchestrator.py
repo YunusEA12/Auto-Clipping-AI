@@ -215,8 +215,8 @@ class _AdoptedProcess:
             self._proc.wait(timeout=timeout)
         except psutil.NoSuchProcess:
             pass
-        except psutil.TimeoutExpired:
-            raise subprocess.TimeoutExpired(cmd="auto_pilot.py", timeout=timeout)
+        except psutil.TimeoutExpired as e:
+            raise subprocess.TimeoutExpired(cmd="auto_pilot.py", timeout=timeout) from e
         self.returncode = 0
 
 

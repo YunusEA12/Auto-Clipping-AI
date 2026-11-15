@@ -6,6 +6,15 @@ import tiktok_uploader
 import verify_tiktok_selectors as vts
 
 
+@pytest.mark.parametrize("audit_ok, expected_exit", [(True, 0), (False, 1)])
+def test_cli_reports_session_audit_failure(monkeypatch, audit_ok, expected_exit):
+    import sys
+    monkeypatch.setattr(sys, "argv", ["verify_tiktok_selectors.py", "--headless"])
+    monkeypatch.setattr(vts, "run_audit", lambda **kwargs: audit_ok)
+    with pytest.raises(SystemExit) as exc:
+        vts.main()
+    assert exc.value.code == expected_exit
+
 class FakeContext:
     def __init__(self, cookies):
         self._cookies = cookies

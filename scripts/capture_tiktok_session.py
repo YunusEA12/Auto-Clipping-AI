@@ -29,6 +29,7 @@ from playwright.sync_api import sync_playwright
 
 import atomic_io
 import logging_setup
+import tiktok_uploader
 
 logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
@@ -90,11 +91,11 @@ def capture(out_path: Path, timeout_seconds: float, keep_open: bool) -> int:
                 except Exception as e:
                     logger.warning("Konnte die Upload-Seite nicht laden: %s", e)
 
-                if "login" in page.url:
+                if not tiktok_uploader.wait_for_upload_form(page):
                     # A sessionid can exist before the login is fully through (e.g. a
                     # pending verification step). Keep waiting rather than saving a
                     # session that cannot upload.
-                    logger.info("Noch auf der Login-Seite — warte weiter.")
+                    logger.info("Upload-Formular noch nicht erreichbar — warte weiter.")
                     announced = False
                     time.sleep(POLL_SECONDS)
                     continue

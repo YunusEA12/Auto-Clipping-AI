@@ -2,6 +2,7 @@
 Description=Auto-Clipping AI - next ten clips quality audit and twelve-hour checkpoint
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -12,7 +13,6 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/auto-clipping-ai/venv/bin/python clip_quality_audit.py --watch
 Restart=on-failure
 RestartSec=30
-StartLimitIntervalSec=0
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/opt/auto-clipping-ai

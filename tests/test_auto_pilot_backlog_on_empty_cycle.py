@@ -12,7 +12,6 @@ never got a chance to run at all. These tests lock in that Phase 5 now always ru
 
 import json
 
-import pytest
 
 import auto_pilot
 

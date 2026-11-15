@@ -327,7 +327,7 @@ def test_get_multi_cam_coordinates_pads_each_box():
     boxes = [(100, 100, 100, 100), (500, 100, 100, 100)]
     result = vision.get_multi_cam_coordinates(boxes, 1920, 1080, padding_factor=2.0)
     assert len(result) == 2
-    for (x, y, w, h) in result:
+    for (_x, _y, w, h) in result:
         assert w > 100 and h > 100  # padded larger than the raw 100x100 box
 
 

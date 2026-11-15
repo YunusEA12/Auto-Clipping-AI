@@ -30,10 +30,18 @@ import upload
 import upload_instagram_playwright
 import upload_ledger
 import upload_manager
+import tiktok_uploader
 
 
 class RealYouTubeCallBlocked(RuntimeError):
     """Raised instead of ever performing a real Google OAuth/API call during tests."""
+
+
+@pytest.fixture(autouse=True)
+def _block_real_tiktok_browser(monkeypatch):
+    def blocked(*args, **kwargs):
+        raise RuntimeError("A test tried to launch a real TikTok browser. Supply a fake sync_playwright explicitly.")
+    monkeypatch.setattr(tiktok_uploader, "sync_playwright", blocked)
 
 
 class RealInstagramCallBlocked(RuntimeError):

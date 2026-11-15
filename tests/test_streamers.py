@@ -2,6 +2,7 @@ import json
 import threading
 from datetime import datetime, timedelta, timezone
 
+import pydantic
 import pytest
 
 import streamers
@@ -203,7 +204,7 @@ def test_facecam_box_roundtrips_through_save_and_load(tmp_path):
     [0.0, 0.0, 1.5, 1.0],      # x2 out of 0..1
 ])
 def test_facecam_box_rejects_invalid_coordinates(bad_box):
-    with pytest.raises(Exception):
+    with pytest.raises(pydantic.ValidationError):
         streamers.StreamerEntry(name="x", url="https://twitch.tv/x", facecam_box=bad_box)
 
 
@@ -213,7 +214,7 @@ def test_facecam_box_accepts_full_frame_extremes():
 
 
 def test_facecam_padding_rejects_negative_value():
-    with pytest.raises(Exception):
+    with pytest.raises(pydantic.ValidationError):
         streamers.StreamerEntry(name="x", url="https://twitch.tv/x", facecam_padding=-0.1)
 
 

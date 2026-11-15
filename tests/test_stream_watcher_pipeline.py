@@ -3,7 +3,6 @@ heavy step (ffmpeg, Whisper, LLM, upload, Discord) is replaced by a recording fa
 import json
 import os
 import time
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -55,7 +54,7 @@ def test_process_chunk_keeps_only_hot_clips_and_logs_them(env):
     assert [c["title"] for c in hot] == ["Chat dreht durch"]
     assert not env.wav.exists()          # transient wav removed
     assert env.chunk.exists()            # raw chunk kept for manual rendering
-    logged = [json.loads(l) for l in (env.tmp / "hot.jsonl").read_text(encoding="utf-8").splitlines()]
+    logged = [json.loads(line) for line in (env.tmp / "hot.jsonl").read_text(encoding="utf-8").splitlines()]
     assert logged[0]["chunk"] == env.chunk.name and logged[0]["energy_rating"] == 9
     assert env.calls.render == []
 

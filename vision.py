@@ -539,7 +539,7 @@ def is_multi_cam_scene(
     slots. (2) the confident faces' areas are all within MULTI_CAM_MAX_AREA_RATIO_SPREAD of
     each other — real grid tiles render at roughly the same size; a single genuine streamer
     face next to a small HUD/game-content false positive does not."""
-    confident = [b for b, s in zip(boxes, scores) if s >= FACE_COUNT_MIN_CONFIDENCE]
+    confident = [b for b, s in zip(boxes, scores, strict=True) if s >= FACE_COUNT_MIN_CONFIDENCE]
     if not (MULTI_CAM_MIN_FACES <= len(confident) <= MULTI_CAM_MAX_FACES):
         return False
     areas = [w * h for _, _, w, h in confident]
@@ -562,7 +562,7 @@ def detect_multi_cam_faces(
         return None
     if not is_multi_cam_scene(boxes, scores):
         return None
-    confident = [b for b, s in zip(boxes, scores) if s >= FACE_COUNT_MIN_CONFIDENCE]
+    confident = [b for b, s in zip(boxes, scores, strict=True) if s >= FACE_COUNT_MIN_CONFIDENCE]
     confident.sort(key=lambda b: (b[1], b[0]))  # (y, x) reading order
     return confident, frame_w, frame_h
 
@@ -815,9 +815,9 @@ def locate_persistent_facecam(
     # frame where two detections land in the same cluster is still just one frame's worth of
     # evidence that something is there) so `persistence` stays a true fraction of frames.
     clusters: list[dict] = []
-    for boxes, scores in zip(per_frame_boxes, per_frame_scores):
+    for boxes, scores in zip(per_frame_boxes, per_frame_scores, strict=True):
         claimed: set[int] = set()
-        for box, score in zip(boxes, scores):
+        for box, score in zip(boxes, scores, strict=True):
             for index, cluster in enumerate(clusters):
                 if _boxes_are_same_position(box, cluster["representative"], frame_w, frame_h):
                     cluster["boxes"].append(box)
@@ -904,7 +904,7 @@ def validate_facecam_crop(video_path: str, clip_start: float, clip_end: float,
         try:
             boxes, scores, _, _ = _detect_faces(video_path, timestamp)
             contained = False
-            for (fx, fy, fw, fh), confidence in zip(boxes, scores):
+            for (fx, fy, fw, fh), confidence in zip(boxes, scores, strict=True):
                 intersection = max(0, min(x + width, fx + fw) - max(x, fx)) * max(0, min(y + height, fy + fh) - max(y, fy))
                 if confidence >= FACE_COUNT_MIN_CONFIDENCE and fw * fh > 0 and intersection / (fw * fh) >= 0.9:
                     contained = True

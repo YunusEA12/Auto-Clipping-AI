@@ -38,7 +38,7 @@ class ProfileCorruptError(Exception):
 def load_profile(profile_name: str) -> StreamerProfile:
     path = profile_path(profile_name)
     if not path.exists():
-        raise FileNotFoundError(
+        raise FileNotFoundError(  # noqa: B904
             f"Streamer profile not found: {path}. Available profiles: {list_profiles()}"
         )
 
@@ -88,10 +88,12 @@ def load_profile_or_fallback(profile_name: str, fallback: str = DEFAULT_FALLBACK
                 logger.warning("Profil '%s' ebenfalls nicht nutzbar: %s", candidate, candidate_error)
                 continue
 
+        # from None: jeder einzelne Kandidatenfehler wurde oben schon protokolliert, und
+        # eine Sammelfehlschlag hat keine einzelne Ursache, die den Traceback lohnt.
         raise FileNotFoundError(
             f"Kein nutzbares Streamer-Profil verfügbar (weder '{profile_name}' noch ein "
             f"Fallback) in {PROFILES_DIR}."
-        )
+        ) from None
 
 
 def list_profiles() -> List[str]:

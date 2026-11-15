@@ -133,7 +133,9 @@ def test_run_orchestrator_default_streamers_path_respects_monkeypatch(tmp_path, 
 def test_backoff_increases_with_streak():
     delays = [orchestrator._crash_backoff_seconds(streak) for streak in (1, 2, 3, 4)]
     assert delays == sorted(delays)
-    assert all(later > earlier for earlier, later in zip(delays, delays[1:]))
+    # strict=False gehoert hier dazu: delays[1:] ist per Konstruktion ein Element kuerzer,
+    # das ist das uebliche Paarweise-Idiom und kein Laengenfehler.
+    assert all(later > earlier for earlier, later in zip(delays, delays[1:], strict=False))
 
 
 def test_backoff_starts_at_base_delay():

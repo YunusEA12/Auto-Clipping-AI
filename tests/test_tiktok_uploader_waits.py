@@ -3,6 +3,48 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 import tiktok_uploader
 
 
+class FakeUploadFormPage:
+    def __init__(self, states):
+        self.states = states
+        self.index = 0
+        self.wait_calls = 0
+
+    @property
+    def url(self):
+        return self.states[self.index][0]
+
+    def locator(self, selector):
+        assert selector == "input[type='file']"
+        return FakeCountLocator(fixed=self.states[self.index][1])
+
+    def wait_for_timeout(self, ms):
+        self.wait_calls += 1
+        self.index = min(self.index + 1, len(self.states) - 1)
+
+
+def test_upload_form_wait_detects_delayed_login_redirect():
+    page = FakeUploadFormPage([(tiktok_uploader.UPLOAD_URL, 0), ("https://www.tiktok.com/login?redirect_url=upload", 0)])
+    assert tiktok_uploader.wait_for_upload_form(page, timeout_ms=2000) is False
+    assert page.wait_calls == 1
+
+
+def test_upload_form_waits_for_actual_input():
+    page = FakeUploadFormPage([(tiktok_uploader.UPLOAD_URL, 0), (tiktok_uploader.UPLOAD_URL, 1)])
+    assert tiktok_uploader.wait_for_upload_form(page, timeout_ms=2000) is True
+    assert page.wait_calls == 1
+
+
+def test_upload_form_rejects_challenge_or_missing_selector():
+    page = FakeUploadFormPage([("https://www.tiktok.com/challenge", 0)])
+    assert tiktok_uploader.wait_for_upload_form(page, timeout_ms=1000) is False
+    assert page.wait_calls == 2
+
+
+def test_upload_form_ignores_login_word_inside_query():
+    page = FakeUploadFormPage([(tiktok_uploader.UPLOAD_URL + "&enter_method=login", 1)])
+    assert tiktok_uploader.wait_for_upload_form(page) is True
+
+
 class FakeCaptionBox:
     """Mimics the subset of Playwright's Locator API _wait_for_caption_filled() uses."""
 

@@ -504,16 +504,6 @@ def _upload_to_tiktok(
         )
         return tiktok_uploader.UploadOutcome(success=True, confirmed=True)
 
-    if not _try_reserve_upload_pacing_slot(
-        "tiktok", TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS, TIKTOK_DAILY_UPLOAD_CAP,
-    ):
-        logger.info(
-            "Skipping TikTok upload for %s — fleet-wide pacing interval not elapsed or daily "
-            "cap (%d) reached; clip stays local and is retried in a later cycle.",
-            video_path.name, TIKTOK_DAILY_UPLOAD_CAP,
-        )
-        return tiktok_uploader.UploadOutcome(success=False, confirmed=False)
-
     if not upload_ledger.try_mark_pending(content_hash, "tiktok"):
         logger.warning(
             "Skipping TikTok upload for %s — another attempt for this exact clip (hash=%s...) "
@@ -521,6 +511,19 @@ def _upload_to_tiktok(
             "status is still unconfirmed and within the cooldown window; not submitting a "
             "duplicate. This clip will be retried automatically once that cooldown passes.",
             video_path.name, content_hash[:12],
+        )
+        return tiktok_uploader.UploadOutcome(success=False, confirmed=False)
+
+    # Claim the clip before spending a fleet-wide slot. A duplicate pending clip
+    # must not consume the daily budget and block every other clip for three hours.
+    if not _try_reserve_upload_pacing_slot(
+        "tiktok", TIKTOK_MIN_UPLOAD_INTERVAL_SECONDS, TIKTOK_DAILY_UPLOAD_CAP,
+    ):
+        upload_ledger.mark_failed(content_hash, "tiktok", detail="deferred by upload pacing; no browser opened")
+        logger.info(
+            "Skipping TikTok upload for %s — fleet-wide pacing interval not elapsed or daily "
+            "cap (%d) reached; clip stays local and is retried in a later cycle.",
+            video_path.name, TIKTOK_DAILY_UPLOAD_CAP,
         )
         return tiktok_uploader.UploadOutcome(success=False, confirmed=False)
 

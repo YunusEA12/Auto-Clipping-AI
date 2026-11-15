@@ -347,8 +347,8 @@ def add_streamer(
                 StreamerEntry(name=name, url=url, profile=profile, auto_upload=auto_upload, publish=publish).model_dump()
             )
             save_streamers(entries, path)
-    except Timeout:
-        raise RuntimeError(f"Could not acquire lock on {path} within {STREAMERS_LOCK_TIMEOUT_SECONDS}s")
+    except Timeout as e:
+        raise RuntimeError(f"Could not acquire lock on {path} within {STREAMERS_LOCK_TIMEOUT_SECONDS}s") from e
 
 
 def update_streamer(
@@ -392,8 +392,8 @@ def update_streamer(
                 save_streamers(entries, path)
                 return True
             return False
-    except Timeout:
-        raise RuntimeError(f"Could not acquire lock on {path} within {STREAMERS_LOCK_TIMEOUT_SECONDS}s")
+    except Timeout as e:
+        raise RuntimeError(f"Could not acquire lock on {path} within {STREAMERS_LOCK_TIMEOUT_SECONDS}s") from e
 
 
 def remove_streamer(name: str, path: Path = None) -> bool:
@@ -409,5 +409,5 @@ def remove_streamer(name: str, path: Path = None) -> bool:
 
             save_streamers(remaining, path)
             return True
-    except Timeout:
-        raise RuntimeError(f"Could not acquire lock on {path} within {STREAMERS_LOCK_TIMEOUT_SECONDS}s")
+    except Timeout as e:
+        raise RuntimeError(f"Could not acquire lock on {path} within {STREAMERS_LOCK_TIMEOUT_SECONDS}s") from e

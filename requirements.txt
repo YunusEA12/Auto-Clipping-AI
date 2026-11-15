@@ -1,23 +1,381 @@
-yt-dlp
-ffmpeg-python
-faster-whisper
-# Compatibility with faster-whisper 1.2.1 (upstream issue #1589).
-av>=11,<19
-python-dotenv
-pydantic
-google-genai
-opencv-python-headless
-mediapipe
-google-api-python-client
-google-auth-httplib2
-google-auth-oauthlib
-streamlit
-requests
-numpy
-streamlink
-playwright
-streamlit-autorefresh
-browser-cookie3
-filelock
-psutil
-pytest
+# ERZEUGT - NICHT VON HAND BEARBEITEN.
+#
+# Abgeleitet aus uv.lock, damit der Server exakt die Versionen installiert, gegen die die
+# CI testet. Vorher stand hier eine handgepflegte Liste ohne eine einzige Versionsangabe:
+# der Server bekam jeweils die neuesten Pakete, die CI testete gegen uv.lock, und am
+# 15.11.2026 hat genau diese Luecke den Playwright-Browser unbrauchbar gemacht, ohne dass
+# ein Dienst es gemeldet haette.
+#
+# Neu erzeugen nach jeder Aenderung an pyproject.toml/uv.lock:
+#     uv export --no-dev --no-hashes --no-emit-project --format requirements-txt > requirements.txt
+# Die CI prueft, ob diese Datei zum Lockfile passt.
+absl-py==2.5.1
+    # via mediapipe
+altair==6.3.0
+    # via streamlit
+annotated-types==0.8.0
+    # via pydantic
+anyio==4.15.1
+    # via
+    #   google-genai
+    #   httpx
+    #   httpx2
+    #   starlette
+    #   streamlit
+attrs==26.1.0
+    # via
+    #   jsonschema
+    #   outcome
+    #   referencing
+    #   trio
+av==18.1.0
+    # via
+    #   auto-clipping-ai
+    #   faster-whisper
+browser-cookie3==0.20.1
+    # via auto-clipping-ai
+certifi==2026.10.23
+    # via
+    #   httpcore
+    #   httpx
+    #   mediapipe
+    #   requests
+    #   streamlink
+cffi==2.1.1
+    # via
+    #   cryptography
+    #   sounddevice
+    #   trio
+charset-normalizer==3.5.2
+    # via requests
+click==8.5.0
+    # via
+    #   huggingface-hub
+    #   streamlit
+    #   uvicorn
+colorama==0.4.6 ; sys_platform == 'win32'
+    # via tqdm
+contourpy==1.3.3 ; python_full_version < '3.12'
+    # via matplotlib
+contourpy==1.4.0 ; python_full_version >= '3.12'
+    # via matplotlib
+cryptography==50.0.2
+    # via google-auth
+ctranslate2==4.8.4
+    # via faster-whisper
+cycler==0.12.1
+    # via matplotlib
+distro==1.9.0
+    # via google-genai
+faster-whisper==1.2.1
+    # via auto-clipping-ai
+ffmpeg-python==0.2.0
+    # via auto-clipping-ai
+filelock==4.2.4
+    # via
+    #   auto-clipping-ai
+    #   huggingface-hub
+flatbuffers==25.12.19
+    # via
+    #   mediapipe
+    #   onnxruntime
+fonttools==4.68.0
+    # via matplotlib
+fsspec==2026.9.0
+    # via huggingface-hub
+future==1.0.0
+    # via ffmpeg-python
+google-api-core==2.43.0
+    # via google-api-python-client
+google-api-python-client==2.201.0
+    # via auto-clipping-ai
+google-auth==2.62.0
+    # via
+    #   google-api-core
+    #   google-api-python-client
+    #   google-auth-httplib2
+    #   google-auth-oauthlib
+    #   google-genai
+google-auth-httplib2==0.4.4
+    # via
+    #   auto-clipping-ai
+    #   google-api-python-client
+google-auth-oauthlib==1.5.0
+    # via auto-clipping-ai
+google-genai==2.33.0
+    # via auto-clipping-ai
+googleapis-common-protos==1.76.0
+    # via google-api-core
+greenlet==3.5.6
+    # via playwright
+h11==0.16.0
+    # via
+    #   httpcore
+    #   httpcore2
+    #   uvicorn
+    #   wsproto
+hf-xet==1.7.1 ; platform_machine == 'AMD64' or platform_machine == 'ARM64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
+    # via huggingface-hub
+httpcore==1.0.9
+    # via httpx
+httpcore2==2.16.0 ; sys_platform != 'emscripten'
+    # via httpx2
+httplib2==0.32.1
+    # via
+    #   google-api-python-client
+    #   google-auth-httplib2
+httpx==0.28.1
+    # via google-genai
+httpx2==2.16.0
+    # via huggingface-hub
+httpx2-jsfetch==1.0 ; python_full_version >= '3.12' and sys_platform == 'emscripten'
+    # via httpx2
+huggingface-hub==2.3.0
+    # via
+    #   faster-whisper
+    #   tokenizers
+idna==3.20
+    # via
+    #   anyio
+    #   httpx
+    #   httpx2
+    #   requests
+    #   trio
+isodate==0.7.2
+    # via streamlink
+itsdangerous==2.2.0
+    # via streamlit
+jeepney==0.9.0 ; 'bsd' in sys_platform or sys_platform == 'linux'
+    # via browser-cookie3
+jinja2==3.1.6
+    # via
+    #   altair
+    #   pydeck
+jsonschema==4.26.0
+    # via altair
+jsonschema-specifications==2025.9.1
+    # via jsonschema
+kiwisolver==1.5.1
+    # via matplotlib
+lxml==6.1.3
+    # via streamlink
+lz4==4.4.5
+    # via browser-cookie3
+markupsafe==3.0.4
+    # via jinja2
+matplotlib==3.11.2
+    # via mediapipe
+mediapipe==1.2.0
+    # via auto-clipping-ai
+narwhals==2.28.0
+    # via altair
+numpy==2.4.6 ; python_full_version < '3.12'
+    # via
+    #   auto-clipping-ai
+    #   contourpy
+    #   ctranslate2
+    #   matplotlib
+    #   mediapipe
+    #   onnxruntime
+    #   opencv-contrib-python
+    #   opencv-python-headless
+    #   pandas
+    #   pydeck
+    #   streamlit
+numpy==2.5.4 ; python_full_version >= '3.12'
+    # via
+    #   auto-clipping-ai
+    #   contourpy
+    #   ctranslate2
+    #   matplotlib
+    #   mediapipe
+    #   onnxruntime
+    #   opencv-contrib-python
+    #   opencv-python-headless
+    #   pandas
+    #   pydeck
+    #   streamlit
+oauthlib==4.0.0
+    # via requests-oauthlib
+onnxruntime==1.31.1
+    # via faster-whisper
+opencv-contrib-python==5.0.0.93
+    # via mediapipe
+opencv-python-headless==5.0.0.93
+    # via auto-clipping-ai
+opentelemetry-api==1.45.1
+    # via google-api-core
+outcome==1.3.0.post0
+    # via
+    #   trio
+    #   trio-websocket
+packaging==26.3
+    # via
+    #   altair
+    #   huggingface-hub
+    #   matplotlib
+    #   onnxruntime
+    #   streamlit
+pandas==3.1.0
+    # via streamlit
+pillow==13.0.0
+    # via
+    #   matplotlib
+    #   streamlit
+playwright==1.64.1
+    # via auto-clipping-ai
+proto-plus==1.29.0
+    # via google-api-core
+protobuf==7.36.2
+    # via
+    #   google-api-core
+    #   googleapis-common-protos
+    #   onnxruntime
+    #   proto-plus
+    #   streamlit
+psutil==7.2.2
+    # via auto-clipping-ai
+pyarrow==26.0.0
+    # via streamlit
+pyasn1==0.6.5
+    # via pyasn1-modules
+pyasn1-modules==0.4.2
+    # via google-auth
+pycountry==26.2.16
+    # via streamlink
+pycparser==3.12 ; implementation_name != 'PyPy'
+    # via cffi
+pycryptodome==3.24.1
+    # via streamlink
+pycryptodomex==3.24.1
+    # via browser-cookie3
+pydantic==2.14.1
+    # via
+    #   auto-clipping-ai
+    #   google-genai
+pydantic-core==2.50.1
+    # via pydantic
+pydeck==0.9.3
+    # via streamlit
+pyee==13.0.1 ; python_full_version < '3.12'
+    # via playwright
+pyee==14.0.0 ; python_full_version >= '3.12'
+    # via playwright
+pyparsing==3.3.3
+    # via
+    #   httplib2
+    #   matplotlib
+pysocks==1.7.1
+    # via streamlink
+python-dateutil==3.0.0
+    # via
+    #   matplotlib
+    #   pandas
+python-dotenv==1.2.4
+    # via auto-clipping-ai
+python-multipart==0.0.32
+    # via streamlit
+pywin32==312 ; sys_platform == 'win32'
+    # via wmi
+pyyaml==6.0.3
+    # via
+    #   ctranslate2
+    #   huggingface-hub
+referencing==0.37.0
+    # via
+    #   jsonschema
+    #   jsonschema-specifications
+requests==2.34.2
+    # via
+    #   auto-clipping-ai
+    #   google-api-core
+    #   google-auth
+    #   google-genai
+    #   requests-oauthlib
+    #   streamlink
+    #   streamlit
+requests-oauthlib==2.0.0
+    # via google-auth-oauthlib
+rpds-py==2026.9.1
+    # via
+    #   jsonschema
+    #   referencing
+shadowcopy==0.0.4 ; sys_platform == 'win32'
+    # via browser-cookie3
+six==1.17.0
+    # via python-dateutil
+sniffio==1.3.1
+    # via
+    #   google-genai
+    #   trio
+sortedcontainers==2.4.0
+    # via trio
+sounddevice==0.5.6
+    # via mediapipe
+starlette==1.10.0
+    # via streamlit
+streamlink==8.6.2
+    # via auto-clipping-ai
+streamlit==1.66.1
+    # via auto-clipping-ai
+tenacity==9.1.4
+    # via google-genai
+tokenizers==0.23.3
+    # via faster-whisper
+tqdm==4.70.1
+    # via
+    #   faster-whisper
+    #   huggingface-hub
+trio==0.34.0
+    # via
+    #   streamlink
+    #   trio-websocket
+trio-websocket==0.12.2
+    # via streamlink
+truststore==0.10.5 ; sys_platform != 'emscripten'
+    # via
+    #   httpcore2
+    #   httpx2
+typing-extensions==4.16.0
+    # via
+    #   altair
+    #   anyio
+    #   google-genai
+    #   httpx2
+    #   huggingface-hub
+    #   opentelemetry-api
+    #   pydantic
+    #   pydantic-core
+    #   pyee
+    #   referencing
+    #   starlette
+    #   streamlit
+    #   typing-inspection
+typing-inspection==0.4.4
+    # via pydantic
+tzdata==2026.6
+    # via
+    #   pandas
+    #   python-dateutil
+uritemplate==4.2.0
+    # via google-api-python-client
+urllib3==2.8.0
+    # via
+    #   requests
+    #   streamlink
+uvicorn==0.54.0
+    # via streamlit
+watchdog==6.0.0 ; sys_platform != 'darwin'
+    # via streamlit
+websocket-client==1.9.2
+    # via streamlink
+websockets==17.3
+    # via
+    #   google-genai
+    #   streamlit
+wmi==1.5.1 ; sys_platform == 'win32'
+    # via shadowcopy
+wsproto==1.3.2
+    # via trio-websocket
+yt-dlp==2026.10.26
+    # via auto-clipping-ai

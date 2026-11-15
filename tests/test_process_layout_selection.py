@@ -352,7 +352,6 @@ def test_resolve_layout_multi_cam_grid_routes_to_multi_cam(monkeypatch):
 def test_resolve_layout_too_many_faces_falls_back_to_blur_background(monkeypatch):
     # A 9-player Werwolf/Among Us/poker-table overlay -- too crowded to slot individually.
     boxes = [(i * 100, 0, 90, 90) for i in range(9)]
-    scores = [0.9] * 9
     monkeypatch.setattr(process.vision, "detect_faces_for_layout", lambda *a, **k: (9, boxes[0], 1920, 1080))
     monkeypatch.setattr(process.vision, "detect_multi_cam_faces", lambda *a, **k: None)
     resolved, _ = process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0)

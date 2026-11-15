@@ -746,6 +746,29 @@ def test_tiktok_not_reuploaded_when_ledger_already_shows_done(monkeypatch, clip_
     assert result.tiktok.confirmed is True
 
 
+def test_pending_tiktok_duplicate_does_not_spend_fleet_pacing_slot(monkeypatch, clip_path):
+    content_hash = upload_ledger.compute_content_hash(clip_path)
+    upload_ledger.try_mark_pending(content_hash, "tiktok")
+    reservations = []
+    monkeypatch.setattr(upload_manager, "_try_reserve_upload_pacing_slot",
+                        lambda *args: reservations.append(args) or True)
+    outcome = upload_manager._upload_to_tiktok(clip_path, "desc", [], True, False)
+    assert outcome.success is False
+    assert reservations == []
+    assert upload_ledger.get_entry(content_hash, "tiktok")["status"] == "pending"
+
+
+def test_pacing_denial_releases_own_tiktok_pending_claim(monkeypatch, clip_path):
+    monkeypatch.setattr(upload_manager, "_try_reserve_upload_pacing_slot", lambda *args: False)
+    monkeypatch.setattr(tiktok_uploader, "try_upload_clip",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not upload")))
+    outcome = upload_manager._upload_to_tiktok(clip_path, "desc", [], True, False)
+    assert outcome.success is False
+    entry = upload_ledger.get_entry(upload_ledger.compute_content_hash(clip_path), "tiktok")
+    assert entry["status"] == "failed"
+    assert "pacing" in entry["detail"]
+
+
 def test_fresh_pending_entry_blocks_a_concurrent_duplicate_attempt(monkeypatch, fake_tiktok_success, clip_path):
     """Simulates a second worker (or a retry that races an in-flight first attempt) reaching
     _upload_to_youtube() for the exact same clip while the first attempt's pending marker is

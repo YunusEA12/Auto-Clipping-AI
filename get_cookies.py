@@ -193,7 +193,7 @@ def main():
         cookies = extract_tiktok_cookies(args.browser)
     except (RuntimeError, ValueError) as e:
         logger.error("%s", e)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
     atomic_io.atomic_write_json(COOKIES_PATH, cookies)
     atomic_io.secure_file_permissions(COOKIES_PATH)

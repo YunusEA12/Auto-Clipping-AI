@@ -341,7 +341,10 @@ def render_hot_clips(
         len(rendered), video_chunk_path.name, [p.name for p in rendered],
     )
 
-    for clip, output_path in zip(hot_clips, rendered):
+    # Nicht strict=True: process() liefert weniger Pfade zurueck, wenn ein Clip an der
+    # Qualitaetspruefung scheitert. Die Paarung nach Position setzt voraus, dass Ausfaelle
+    # am Ende auftreten — stimmt das nicht, werden Titel und Datei verwechselt.
+    for clip, output_path in zip(hot_clips, rendered, strict=False):
         upload_status = "rendered"
         hashtags = clip.get("hashtags") or tiktok_uploader.DEFAULT_HASHTAGS
 

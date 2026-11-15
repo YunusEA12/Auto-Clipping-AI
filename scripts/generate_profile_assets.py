@@ -20,7 +20,6 @@ Usage:
 
 import argparse
 import io
-import json
 import logging
 import os
 import sys
