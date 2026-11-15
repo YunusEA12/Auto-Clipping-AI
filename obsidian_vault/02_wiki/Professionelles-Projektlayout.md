@@ -27,3 +27,14 @@ Die 20 bewerteten Kriterien mit Ausgangs- und aktuellem Stand stehen in
 
 Historische Wiki-Seiten beschreiben ihre damaligen Dateinamen. Für aktuelle Pfade und
 Befehle gelten die hier verlinkten Dokumente.
+
+## Geprüfter Betrieb
+
+Am 16.11.2026 wurden die neue Struktur und die Runtime-Migration auf dem VPS angewendet.
+36 Moves und 13 Pfadübersetzungen; Ledger, Upload-Limits, Cookies, Streamer-Konfiguration,
+Fleet-Freigabe und `.env` blieben bytegleich. Alle drei Dienste laufen mit neuen
+Paket-Einstiegen, inklusive eigenständigem Upload-Worker. 54 Kandidaten bestanden dessen
+Freigaben. Der nächste zulässige Upload-Versuch liegt bei 02:05:54 Uhr Europe/Berlin.
+
+Die vollständigen Prüfungen und Grenzen stehen im
+[Validierungsbericht](../../docs/quality/validation-2026-11-16.md).

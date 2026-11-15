@@ -11,13 +11,9 @@ Group=autoclip
 WorkingDirectory=/opt/auto-clipping-ai
 # 0.0.0.0 is required here so the dashboard is reachable on the tailscale0 interface, not
 # just localhost - it does NOT mean "publicly exposed": SETUP_SERVER.md's ufw rules block
-# every interface except tailscale0 and SSH by default. Never remove those firewall rules
-# without adding real authentication in front of this port first - the dashboard has none
-# of its own (see H-07/H-11 in the audit for the equivalent tradeoff already accepted
-# elsewhere in this project).
-# Same PLAYWRIGHT_BROWSERS_PATH as the supervisor unit (see there for why) - the dashboard
-# process doesn't launch a browser today, but it imports modules that do (dashboard_api.py ->
-# tiktok_uploader.py), so this keeps both units consistent if that ever changes.
+# every interface except tailscale0 and SSH by default. Keep those firewall rules.
+# DASHBOARD_PASSWORD provides an additional login gate, configured in the private .env.
+# The browser path matches the supervisor for explicitly requested manual publishing.
 Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/auto-clipping-ai/.playwright-browsers
 Environment=AUTOCLIP_HOME=/opt/auto-clipping-ai
 ExecStart=/opt/auto-clipping-ai/venv/bin/autoclip dashboard --server.address 0.0.0.0 --server.port 8501 --server.headless true --browser.gatherUsageStats false

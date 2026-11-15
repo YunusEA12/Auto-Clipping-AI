@@ -60,21 +60,17 @@ def assert_stopped(home: Path) -> None:
             continue
 
 
-def _rewrite_paths(value, home: Path, moves: list[tuple[Path, Path]]):
+def _rewrite_paths(value, replacements: list[tuple[str, str]]):
     if isinstance(value, dict):
-        return {key: _rewrite_paths(item, home, moves) for key, item in value.items()}
+        return {key: _rewrite_paths(item, replacements) for key, item in value.items()}
     if isinstance(value, list):
-        return [_rewrite_paths(item, home, moves) for item in value]
+        return [_rewrite_paths(item, replacements) for item in value]
     if not isinstance(value, str):
         return value
     normalized = value.replace("\\", "/")
-    for source, target in moves:
-        for old, new in (
-            (source.as_posix(), target.as_posix()),
-            (source.relative_to(home).as_posix(), target.relative_to(home).as_posix()),
-        ):
-            if normalized == old or normalized.startswith(old + "/"):
-                return new + normalized[len(old) :]
+    for old, new in replacements:
+        if normalized == old or normalized.startswith(old + "/"):
+            return new + normalized[len(old) :]
     return value
 
 
@@ -85,6 +81,16 @@ def migrate(home: Path, *, check_processes: bool = True) -> dict:
     moves = plan(home)  # All collisions checked before the first mutation.
     if not moves:
         return {"status": "already_migrated", "moved": 0}
+    # Audit histories contain many transcript strings. Construct path prefixes once,
+    # rather than performing pathlib conversions for every word in every JSON file.
+    replacements = [
+        pair
+        for source, target in moves
+        for pair in (
+            (source.as_posix(), target.as_posix()),
+            (source.relative_to(home).as_posix(), target.relative_to(home).as_posix()),
+        )
+    ]
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     backup = home / "var/backups" / f"layout-{stamp}"
     backup.mkdir(parents=True)
@@ -114,7 +120,7 @@ def migrate(home: Path, *, check_processes: bool = True) -> dict:
                     original = json.loads(path.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     continue
-                updated = _rewrite_paths(original, home, moves)
+                updated = _rewrite_paths(original, replacements)
                 if updated != original:
                     saved = backup / "rewritten" / path.relative_to(home)
                     saved.parent.mkdir(parents=True, exist_ok=True)

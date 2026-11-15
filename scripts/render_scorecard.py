@@ -37,6 +37,7 @@ def render(document: dict) -> str:
         "## Nachweise und Grenzen",
         "",
         "- [Architektur](../architecture.md), [Betrieb](../operations.md), [Entwicklung](../../CONTRIBUTING.md).",
+        "- [Prüfungen und Produktionsnachweise vom 16.11.2026](validation-2026-11-16.md).",
         "- Alle Änderungen werden mit isolierten Tests und echtem CPU-Medienrender geprüft; Betriebsergebnisse stehen im zugehörigen Wiki-Eintrag.",
         "- Die gemessene Coverage umfasst das Paket `autoclip` und bleibt ausdrücklich unter 100 Prozent.",
         "- KI-Clipqualität, Langzeitverfügbarkeit und Produktwirkung werden ohne neue Daten nicht künstlich höher bewertet.",

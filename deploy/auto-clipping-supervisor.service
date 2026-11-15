@@ -1,5 +1,5 @@
 [Unit]
-Description=Auto-Clipping AI - process supervisor (orchestrator.py + metrics_tracker.py)
+Description=Auto-Clipping AI - supervisor for orchestration, metrics and uploads
 After=network-online.target tailscaled.service
 Wants=network-online.target
 StartLimitIntervalSec=0
