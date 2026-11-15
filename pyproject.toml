@@ -66,6 +66,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Some administrative scripts initialize their environment before project imports.
 "scripts/*.py" = ["E402"]
+# Logging reads environment values at import, after the dashboard loads AUTOCLIP_HOME/.env.
+"src/autoclip/dashboard/app.py" = ["E402"]
 "tests/*.py" = ["E402"]
 
 [tool.coverage.run]
