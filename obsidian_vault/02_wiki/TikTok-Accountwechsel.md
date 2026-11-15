@@ -94,3 +94,41 @@ aus dem Chat heraus ohne Eingabe laeuft — vertretbar, weil der Server nicht au
 Internet erreichbar ist). Eingerichtet wird er mit `quality_audit/connect_server.ps1`, nachdem
 das root-Passwort unter my.contabo.com (VPS control -> Manage -> Password reset) neu gesetzt
 wurde.
+
+## Umsetzung 15.11.2026 — was tatsaechlich ging und was nicht
+
+Der neue Account ist **@clipmaster6152** (Anzeigename "ClipMaster"), nicht der ur-
+spruenglich geplante Kartoffel-Name — der Account war bereits angelegt, als der Umzug lief.
+
+### Cookie-Beschaffung ist umgezogen
+
+`get_cookies.py` funktioniert auf dem Arbeitsrechner nicht mehr: Chrome 157 schuetzt den
+Cookie-Schluessel per App-Bound Encryption. Neuer Weg:
+`python scripts/capture_tiktok_session.py` oeffnet ein Browserfenster, erkennt den Login
+selbst am `sessionid`-Cookie und speichert die Session — ohne Terminal-Eingabe, anders als
+`verify_tiktok_selectors.py --manual-login`.
+
+### Profil: Bild ja, Bio nein
+
+- **Profilbild gesetzt** ueber `scripts/setup_tiktok_profile.py`. Das Bild stammt aus
+  `scripts/draw_avatar.py` (offline mit Pillow gezeichnet) — die Gemini-Bildmodelle stehen
+  im Free Tier dieses Keys auf `limit: 0`, und der OpenAI-SDK wurde im August bewusst
+  entfernt.
+- **Anzeigename gesperrt** bis 20.11.2026: TikTok erlaubt eine Namensaenderung nur alle
+  7 Tage und rendert das Feld in der Sperrzeit als reinen Text statt als Eingabefeld.
+- **Bio liess sich nicht automatisch setzen.** Beim Speichern zeigt TikTok ein
+  Schieberaetsel-Captcha. Der POST auf `/api/update/profile/` liefert dann HTTP 200 mit
+  leerem Body und die Aenderung verfaellt — von aussen sieht das aus wie Erfolg, weshalb
+  das Skript das Captcha jetzt ausdruecklich erkennt. Es wird **nicht** geloest: ein Captcha
+  ist genau die Kontrolle, die Automatisierung fernhalten soll, und sie zu umgehen waere der
+  schnellste Weg zurueck in die Drosselung. Mit `--headed` loest ein Mensch es selbst.
+
+### Serverfalle: Playwright-Browser
+
+Ein `pip install -r requirements.txt` auf dem Server hat Playwright aktualisiert, womit der
+bisherige Browser nicht mehr passte (`Executable doesn't exist ... chromium_headless_shell-1248`).
+Jeder Upload waere lautlos gescheitert. Nach jedem Playwright-Update gehoert
+`venv/bin/python -m playwright install chromium` als autoclip dazu.
+
+Ebenso: `git pull` als root macht Repo-Dateien root-eigen, obwohl die Dienste als autoclip
+laufen. Deshalb liegt der Wartungsschluessel jetzt auch bei autoclip.

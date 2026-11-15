@@ -61,3 +61,6 @@ guardian_workspace/
 
 # Archiv des alten TikTok-Accounts (Lerndaten, geparkte Clips)
 backup_alter_account/
+
+# Generierte Profil-Assets (Bilder, Screenshots)
+profile_assets/
