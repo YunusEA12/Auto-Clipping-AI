@@ -23,6 +23,21 @@ jobs:
           enable-cache: true
       - run: uv sync --locked --group dev
 
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
       # requirements.txt is what the production server installs from, while everything
       # here is tested against uv.lock. If the two drift, CI goes green for versions the
       # server never runs — which is exactly how a silent Playwright upgrade broke every

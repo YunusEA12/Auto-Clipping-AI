@@ -75,3 +75,34 @@ Nächste Prioritäten:
 
 Ein grüner Health-Check oder ein vorhandener `sessionid`-Cookie beweist keinen Upload.
 Als Ergebnis zählen nur ein bestätigter Veröffentlichungsvorgang und die Kontrolle in TikTok Studio.
+
+## Ergebnis des echten Uploads
+
+**Diese Drohne verändert alles!** wurde auf **@clipmaster6152** veröffentlicht:
+<https://www.tiktok.com/@clipmaster6152/video/7708523251978439938>.
+Der Uploader beobachtete die Navigation zur Inhaltsliste; Ledger und Archiv bestätigen
+den Vorgang. Eine zweite Browser-Sitzung zeigte denselben Post in TikTok Studio mit
+Sichtbarkeit **Everyone**, eigener Video-ID und zunächst **Processing...**.
+Das beweist die Annahme durch TikTok, noch keine abgeschlossene Plattformverarbeitung
+oder Reichweite.
+
+Vorherige erneute Medienmessung: 47,08 Sekunden, −16,29 LUFS, null Schwarzbildsekunden,
+keine gemessene eingefrorene Sequenz. Bestehender Critic-Score: 8; Auto-QC bestanden.
+
+Nur die Warteintervalle der nachweislich **vor dem Post-Klick** gescheiterten Sitzungs-
+und Modal-Versuche wurden für die kontrollierte Reparatur freigegeben. Die Tageszähler
+wurden beibehalten; der bestätigte Versuch beanspruchte regulär den dritten Platz.
+Es gibt keine automatische Freigabe bei unbestätigten Post-Klicks.
+
+Supervisor, Dashboard und Audit wurden gestartet; der Supervisor ist wieder für
+Systemstarts aktiviert. Die Windows-Fleet bleibt pausiert. Nach dem Dashboard-Neustart
+sank der gesamte RAM-Verbrauch des VPS zunächst auf etwa 2,3 GiB; nach Start der Fleet
+lag er beim ersten Check bei etwa 3,2 GiB. Das Speicherwachstum bleibt offen.
+
+Die Live-Kontrolle zeigte doppelte Hashtags aus Beschreibung plus separater Tag-Liste.
+Für folgende Uploads werden identische Tags jetzt ohne Beachtung der Großschreibung
+zusammengeführt. Bereits veröffentlichter Text wurde nicht nachträglich geändert.
+
+GitHub Actions fand zusätzlich fehlendes FFmpeg auf dem Ubuntu-Runner. Die CI installiert
+FFmpeg jetzt explizit, statt sich auf vorinstallierte Runner-Werkzeuge zu verlassen.
+Lokaler Abschlusslauf: **913 Tests bestanden, 1 übersprungen**, Ruff ohne Befund.

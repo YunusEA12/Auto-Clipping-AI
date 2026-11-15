@@ -3,6 +3,17 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 import tiktok_uploader
 
 
+def test_caption_does_not_repeat_tags_already_in_description():
+    description = "Neue Drohne! @BastiGhG #gaming #viral"
+    assert tiktok_uploader.build_caption_text(description, ["gaming", "#viral", "#funny"]) == description + " #funny"
+
+
+def test_caption_deduplicates_tags_case_insensitively_and_keeps_full_words():
+    assert tiktok_uploader.build_caption_text("Clip #Gaming #fypp", ["gaming", "#FYP", "#fyp", " "]) == (
+        "Clip #Gaming #fypp #FYP"
+    )
+
+
 class FakeUploadFormPage:
     def __init__(self, states):
         self.states = states

@@ -187,8 +187,22 @@ class UploadOutcome(NamedTuple):
     confirmed: bool
 
 
+def _missing_hashtags(description: str, hashtags: List[str]) -> List[str]:
+    seen = {tag.casefold() for tag in re.findall(r"#\w+", description)}
+    missing = []
+    for raw in hashtags:
+        tag = raw.strip()
+        if not tag:
+            continue
+        key = (tag if tag.startswith("#") else f"#{tag}").casefold()
+        if key not in seen:
+            missing.append(tag)
+            seen.add(key)
+    return missing
+
+
 def build_caption_text(description: str, hashtags: Optional[List[str]] = None) -> str:
-    hashtags = hashtags or []
+    hashtags = _missing_hashtags(description, hashtags or [])
     hashtags_str = " ".join(h if h.startswith("#") else f"#{h}" for h in hashtags)
     return f"{description.strip()} {hashtags_str}".strip()
 
@@ -818,7 +832,7 @@ def upload_video(
         )
         return UploadOutcome(success=False, confirmed=False)
 
-    tag_list = list(hashtags or DEFAULT_HASHTAGS)
+    tag_list = _missing_hashtags(description, list(hashtags or DEFAULT_HASHTAGS))
     caption = build_caption_text(description, tag_list)
 
     try:
