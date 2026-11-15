@@ -313,14 +313,50 @@ def run(dry_run: bool, headed: bool, skip_avatar: bool) -> int:
                     save.click(timeout=8000)
                     page.wait_for_timeout(4000)
 
+            # Read the live profile back rather than trusting the save. TikTok's save POST
+            # returns HTTP 200 with an empty body even when a captcha silently voided the
+            # change, so "the click succeeded" says nothing about whether anything changed.
             page.goto(PROFILE_URL, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(5000)
             page.screenshot(path=str(ASSETS_DIR / "profile_after.png"), full_page=True)
-            logger.info("✅ Geaendert: %s", ", ".join(changed) or "nichts")
+
+            verified, unverified = [], []
+            if "Bio" in changed:
+                live_bio = ""
+                try:
+                    live_bio = page.locator("[data-e2e='user-bio']").first.inner_text().strip()
+                except Exception:
+                    pass
+                # First line only: TikTok renders the bio with its own line breaks.
+                wanted = copy["bio"].splitlines()[0].strip()
+                (verified if wanted and wanted in live_bio else unverified).append("Bio")
+                changed.remove("Bio")
+
+            if "Profilbild" in changed:
+                src = ""
+                try:
+                    src = page.locator("[data-e2e='user-avatar'] img").first.get_attribute("src") or ""
+                except Exception:
+                    pass
+                # A real uploaded avatar comes from the CDN; the letter placeholder has no img.
+                (verified if "tiktokcdn" in src else unverified).append("Profilbild")
+                changed.remove("Profilbild")
+
+            verified.extend(changed)
+
+            if verified:
+                logger.info("✅ Nachweislich geaendert: %s", ", ".join(verified))
             if skipped:
-                logger.info("   Nicht geaendert: %s", ", ".join(skipped))
+                logger.info("   Nicht versucht: %s", ", ".join(skipped))
+            if unverified:
+                logger.error(
+                    "❌ Angeblich gespeichert, aber auf dem Profil NICHT angekommen: %s. "
+                    "Fast immer TikToks Captcha: der Speichern-Request meldet trotzdem "
+                    "Erfolg. Diese Felder von Hand in der TikTok-App setzen — der Text "
+                    "steht in %s.", ", ".join(unverified), ASSETS_DIR / "profile.txt",
+                )
             logger.info("   Kontrollbild: %s", ASSETS_DIR / "profile_after.png")
-            return 0
+            return 1 if unverified else 0
 
         except PlaywrightTimeout as e:
             logger.error("Zeitueberschreitung: %s", str(e)[:200])
