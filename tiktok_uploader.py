@@ -498,13 +498,18 @@ def _wait_for_post_confirmation(page) -> bool:
     elapsed_ms = 0
 
     while elapsed_ms < deadline_ms:
-        if UPLOAD_URL not in page.url:
-            logger.info("Post-click confirmed: page navigated away from the upload URL")
+        path = urlsplit(page.url).path.rstrip("/")
+        if path in ("/tiktokstudio/content", "/creator-center/content"):
+            logger.info("Post-click confirmed: page navigated to content list")
             return True
         try:
-            if page.locator("#TUXToastProvider-topOutlet .TUXTopToast").count() > 0:
-                logger.info("Post-click confirmed: success toast observed")
-                return True
+            toast = page.locator("#TUXToastProvider-topOutlet .TUXTopToast")
+            if toast.count() > 0:
+                message = toast.first.text_content(timeout=500) or ""
+                if re.search(r"(?:video (?:published|posted|veröffentlicht)|veröffentlichtes video|"
+                             r"your video has been (?:posted|published|uploaded))", message, re.I):
+                    logger.info("Post-click confirmed: publication success toast observed")
+                    return True
         except Exception:
             pass  # a stale/detached locator during navigation isn't an error here
 

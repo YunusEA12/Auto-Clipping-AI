@@ -27,6 +27,10 @@ freigegeben. Tageslimit, Mindestabstand, Qualitätsprüfung und Veröffentlichun
 Tests blockieren echte TikTok-Browser zusätzlich zu den vorhandenen YouTube-/Instagram-Sperren.
 Die begonnenen Ruff-Korrekturen und der aus `uv.lock` erzeugte Requirements-Export werden übernommen.
 
+Die Post-Bestätigung akzeptiert nur eine Navigation zur Inhaltsliste oder eine passende
+Veröffentlichungsmeldung. Eine Login-Weiterleitung, ein geänderter URL-Parameter oder ein
+Fehler-Toast bestätigen keinen Post. Regressionstests decken diese falschen Erfolgssignale ab.
+
 ## Bestandsaufnahme
 
 Auf dem Server: 1.135 lokale Videos, davon 900 technisch gesperrt, 76 ohne Critic-Bewertung,

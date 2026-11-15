@@ -78,6 +78,13 @@ class FakeCountLocator:
             return 1
         return 0
 
+    @property
+    def first(self):
+        return self
+
+    def text_content(self, timeout=None):
+        return getattr(self, "message", "Video published")
+
 
 class FakePage:
     """Mimics the subset of Playwright's Page API these waits use: a `.url` that can change
@@ -96,7 +103,7 @@ class FakePage:
     def url(self):
         self._reads += 1
         if self._url_changes_after_reads is not None and self._reads > self._url_changes_after_reads:
-            return "https://www.tiktok.com/foryou"
+            return "https://www.tiktok.com/tiktokstudio/content"
         return tiktok_uploader.UPLOAD_URL
 
     def wait_for_timeout(self, ms):
@@ -147,6 +154,28 @@ def test_post_confirmation_true_when_success_toast_appears():
 def test_post_confirmation_false_when_nothing_ever_signals_success():
     page = FakePage(url_changes_after_reads=None)
     assert tiktok_uploader._wait_for_post_confirmation(page) is False
+
+
+def test_post_confirmation_does_not_treat_error_toast_as_success():
+    page = FakePage(toast_appears_after_calls=1)
+    page._toast.message = "Couldn't publish video. Try again later."
+    assert tiktok_uploader._wait_for_post_confirmation(page) is False
+
+
+def test_post_confirmation_does_not_accept_login_redirect():
+    class LoginPage(FakePage):
+        @property
+        def url(self):
+            return "https://www.tiktok.com/login?redirect_url=upload"
+    assert tiktok_uploader._wait_for_post_confirmation(LoginPage()) is False
+
+
+def test_post_confirmation_does_not_accept_upload_query_change():
+    class UploadPage(FakePage):
+        @property
+        def url(self):
+            return "https://www.tiktok.com/tiktokstudio/upload?from=another_source"
+    assert tiktok_uploader._wait_for_post_confirmation(UploadPage()) is False
 
 
 def test_post_confirmation_false_when_daily_check_quota_exhausted():
