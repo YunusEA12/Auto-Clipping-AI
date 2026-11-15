@@ -86,6 +86,12 @@ Sichtbarkeit **Everyone**, eigener Video-ID und zunächst **Processing...**.
 Das beweist die Annahme durch TikTok, noch keine abgeschlossene Plattformverarbeitung
 oder Reichweite.
 
+**Nachkontrolle um 23:11 Uhr (Europe/Berlin):** Verarbeitung abgeschlossen; Studio zeigt
+47 Sekunden Laufzeit, Veröffentlichungsdatum, **Everyone** und den Video-Link.
+Ein privater Screenshot und ein JSON-Beleg liegen lokal unter
+`quality_audit/maintenance_20261115/` sowie auf dem Server. Beim Check: 0 Views/Likes/Kommentare;
+eine Aussage über Reichweite ist damit weiterhin nicht möglich.
+
 Vorherige erneute Medienmessung: 47,08 Sekunden, −16,29 LUFS, null Schwarzbildsekunden,
 keine gemessene eingefrorene Sequenz. Bestehender Critic-Score: 8; Auto-QC bestanden.
 
@@ -106,3 +112,11 @@ zusammengeführt. Bereits veröffentlichter Text wurde nicht nachträglich geän
 GitHub Actions fand zusätzlich fehlendes FFmpeg auf dem Ubuntu-Runner. Die CI installiert
 FFmpeg jetzt explizit, statt sich auf vorinstallierte Runner-Werkzeuge zu verlassen.
 Lokaler Abschlusslauf: **913 Tests bestanden, 1 übersprungen**, Ruff ohne Befund.
+Auf dem VPS: **914 Tests bestanden**, Ruff ohne Befund. Auch die
+[GitHub-CI unter Windows und Ubuntu](https://github.com/YunusEA12/Auto-Clipping-AI/actions/runs/43767776686)
+ist für Code-Stand `a381983` erfolgreich.
+
+Abschlusszustand: alle drei Dienste aktiv, Supervisor aktiviert und ohne Neustartfehler.
+Der nächste reguläre Upload-Platz ist frühestens am **16.11.2026 um 02:05 Uhr
+(Europe/Berlin)** frei. Ob dann ein Post erfolgt, hängt auch von laufendem Autopilot,
+freigegebenen Kandidaten und der weiterhin gültigen TikTok-Sitzung ab.
