@@ -270,12 +270,21 @@ class FakeOverlayButton:
 
 
 class FakeOverlayPage:
-    def __init__(self, cookie_banner_present, tooltip_present):
+    def __init__(self, cookie_banner_present, tooltip_present, content_prompt_present=False):
         self.decline_button = FakeOverlayButton(cookie_banner_present)
         self.got_it_button = FakeOverlayButton(tooltip_present)
+        self.content_prompt_cancel = FakeOverlayButton(content_prompt_present)
+
+    def filter(self, has_text=None):
+        assert has_text.search("Turn on automatic content checks?")
+        return self
 
     def get_by_role(self, role, name=None):
+        if role == "dialog":
+            return self
         assert role == "button"
+        if hasattr(name, "fullmatch") and name.fullmatch("Cancel"):
+            return self.content_prompt_cancel
         if name == "Decline optional cookies":
             return self.decline_button
         if name == "Got it":
@@ -287,6 +296,13 @@ def test_dismiss_overlays_clicks_both_when_both_present():
     page = FakeOverlayPage(cookie_banner_present=True, tooltip_present=True)
     tiktok_uploader._dismiss_blocking_overlays(page)
     assert page.decline_button.clicked is True
+    assert page.got_it_button.clicked is True
+
+
+def test_dismiss_overlays_cancels_only_content_check_opt_in():
+    page = FakeOverlayPage(False, True, content_prompt_present=True)
+    tiktok_uploader._dismiss_blocking_overlays(page)
+    assert page.content_prompt_cancel.clicked is True
     assert page.got_it_button.clicked is True
 
 

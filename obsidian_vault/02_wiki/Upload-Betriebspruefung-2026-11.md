@@ -31,11 +31,23 @@ Die Post-Bestätigung akzeptiert nur eine Navigation zur Inhaltsliste oder eine 
 Veröffentlichungsmeldung. Eine Login-Weiterleitung, ein geänderter URL-Parameter oder ein
 Fehler-Toast bestätigen keinen Post. Regressionstests decken diese falschen Erfolgssignale ab.
 
+Der erste reale Übertragungsversuch erreichte 100 %, scheiterte aber vor dem Post-Klick:
+TikTok zeigt beim neuen Account den Modal-Dialog **Turn on automatic content checks?**.
+Das Caption-Feld war vorhanden, wurde aber vom Dialog verdeckt. Die Overlay-Behandlung
+schließt gezielt diesen Einrichtungsdialog mit **Cancel**, ohne automatische Kontoprüfungen
+einzuschalten. Auch unmittelbar vor der Caption-Eingabe werden die Overlays geprüft.
+Browser-Fehler sichern jetzt ebenfalls private Diagnose-Snapshots.
+
 ## Bestandsaufnahme
 
 Auf dem Server: 1.135 lokale Videos, davon 900 technisch gesperrt, 76 ohne Critic-Bewertung,
 86 ohne lesbare Metadaten und 73 bewertete Kandidaten ohne bestätigten TikTok-Ledger-Eintrag.
 Die Zahlen beschreiben diesen Prüfzeitpunkt; sie sind keine Veröffentlichungsstatistik.
+
+Die 900 QC-Sperren enthalten 634-mal `frozen_frames`, 313-mal `loudness`, 66-mal
+`subtitles_safezone` und 5-mal `black_frames` (Mehrfachgründe möglich).
+Der vorhandene Audit enthält zehn bewertete Clips, aber keine eindeutig zugeordneten
+Performance-Belege. Seine KI-Urteile belegen keine gemessene Reichweite.
 
 Der Dashboard-Prozess belegte beim Prüfen etwa 5,4 GiB RAM auf einem VPS mit 7,8 GiB RAM.
 Das ist ein Betriebsrisiko; ein Neustart kann den Speicher freigeben, belegt aber keine behobene Ursache.

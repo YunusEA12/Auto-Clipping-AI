@@ -323,7 +323,7 @@ OVERLAY_DISMISS_TIMEOUT_MS = 3000
 
 
 def _dismiss_blocking_overlays(page) -> None:
-    """Dismisses the two page-covering overlays confirmed to appear on a real upload
+    """Dismisses the page-covering overlays confirmed to appear on a real upload
     (2026-08-18, caught by an actual end-to-end test run, not the read-only selector check —
     neither ever showed up in a passive .count() scan): TikTok's cookie-consent banner (a
     <tiktok-cookie-banner> web component behind Shadow DOM — Playwright's locators pierce
@@ -333,6 +333,20 @@ def _dismiss_blocking_overlays(page) -> None:
     best-effort: try briefly, log if not found, never fail the upload over it — but if
     either is left up, every click after it silently fails (an intercepted-pointer-events
     timeout), which is worse than a missed dismissal attempt."""
+    # A fresh account also gets this modal after file selection (verified 2026-11-15).
+    # Dismiss only this opt-in prompt, leaving the account's check settings unchanged.
+    # Its modal blocks the onboarding button too, so resolve it first.
+    try:
+        dialog = page.get_by_role("dialog").filter(
+            has_text=re.compile(r"Turn on automatic content checks|Automatische Inhaltsprüfungen", re.I),
+        )
+        dialog.get_by_role("button", name=re.compile(r"^(?:Cancel|Abbrechen)$", re.I)).first.click(
+            timeout=OVERLAY_DISMISS_TIMEOUT_MS,
+        )
+        logger.info("Dismissed automatic content-check opt-in prompt")
+    except PlaywrightTimeoutError:
+        pass
+
     try:
         # .first (found in review, 2026-08-18): without it, a rare duplicate/stale element
         # matching the same accessible name raises a strict-mode Error (not a
@@ -822,6 +836,7 @@ def upload_video(
         with sync_playwright() as pw:
             browser = None
             context = None
+            page = None
             try:
                 # Launching/context-setup used to sit outside this try, so a rejected cookie
                 # (e.g. add_cookies() rejecting a sameSite value a browser-extension export used
@@ -861,6 +876,7 @@ def upload_video(
                     logger.info("Adding background sound from the royalty-free library...")
                     _add_background_sound(page)
 
+                _dismiss_blocking_overlays(page)
                 logger.info("Filling in caption...")
                 caption_box = page.locator("[data-e2e='caption_container'] div[contenteditable='true']").first
                 caption_box.click()
@@ -913,9 +929,13 @@ def upload_video(
                 return UploadOutcome(success=True, confirmed=confirmed)
 
             except PlaywrightTimeoutError as e:
+                if page is not None:
+                    _save_post_click_snapshot(page, "upload_timeout")
                 logger.error("TikTok upload timed out for %s: %s", video_path, e)
                 return UploadOutcome(success=False, confirmed=False)
             except Exception as e:
+                if page is not None:
+                    _save_post_click_snapshot(page, "upload_error")
                 logger.error("TikTok upload failed for %s: %s", video_path, e)
                 return UploadOutcome(success=False, confirmed=False)
             finally:
