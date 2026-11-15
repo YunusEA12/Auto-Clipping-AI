@@ -2,18 +2,20 @@ import json
 
 import pytest
 
-import tiktok_uploader
-import verify_tiktok_selectors as vts
+from autoclip.publishing import tiktok_uploader
+from autoclip.tools import verify_tiktok_selectors as vts
 
 
 @pytest.mark.parametrize("audit_ok, expected_exit", [(True, 0), (False, 1)])
 def test_cli_reports_session_audit_failure(monkeypatch, audit_ok, expected_exit):
     import sys
+
     monkeypatch.setattr(sys, "argv", ["verify_tiktok_selectors.py", "--headless"])
     monkeypatch.setattr(vts, "run_audit", lambda **kwargs: audit_ok)
     with pytest.raises(SystemExit) as exc:
         vts.main()
     assert exc.value.code == expected_exit
+
 
 class FakeContext:
     def __init__(self, cookies):
@@ -46,11 +48,13 @@ def test_declines_on_explicit_no(monkeypatch, isolated_cookies_path):
 
 def test_saves_only_tiktok_cookies_on_yes(monkeypatch, isolated_cookies_path):
     monkeypatch.setattr("builtins.input", lambda _: "y")
-    context = FakeContext([
-        {"name": "sessionid", "domain": ".tiktok.com", "value": "abc"},
-        {"name": "other", "domain": ".tiktok.com", "value": "def"},
-        {"name": "unrelated", "domain": ".google.com", "value": "ghi"},
-    ])
+    context = FakeContext(
+        [
+            {"name": "sessionid", "domain": ".tiktok.com", "value": "abc"},
+            {"name": "other", "domain": ".tiktok.com", "value": "def"},
+            {"name": "unrelated", "domain": ".google.com", "value": "ghi"},
+        ]
+    )
     vts._offer_to_save_session_cookies(context)
 
     saved = json.loads(isolated_cookies_path.read_text(encoding="utf-8"))
@@ -69,9 +73,12 @@ def test_manual_login_flag_requires_visible_browser():
     # than reimplementing argparse's own validation logic here.
     import subprocess
     import sys
+
     result = subprocess.run(
-        [sys.executable, "verify_tiktok_selectors.py", "--manual-login", "--headless"],
-        capture_output=True, text=True, timeout=15,
+        [sys.executable, "-m", "autoclip.tools.verify_tiktok_selectors", "--manual-login", "--headless"],
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
     assert result.returncode == 2
     assert "--manual-login needs a visible browser" in result.stderr
@@ -80,9 +87,12 @@ def test_manual_login_flag_requires_visible_browser():
 def test_pause_before_check_flag_requires_visible_browser():
     import subprocess
     import sys
+
     result = subprocess.run(
-        [sys.executable, "verify_tiktok_selectors.py", "--pause-before-check", "--headless"],
-        capture_output=True, text=True, timeout=15,
+        [sys.executable, "-m", "autoclip.tools.verify_tiktok_selectors", "--pause-before-check", "--headless"],
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
     assert result.returncode == 2
     assert "--pause-before-check needs a visible browser" in result.stderr

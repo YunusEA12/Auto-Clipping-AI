@@ -1,10 +1,11 @@
 """transcribe.py with a fake WhisperModel (no model download), realistic German word data."""
+
 import json
 from types import SimpleNamespace
 
 import pytest
 
-import transcribe
+from autoclip.ai import transcribe
 
 
 def W(text, start, end):
@@ -32,9 +33,11 @@ class FakeModel:
     def transcribe(self, path, word_timestamps):
         FakeModel.calls.append(word_timestamps)
         if word_timestamps and FakeModel.first_error:
+
             def gen():
                 yield SEGMENTS[0]
                 raise FakeModel.first_error
+
             return gen(), INFO
         if not word_timestamps:
             return iter([S(s.text.strip(), s.start, s.end, None) for s in SEGMENTS]), INFO
@@ -72,9 +75,14 @@ def test_transcribe_writes_expected_json(fake, tmp_path):
     data = json.loads(out.read_text(encoding="utf-8"))
     assert data["language"] == "de"
     assert data["segments"][0] == {
-        "text": "Das war unglaublich", "start": 0.0, "end": 2.4,
-        "words": [{"text": "Das", "start": 0.0, "end": 0.4}, {"text": "war", "start": 0.5, "end": 0.9},
-                  {"text": "unglaublich", "start": 1.0, "end": 2.4}],
+        "text": "Das war unglaublich",
+        "start": 0.0,
+        "end": 2.4,
+        "words": [
+            {"text": "Das", "start": 0.0, "end": 0.4},
+            {"text": "war", "start": 0.5, "end": 0.9},
+            {"text": "unglaublich", "start": 1.0, "end": 2.4},
+        ],
     }
     assert FakeModel.init == ("base", "cpu", "int8", 2)
 

@@ -2,7 +2,27 @@ import io
 import json
 import logging
 
-import logging_setup
+import pytest
+
+from autoclip.core import logging_setup
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_api_keys_bearers_and_exception_details_are_redacted(monkeypatch, json_mode):
+    secret = "fixture-private-key-0123456789"
+    monkeypatch.setenv("EXAMPLE_API_KEY", secret)
+    monkeypatch.setenv("LOG_FORMAT", "json" if json_mode else "text")
+    stream = io.StringIO()
+    monkeypatch.setattr("sys.stdout", stream)
+    logging_setup.configure_logging()
+    try:
+        raise ValueError("Bearer fixture-access-token-123")
+    except ValueError:
+        logging.getLogger("redaction").exception("request key=%s", secret)
+    output = stream.getvalue()
+    assert secret not in output
+    assert "fixture-access-token-123" not in output
+    assert "[REDACTED]" in output
 
 
 def test_configure_logging_does_not_raise_on_unicode(monkeypatch, capsys):

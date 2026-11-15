@@ -22,7 +22,7 @@ fallback."""
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-import upload_instagram_playwright as igp
+from autoclip.publishing import upload_instagram_playwright as igp
 
 # Captured before any test's autouse fixtures run (tests/conftest.py's _block_real_instagram_calls
 # patches igp.upload_video to raise, project-wide, so no test accidentally fires a real post) —
@@ -138,10 +138,9 @@ def test_upload_video_returns_failed_outcome_when_browser_slot_times_out(tmp_pat
 
     def _raise(*a, **k):
         raise TimeoutError("no browser slot freed up in time")
+
     monkeypatch.setattr(igp.browser_concurrency, "browser_slot", _raise)
-    monkeypatch.setattr(
-        igp, "sync_playwright", lambda: (_ for _ in ()).throw(AssertionError("must not be reached"))
-    )
+    monkeypatch.setattr(igp, "sync_playwright", lambda: (_ for _ in ()).throw(AssertionError("must not be reached")))
 
     outcome = igp.upload_video(video_path, "desc", publish=True)
 

@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-import profiles
+from autoclip.configuration import profiles
 
 
 @pytest.fixture

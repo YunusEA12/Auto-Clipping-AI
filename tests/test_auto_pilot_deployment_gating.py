@@ -9,8 +9,8 @@ import json
 
 import pytest
 
-import auto_pilot
-import upload_manager
+from autoclip.control import auto_pilot
+from autoclip.publishing import upload_manager
 
 
 @pytest.fixture(autouse=True)
@@ -24,7 +24,8 @@ def _stub_youtube_leg(monkeypatch):
     # real, public, garbage video to the account owner's actual YouTube channel).
     monkeypatch.setattr(upload_manager.time, "sleep", lambda _s: None)
     monkeypatch.setattr(
-        upload_manager, "_upload_to_youtube",
+        upload_manager,
+        "_upload_to_youtube",
         lambda *a, **k: upload_manager.YouTubeOutcome(attempted=False, success=False, detail="stubbed in test"),
     )
 
@@ -57,10 +58,12 @@ def test_no_deploy_when_no_survivors_even_if_both_flags_set():
 # live the same day a bogus confirmation signal made every real upload failure look locally
 # successful) ---------------------------------------------------------------------------
 
+
 def test_unconfirmed_upload_stays_in_output_for_retry(tmp_path, monkeypatch):
     monkeypatch.setattr(auto_pilot, "UPLOADED_CLIPS_DIR", tmp_path / "uploaded_clips")
     monkeypatch.setattr(
-        auto_pilot.tiktok_uploader, "try_upload_clip",
+        auto_pilot.tiktok_uploader,
+        "try_upload_clip",
         lambda *a, **k: auto_pilot.tiktok_uploader.UploadOutcome(success=True, confirmed=False),
     )
 
@@ -79,7 +82,8 @@ def test_unconfirmed_upload_stays_in_output_for_retry(tmp_path, monkeypatch):
 def test_confirmed_upload_moves_to_uploaded_clips(tmp_path, monkeypatch):
     monkeypatch.setattr(auto_pilot, "UPLOADED_CLIPS_DIR", tmp_path / "uploaded_clips")
     monkeypatch.setattr(
-        auto_pilot.tiktok_uploader, "try_upload_clip",
+        auto_pilot.tiktok_uploader,
+        "try_upload_clip",
         lambda *a, **k: auto_pilot.tiktok_uploader.UploadOutcome(success=True, confirmed=True),
     )
 
@@ -100,7 +104,8 @@ def test_streamer_name_recorded_in_sidecar_for_backlog_scoping(tmp_path, monkeyp
     # just this streamer's own clips out of the shared uploaded_clips/ directory.
     monkeypatch.setattr(auto_pilot, "UPLOADED_CLIPS_DIR", tmp_path / "uploaded_clips")
     monkeypatch.setattr(
-        auto_pilot.tiktok_uploader, "try_upload_clip",
+        auto_pilot.tiktok_uploader,
+        "try_upload_clip",
         lambda *a, **k: auto_pilot.tiktok_uploader.UploadOutcome(success=True, confirmed=True),
     )
 
@@ -117,7 +122,8 @@ def test_streamer_name_recorded_in_sidecar_for_backlog_scoping(tmp_path, monkeyp
 def test_streamer_name_defaults_to_none_when_not_given(tmp_path, monkeypatch):
     monkeypatch.setattr(auto_pilot, "UPLOADED_CLIPS_DIR", tmp_path / "uploaded_clips")
     monkeypatch.setattr(
-        auto_pilot.tiktok_uploader, "try_upload_clip",
+        auto_pilot.tiktok_uploader,
+        "try_upload_clip",
         lambda *a, **k: auto_pilot.tiktok_uploader.UploadOutcome(success=True, confirmed=True),
     )
 
@@ -135,15 +141,18 @@ def test_streamer_name_defaults_to_none_when_not_given(tmp_path, monkeypatch):
 # upload_instagram_playwright.py's automation has never been verified against a live session
 # (see that module's own docstring); defaults off for every streamer regardless of publish. ---
 
+
 def test_instagram_not_attempted_when_flag_omitted(tmp_path, monkeypatch):
     monkeypatch.setattr(auto_pilot, "UPLOADED_CLIPS_DIR", tmp_path / "uploaded_clips")
     monkeypatch.setattr(
-        auto_pilot.tiktok_uploader, "try_upload_clip",
+        auto_pilot.tiktok_uploader,
+        "try_upload_clip",
         lambda *a, **k: auto_pilot.tiktok_uploader.UploadOutcome(success=True, confirmed=True),
     )
     called = []
     monkeypatch.setattr(
-        upload_manager.instagram_uploader, "try_upload_clip",
+        upload_manager.instagram_uploader,
+        "try_upload_clip",
         lambda *a, **k: called.append(1),
     )
 
@@ -162,11 +171,13 @@ def test_instagram_not_attempted_when_flag_omitted(tmp_path, monkeypatch):
 def test_instagram_attempted_and_recorded_when_flag_set(tmp_path, monkeypatch):
     monkeypatch.setattr(auto_pilot, "UPLOADED_CLIPS_DIR", tmp_path / "uploaded_clips")
     monkeypatch.setattr(
-        auto_pilot.tiktok_uploader, "try_upload_clip",
+        auto_pilot.tiktok_uploader,
+        "try_upload_clip",
         lambda *a, **k: auto_pilot.tiktok_uploader.UploadOutcome(success=True, confirmed=True),
     )
     monkeypatch.setattr(
-        upload_manager.instagram_uploader, "try_upload_clip",
+        upload_manager.instagram_uploader,
+        "try_upload_clip",
         lambda *a, **k: upload_manager.instagram_uploader.UploadOutcome(success=True, confirmed=True),
     )
 
@@ -194,11 +205,13 @@ def test_instagram_attempted_and_recorded_when_flag_set(tmp_path, monkeypatch):
 # before this loop starts and the next one after it (and any backlog sweeps) finish, falsely
 # flagging a genuinely-busy agent "offline" on the dashboard.
 
+
 def test_heartbeat_updates_once_per_clip_in_the_batch(tmp_path, monkeypatch):
     monkeypatch.setattr(auto_pilot, "UPLOADED_CLIPS_DIR", tmp_path / "uploaded_clips")
     monkeypatch.setattr(auto_pilot, "_agent_state_path_override", tmp_path / "agent_state_test.json")
     monkeypatch.setattr(
-        auto_pilot.tiktok_uploader, "try_upload_clip",
+        auto_pilot.tiktok_uploader,
+        "try_upload_clip",
         lambda *a, **k: auto_pilot.tiktok_uploader.UploadOutcome(success=True, confirmed=True),
     )
 
@@ -215,6 +228,7 @@ def test_heartbeat_updates_once_per_clip_in_the_batch(tmp_path, monkeypatch):
         if "current_action" in updates:
             actions_seen.append(updates["current_action"])
         return real_update(**updates)
+
     monkeypatch.setattr(auto_pilot, "update_agent_state", _spy)
 
     auto_pilot.run_deployment_phase(clips, publish=True)

@@ -11,10 +11,10 @@ broadcast while game content is transient — which is what locate_persistent_fa
 
 import pytest
 
-import vision
-
+from autoclip.ai import vision
 
 # --- _boxes_are_same_position (the clustering predicate) --------------------------------------
+
 
 def test_identical_boxes_are_the_same_position():
     box = (100, 100, 200, 200)
@@ -51,11 +51,12 @@ def test_degenerate_inputs_do_not_raise():
 
 # --- locate_persistent_facecam ----------------------------------------------------------------
 
-def _fake_scan(monkeypatch, per_frame_boxes, per_frame_scores, frame_w=1920, frame_h=1080,
-               duration=600.0):
+
+def _fake_scan(monkeypatch, per_frame_boxes, per_frame_scores, frame_w=1920, frame_h=1080, duration=600.0):
     monkeypatch.setattr(vision, "_video_duration_seconds", lambda path: duration)
     monkeypatch.setattr(
-        vision, "_scan_frames_for_faces",
+        vision,
+        "_scan_frames_for_faces",
         lambda path, timestamps: (per_frame_boxes, per_frame_scores, frame_w, frame_h),
     )
 
@@ -72,7 +73,7 @@ def test_persistent_corner_webcam_is_found(monkeypatch):
     assert result.persistence == 1.0
     assert result.samples_read == 16
     x1, y1, x2, y2 = result.box_ratio
-    assert 0.8 < x1 < 0.9   # right-hand corner, as a fraction of frame width
+    assert 0.8 < x1 < 0.9  # right-hand corner, as a fraction of frame width
     assert x2 > x1 and y2 > y1
 
 
@@ -84,14 +85,14 @@ def test_transient_game_content_is_rejected(monkeypatch):
     boxes[3] = [(800, 400, 260, 260)]
     boxes[4] = [(500, 200, 300, 300)]
     scores = [[] for _ in range(16)]
-    scores[3] = [0.92]   # a card portrait scores HIGH -- confidence alone never catches this
+    scores[3] = [0.92]  # a card portrait scores HIGH -- confidence alone never catches this
     scores[4] = [0.95]
     _fake_scan(monkeypatch, boxes, scores)
 
     result = vision.locate_persistent_facecam("chunk.ts")
 
     assert result.box_ratio is None
-    assert result.scan_succeeded is True   # it ran fine -- "no webcam" is a real answer here
+    assert result.scan_succeeded is True  # it ran fine -- "no webcam" is a real answer here
     assert result.persistence < vision.FACECAM_MIN_PERSISTENCE
 
 
@@ -185,6 +186,7 @@ def test_box_ratio_is_resolution_independent(monkeypatch):
 
 # --- get_facecam_coordinates: verified box outranks per-clip detection ------------------------
 
+
 def test_verified_box_is_used_instead_of_per_clip_detection(monkeypatch):
     # The whole point: in the defective case the frame's highest-scoring face IS the game
     # content, so a verified whole-chunk position must not defer to it.
@@ -192,11 +194,14 @@ def test_verified_box_is_used_instead_of_per_clip_detection(monkeypatch):
 
     def should_not_run(*a, **k):
         raise AssertionError("per-clip detection must not run when a verified box is given")
+
     monkeypatch.setattr(vision, "_detect_faces", should_not_run)
     monkeypatch.setattr(vision, "_sample_smoothed_box", should_not_run)
 
     box = vision.get_facecam_coordinates(
-        "chunk.ts", 1.0, verified_box_ratio=(0.8, 0.05, 0.95, 0.2),
+        "chunk.ts",
+        1.0,
+        verified_box_ratio=(0.8, 0.05, 0.95, 0.2),
     )
 
     x, y, w, h = box

@@ -1,20 +1,31 @@
 """Regression coverage uses the actual production ASS generator, not tiny fake text."""
+
 import pytest
-import atomic_io
-import auto_qc
-import process
+
+from autoclip.core import atomic_io
+from autoclip.quality import auto_qc
+from autoclip.rendering import process
 
 
 def generated(tmp_path, monkeypatch, title, words=None):
     monkeypatch.setattr(process, "TEMP_DIR", tmp_path)
     words = words or ["UNGLAUBLICH", "SPANNENDER", "AUGENBLICK", "GEWESEN"]
-    transcript = {"segments": [{"start": 0, "end": 4, "words": [
-        {"start": i, "end": i + .9, "text": word} for i, word in enumerate(words)
-    ]}]}
+    transcript = {
+        "segments": [
+            {
+                "start": 0,
+                "end": 4,
+                "words": [{"start": i, "end": i + 0.9, "text": word} for i, word in enumerate(words)],
+            }
+        ]
+    }
     return process.build_ass_for_clip({"start_time": 0, "end_time": 4, "title": title}, transcript, 1)
 
 
-@pytest.mark.parametrize("title,length", [("Was bleibt", 10), ("Dieser Moment ist einfach", 25), ("Dieser Moment bleibt uns lange im Kopf!!", 40)])
+@pytest.mark.parametrize(
+    "title,length",
+    [("Was bleibt", 10), ("Dieser Moment ist einfach", 25), ("Dieser Moment bleibt uns lange im Kopf!!", 40)],
+)
 def test_real_four_word_ass_and_realistic_title_pass(tmp_path, monkeypatch, title, length):
     assert len(title) == length
     path = generated(tmp_path, monkeypatch, title)
@@ -45,4 +56,3 @@ def test_narrow_margins_create_too_many_vertical_lines(tmp_path, monkeypatch):
     result = auto_qc.check_subtitles(path)
     assert not result["passed"]
     assert max(result["line_counts"]) >= 4
-

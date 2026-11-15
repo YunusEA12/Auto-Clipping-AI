@@ -10,7 +10,8 @@ User=autoclip
 Group=autoclip
 WorkingDirectory=/opt/auto-clipping-ai
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/auto-clipping-ai/venv/bin/python clip_quality_audit.py --watch
+Environment=AUTOCLIP_HOME=/opt/auto-clipping-ai
+ExecStart=/opt/auto-clipping-ai/venv/bin/python -m autoclip.quality.clip_quality_audit --watch
 Restart=on-failure
 RestartSec=30
 NoNewPrivileges=true

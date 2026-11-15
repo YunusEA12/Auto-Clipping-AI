@@ -1,10 +1,8 @@
 import json
 from datetime import datetime, timedelta, timezone
 
-import metrics_tracker
-import upload_ledger
-import upload_manager
-
+from autoclip.observability import metrics_tracker
+from autoclip.publishing import upload_ledger, upload_manager
 
 # --- embedded-JSON content extraction (C-01: real per-row DOM has no views/likes words at
 # all, only the column headers do, so this replaced the old text-pattern-regex scrape
@@ -95,6 +93,7 @@ def test_extract_context_json_parses_html_entity_escaped_json():
     # a regression here, since it skips exactly the step that needs testing (html.unescape());
     # that's exactly how this bug shipped once already, caught only by an actual live run.
     import html as html_module
+
     escaped_text = html_module.escape(json.dumps(REAL_SHAPE_CONTEXT_PAYLOAD), quote=True)
     assert "&quot;" in escaped_text  # sanity: prove this test actually exercises escaped input
     page = _FakePage(escaped_text)
@@ -129,6 +128,7 @@ def test_extract_context_json_returns_none_on_non_dict_json():
 # unreliable the same day — a post can be silently held private/under review while reporting
 # success — so a single content-list match isn't trusted as sole grounds for permanent,
 # unrecoverable deletion either; two independent matches across separate poll cycles is) ---
+
 
 def test_delete_confirmed_upload_removes_both_files(tmp_path, monkeypatch):
     monkeypatch.setattr(metrics_tracker, "UPLOADED_CLIPS_DIR", tmp_path)
@@ -170,7 +170,8 @@ def test_update_viral_memory_does_not_delete_on_first_match(tmp_path, monkeypatc
     (uploaded_dir / "clip_1.json").write_text(json.dumps({"caption": "hello world #fyp"}), encoding="utf-8")
 
     monkeypatch.setattr(
-        metrics_tracker, "fetch_content_list",
+        metrics_tracker,
+        "fetch_content_list",
         lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
     )
 
@@ -193,7 +194,8 @@ def test_update_viral_memory_deletes_on_second_consecutive_match(tmp_path, monke
     (uploaded_dir / "clip_1.json").write_text(json.dumps({"caption": "hello world #fyp"}), encoding="utf-8")
 
     monkeypatch.setattr(
-        metrics_tracker, "fetch_content_list",
+        metrics_tracker,
+        "fetch_content_list",
         lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
     )
 
@@ -214,6 +216,7 @@ def test_update_viral_memory_deletes_on_second_consecutive_match(tmp_path, monke
 # still in flight — e.g. delayed by a transient quota error — when TikTok happened to
 # reconfirm first) ---------------------------------------------------------------------------
 
+
 def test_update_viral_memory_keeps_local_file_when_youtube_not_yet_uploaded(tmp_path, monkeypatch):
     uploaded_dir = tmp_path / "uploaded_clips"
     uploaded_dir.mkdir()
@@ -227,7 +230,8 @@ def test_update_viral_memory_keeps_local_file_when_youtube_not_yet_uploaded(tmp_
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        metrics_tracker, "fetch_content_list",
+        metrics_tracker,
+        "fetch_content_list",
         lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
     )
 
@@ -257,7 +261,8 @@ def test_update_viral_memory_deletes_once_youtube_also_uploaded(tmp_path, monkey
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        metrics_tracker, "fetch_content_list",
+        metrics_tracker,
+        "fetch_content_list",
         lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
     )
 
@@ -284,7 +289,8 @@ def test_update_viral_memory_deletes_when_publish_false_youtube_never_applicable
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        metrics_tracker, "fetch_content_list",
+        metrics_tracker,
+        "fetch_content_list",
         lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
     )
 
@@ -300,6 +306,7 @@ def test_update_viral_memory_deletes_when_publish_false_youtube_never_applicable
 # was enabled but hasn't succeeded yet" (keep the file), same reasoning as youtube_uploaded/
 # publish above ------------------------------------------------------------------------------
 
+
 def test_update_viral_memory_keeps_local_file_when_instagram_enabled_but_not_yet_uploaded(tmp_path, monkeypatch):
     uploaded_dir = tmp_path / "uploaded_clips"
     uploaded_dir.mkdir()
@@ -309,14 +316,20 @@ def test_update_viral_memory_keeps_local_file_when_instagram_enabled_but_not_yet
 
     (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
     (uploaded_dir / "clip_1.json").write_text(
-        json.dumps({
-            "caption": "hello world #fyp", "publish": True, "youtube_uploaded": True,
-            "instagram_enabled": True, "instagram_uploaded": False,
-        }),
+        json.dumps(
+            {
+                "caption": "hello world #fyp",
+                "publish": True,
+                "youtube_uploaded": True,
+                "instagram_enabled": True,
+                "instagram_uploaded": False,
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        metrics_tracker, "fetch_content_list",
+        metrics_tracker,
+        "fetch_content_list",
         lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
     )
 
@@ -341,14 +354,20 @@ def test_update_viral_memory_deletes_once_youtube_and_instagram_both_done(tmp_pa
     upload_ledger.mark_done(content_hash, "youtube", video_id="yt1")
     upload_ledger.mark_done(content_hash, "instagram")
     (uploaded_dir / "clip_1.json").write_text(
-        json.dumps({
-            "caption": "hello world #fyp", "publish": True, "youtube_uploaded": True,
-            "instagram_enabled": True, "instagram_uploaded": True,
-        }),
+        json.dumps(
+            {
+                "caption": "hello world #fyp",
+                "publish": True,
+                "youtube_uploaded": True,
+                "instagram_enabled": True,
+                "instagram_uploaded": True,
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        metrics_tracker, "fetch_content_list",
+        metrics_tracker,
+        "fetch_content_list",
         lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
     )
 
@@ -377,7 +396,8 @@ def test_update_viral_memory_deletes_when_instagram_never_enabled_for_this_clip(
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        metrics_tracker, "fetch_content_list",
+        metrics_tracker,
+        "fetch_content_list",
         lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
     )
 
@@ -399,7 +419,8 @@ def test_update_viral_memory_never_deletes_an_unmatched_clip(tmp_path, monkeypat
     (uploaded_dir / "clip_1.json").write_text(json.dumps({"caption": "never matches anything"}), encoding="utf-8")
 
     monkeypatch.setattr(
-        metrics_tracker, "fetch_content_list",
+        metrics_tracker,
+        "fetch_content_list",
         lambda headless=True: [{"caption": "totally unrelated content", "views": 5, "likes": 1}],
     )
 
@@ -415,6 +436,7 @@ def test_update_viral_memory_never_deletes_an_unmatched_clip(tmp_path, monkeypat
 # definition time — monkeypatching metrics_tracker.VIRAL_MEMORY_PATH afterward would
 # silently have no effect, and the function would keep writing to the real project file.
 # This bit for real once already this session (streamers.py) before being caught and fixed.
+
 
 def test_load_viral_memory_respects_monkeypatched_default_path(tmp_path, monkeypatch):
     path = tmp_path / "viral_memory.json"
@@ -439,6 +461,7 @@ def test_scrape_health_respects_monkeypatched_default_path(tmp_path, monkeypatch
 
 
 # --- scrape health tracking (M-01) -----------------------------------------------------
+
 
 def test_record_success_resets_streak(tmp_path):
     path = tmp_path / "health.json"
@@ -470,6 +493,7 @@ def test_load_scrape_health_recovers_from_corrupt_file(tmp_path):
 
 # --- caption matching / indexed lookup equivalence (M-08) ------------------------------
 
+
 def _brute_force_match(uploaded, content_rows):
     """The original O(N*M) approach — used as the reference implementation to confirm the
     indexed version in _match_uploaded_to_content_rows never disagrees with it."""
@@ -489,7 +513,9 @@ def test_indexed_match_agrees_with_brute_force_for_long_captions():
     uploaded = [{"_clip_id": "a", "caption": long_caption_a}]
     content_rows = [{"caption": long_caption_a, "views": 100, "likes": 10}]
 
-    assert metrics_tracker._match_uploaded_to_content_rows(uploaded, content_rows) == _brute_force_match(uploaded, content_rows)
+    assert metrics_tracker._match_uploaded_to_content_rows(uploaded, content_rows) == _brute_force_match(
+        uploaded, content_rows
+    )
 
 
 def test_indexed_match_agrees_with_brute_force_for_short_captions():
@@ -528,6 +554,7 @@ def test_indexed_match_handles_mixed_length_batch():
 
 # --- viral_memory.json pruning (L-04) ---------------------------------------------------
 
+
 def test_prune_drops_entries_older_than_max_age():
     old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
     recent = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
@@ -555,6 +582,7 @@ def test_prune_keeps_entries_with_unparseable_checked_at():
 # metrics_tracker.py used to only ever look at TikTok -- upload_manager.py made YouTube a
 # real, live upload target, but nothing fed its performance back into the learning loop.
 # These mirror the TikTok matching tests above but for the YouTube Data API's exact-ID path.
+
 
 def test_extract_youtube_video_id_parses_the_standard_short_url():
     assert metrics_tracker._extract_youtube_video_id("https://youtu.be/abc123XYZ_-") == "abc123XYZ_-"
@@ -603,7 +631,8 @@ def test_fetch_youtube_metrics_maps_video_id_stats_back_to_clip_id(monkeypatch):
     monkeypatch.setattr(upload_manager, "YOUTUBE_UPLOADS_ENABLED", True)
     monkeypatch.setattr(metrics_tracker.youtube_uploader, "get_stats_service", lambda: object())
     monkeypatch.setattr(
-        metrics_tracker.youtube_uploader, "fetch_video_stats",
+        metrics_tracker.youtube_uploader,
+        "fetch_video_stats",
         lambda youtube, video_ids: {"vid1": {"views": 100, "likes": 10}},
     )
     uploaded = [{"_clip_id": "clip_1", "youtube_uploaded": True, "youtube_url": "https://youtu.be/vid1"}]
@@ -619,6 +648,7 @@ def test_fetch_youtube_metrics_never_raises_on_a_fetch_error(monkeypatch):
 
     def _raise(youtube, video_ids):
         raise Exception("network error")
+
     monkeypatch.setattr(metrics_tracker.youtube_uploader, "fetch_video_stats", _raise)
     uploaded = [{"_clip_id": "clip_1", "youtube_uploaded": True, "youtube_url": "https://youtu.be/vid1"}]
 
@@ -638,17 +668,26 @@ def test_update_viral_memory_records_youtube_metrics_alongside_tiktok(tmp_path, 
     monkeypatch.setattr(upload_manager, "YOUTUBE_UPLOADS_ENABLED", True)
     uploaded_dir = _setup_update_viral_memory(tmp_path, monkeypatch)
     (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
-    (uploaded_dir / "clip_1.json").write_text(json.dumps({
-        "caption": "hello world #fyp", "youtube_uploaded": True, "youtube_url": "https://youtu.be/vid1",
-    }), encoding="utf-8")
+    (uploaded_dir / "clip_1.json").write_text(
+        json.dumps(
+            {
+                "caption": "hello world #fyp",
+                "youtube_uploaded": True,
+                "youtube_url": "https://youtu.be/vid1",
+            }
+        ),
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(
-        metrics_tracker, "fetch_content_list",
+        metrics_tracker,
+        "fetch_content_list",
         lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
     )
     monkeypatch.setattr(metrics_tracker.youtube_uploader, "get_stats_service", lambda: object())
     monkeypatch.setattr(
-        metrics_tracker.youtube_uploader, "fetch_video_stats",
+        metrics_tracker.youtube_uploader,
+        "fetch_video_stats",
         lambda youtube, video_ids: {"vid1": {"views": 200, "likes": 30}},
     )
 
@@ -666,14 +705,22 @@ def test_update_viral_memory_matches_youtube_even_when_tiktok_scrape_fails(tmp_p
     monkeypatch.setattr(upload_manager, "YOUTUBE_UPLOADS_ENABLED", True)
     uploaded_dir = _setup_update_viral_memory(tmp_path, monkeypatch)
     (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
-    (uploaded_dir / "clip_1.json").write_text(json.dumps({
-        "caption": "hello world #fyp", "youtube_uploaded": True, "youtube_url": "https://youtu.be/vid1",
-    }), encoding="utf-8")
+    (uploaded_dir / "clip_1.json").write_text(
+        json.dumps(
+            {
+                "caption": "hello world #fyp",
+                "youtube_uploaded": True,
+                "youtube_url": "https://youtu.be/vid1",
+            }
+        ),
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(metrics_tracker, "fetch_content_list", lambda headless=True: [])  # TikTok scrape broken
     monkeypatch.setattr(metrics_tracker.youtube_uploader, "get_stats_service", lambda: object())
     monkeypatch.setattr(
-        metrics_tracker.youtube_uploader, "fetch_video_stats",
+        metrics_tracker.youtube_uploader,
+        "fetch_video_stats",
         lambda youtube, video_ids: {"vid1": {"views": 200, "likes": 30}},
     )
 
@@ -691,17 +738,26 @@ def test_update_viral_memory_a_youtube_miss_does_not_erase_prior_youtube_data(tm
     monkeypatch.setattr(upload_manager, "YOUTUBE_UPLOADS_ENABLED", True)
     uploaded_dir = _setup_update_viral_memory(tmp_path, monkeypatch)
     (uploaded_dir / "clip_1.mp4").write_bytes(b"fake video")
-    (uploaded_dir / "clip_1.json").write_text(json.dumps({
-        "caption": "hello world #fyp", "youtube_uploaded": True, "youtube_url": "https://youtu.be/vid1",
-    }), encoding="utf-8")
+    (uploaded_dir / "clip_1.json").write_text(
+        json.dumps(
+            {
+                "caption": "hello world #fyp",
+                "youtube_uploaded": True,
+                "youtube_url": "https://youtu.be/vid1",
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(
-        metrics_tracker, "fetch_content_list",
+        metrics_tracker,
+        "fetch_content_list",
         lambda headless=True: [{"caption": "hello world #fyp", "views": 5, "likes": 1}],
     )
 
     monkeypatch.setattr(metrics_tracker.youtube_uploader, "get_stats_service", lambda: object())
     monkeypatch.setattr(
-        metrics_tracker.youtube_uploader, "fetch_video_stats",
+        metrics_tracker.youtube_uploader,
+        "fetch_video_stats",
         lambda youtube, video_ids: {"vid1": {"views": 200, "likes": 30}},
     )
     metrics_tracker.update_viral_memory()  # pass 1

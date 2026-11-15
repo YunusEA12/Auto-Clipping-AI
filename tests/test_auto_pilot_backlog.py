@@ -12,8 +12,8 @@ import json
 
 import pytest
 
-import auto_pilot
-import upload_manager
+from autoclip.control import auto_pilot
+from autoclip.publishing import upload_manager
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +23,8 @@ def _stub_youtube_leg(monkeypatch):
     # file is testing, so it's stubbed out rather than exercised here.
     monkeypatch.setattr(upload_manager.time, "sleep", lambda _s: None)
     monkeypatch.setattr(
-        upload_manager, "_upload_to_youtube",
+        upload_manager,
+        "_upload_to_youtube",
         lambda *a, **k: upload_manager.YouTubeOutcome(attempted=False, success=False, detail="stubbed in test"),
     )
 
@@ -38,6 +39,7 @@ def _write_render(output_dir, name, sidecar_data):
 
 
 # --- find_backlog_clips ------------------------------------------------------------------
+
 
 def test_backlog_clip_with_reward_score_is_picked_up(tmp_path):
     mp4 = _write_render(tmp_path, "clip_1_Old", {"title": "Old", "reward_score": 4})
@@ -87,16 +89,35 @@ def test_backlog_missing_output_dir_is_empty(tmp_path):
 # --- newest-first ordering (2026-08-25, account-owner request: a freshly-live clip loses most
 # of its value if it publishes hours late behind a long backlog queue) ----------------------
 
+
 def test_backlog_orders_newest_rendered_at_first(tmp_path):
-    old = _write_render(tmp_path, "clip_1_Old", {
-        "title": "Old", "reward_score": 3, "rendered_at": "2026-08-20T10:00:00+00:00",
-    })
-    newest = _write_render(tmp_path, "clip_2_Newest", {
-        "title": "Newest", "reward_score": 3, "rendered_at": "2026-08-25T09:00:00+00:00",
-    })
-    middle = _write_render(tmp_path, "clip_3_Middle", {
-        "title": "Middle", "reward_score": 3, "rendered_at": "2026-08-22T12:00:00+00:00",
-    })
+    old = _write_render(
+        tmp_path,
+        "clip_1_Old",
+        {
+            "title": "Old",
+            "reward_score": 3,
+            "rendered_at": "2026-08-20T10:00:00+00:00",
+        },
+    )
+    newest = _write_render(
+        tmp_path,
+        "clip_2_Newest",
+        {
+            "title": "Newest",
+            "reward_score": 3,
+            "rendered_at": "2026-08-25T09:00:00+00:00",
+        },
+    )
+    middle = _write_render(
+        tmp_path,
+        "clip_3_Middle",
+        {
+            "title": "Middle",
+            "reward_score": 3,
+            "rendered_at": "2026-08-22T12:00:00+00:00",
+        },
+    )
 
     backlog = auto_pilot.find_backlog_clips(tmp_path, exclude=set())
 
@@ -117,9 +138,15 @@ def test_backlog_falls_back_to_file_mtime_without_rendered_at(tmp_path):
 
 
 def test_backlog_unparseable_rendered_at_falls_back_to_mtime_without_raising(tmp_path):
-    mp4 = _write_render(tmp_path, "clip_1_X", {
-        "title": "X", "reward_score": 3, "rendered_at": "not-a-real-timestamp",
-    })
+    mp4 = _write_render(
+        tmp_path,
+        "clip_1_X",
+        {
+            "title": "X",
+            "reward_score": 3,
+            "rendered_at": "not-a-real-timestamp",
+        },
+    )
     backlog = auto_pilot.find_backlog_clips(tmp_path, exclude=set())
     assert [path for _, path, _ in backlog] == [mp4]
 
@@ -134,6 +161,7 @@ def test_backlog_returns_multiple_eligible_clips(tmp_path):
 
 
 # --- _persist_reward_score ----------------------------------------------------------------
+
 
 def test_persist_reward_score_merges_into_existing_sidecar(tmp_path):
     mp4 = _write_render(tmp_path, "clip_1_X", {"title": "X", "description": "desc"})
@@ -168,10 +196,12 @@ def test_persist_reward_score_does_not_raise_on_missing_sidecar(tmp_path):
 # --- run_deployment_phase merged with backlog (end-to-end through the real upload path,
 # same pattern as test_auto_pilot_deployment_gating.py) ------------------------------------
 
+
 def test_backlog_and_fresh_survivors_both_get_uploaded(tmp_path, monkeypatch):
     monkeypatch.setattr(auto_pilot, "UPLOADED_CLIPS_DIR", tmp_path / "uploaded_clips")
     monkeypatch.setattr(
-        auto_pilot.tiktok_uploader, "try_upload_clip",
+        auto_pilot.tiktok_uploader,
+        "try_upload_clip",
         lambda *a, **k: auto_pilot.tiktok_uploader.UploadOutcome(success=True, confirmed=True),
     )
     # This test checks that backlog + fresh survivors are BOTH considered/uploaded within one
@@ -186,14 +216,22 @@ def test_backlog_and_fresh_survivors_both_get_uploaded(tmp_path, monkeypatch):
     fresh_path.write_bytes(b"fake video bytes")
     fresh_clip = {"title": "Fresh", "description": "d", "hashtags": ["#fyp"], "viral_score": 8}
 
-    _write_render(tmp_path, "clip_2_Backlog", {
-        "title": "Backlog", "description": "d2", "hashtags": ["#fyp"], "reward_score": 3,
-    })
+    _write_render(
+        tmp_path,
+        "clip_2_Backlog",
+        {
+            "title": "Backlog",
+            "description": "d2",
+            "hashtags": ["#fyp"],
+            "reward_score": 3,
+        },
+    )
     backlog = auto_pilot.find_backlog_clips(tmp_path, exclude={fresh_path})
     assert len(backlog) == 1
 
     uploaded, failed = auto_pilot.run_deployment_phase(
-        [(fresh_clip, fresh_path, 5)] + backlog, publish=True,
+        [(fresh_clip, fresh_path, 5)] + backlog,
+        publish=True,
     )
 
     assert uploaded == 2

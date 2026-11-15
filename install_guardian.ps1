@@ -13,7 +13,7 @@ $guardianCli = Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'
 foreach ($guardianFile in @($guardianPython, $guardianCli)) {
     if (-not (Test-Path -LiteralPath $guardianFile)) { throw "Missing runtime: $guardianFile" }
 }
-$guardianArgs = '"{0}" --enable-agent --agy "{1}"' -f (Join-Path $guardianRoot 'project_guardian.py'), $guardianCli
+$guardianArgs = '-m autoclip.observability.project_guardian --enable-agent --agy "{0}"' -f $guardianCli
 $guardianAction = New-ScheduledTaskAction -Execute $guardianPython -Argument $guardianArgs -WorkingDirectory $guardianRoot
 $guardianTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 30)
 $guardianUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name

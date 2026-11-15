@@ -1,0 +1,168 @@
+{
+  "date": "2026-11-16",
+  "baseline_commit": "2e8085c",
+  "scale": "0 bis 100; technische Review-Urteile, keine empirischen Erfolgsprozente",
+  "weighting": "20 Kriterien, jeweils gleich gewichtet",
+  "criteria": [
+    {
+      "id": 1,
+      "criterion": "Architektur und Fachstruktur",
+      "before": 45,
+      "after": 93,
+      "evidence": "Elf Fachpakete, klare Zuständigkeiten, geprüfte Importgrenzen.",
+      "remaining": "Einige große Legacy-Funktionen bleiben bestehen."
+    },
+    {
+      "id": 2,
+      "criterion": "Paketierung und CLI",
+      "before": 30,
+      "after": 95,
+      "evidence": "Installierbares Wheel; Ressourcen und CLI außerhalb des Checkouts geprüft.",
+      "remaining": "Weitere Python-Versionen und fremde Installationsumgebungen benötigen zusätzliche Nachweise."
+    },
+    {
+      "id": 3,
+      "criterion": "Schnittstellen und Entkopplung",
+      "before": 60,
+      "after": 88,
+      "evidence": "Dashboard-API, gemeinsame Einstellungen, verzögerte Backend-Imports.",
+      "remaining": "Plattformadapter teilen noch konkrete Ergebnisformen statt eines durchgängigen Protokolls."
+    },
+    {
+      "id": 4,
+      "criterion": "Konfiguration und Dateipfade",
+      "before": 40,
+      "after": 92,
+      "evidence": "Ein Runtime-Register, AUTOCLIP_HOME, config/ und var/.",
+      "remaining": "Vollständige schema-versionierte Konfigurationsmigration fehlt noch."
+    },
+    {
+      "id": 5,
+      "criterion": "Zustands- und Migrationsintegrität",
+      "before": 80,
+      "after": 91,
+      "evidence": "Atomare Zustände, Kollisionsprüfung, Journal und getestete Rücknahme fehlgeschlagener Moves.",
+      "remaining": "Kein automatischer transaktionaler Rollback eines kompletten Produktionsreleases."
+    },
+    {
+      "id": 6,
+      "criterion": "Duplikat- und Archivschutz",
+      "before": 60,
+      "after": 92,
+      "evidence": "Ledger-Fehler/Lock-Timeout blockieren; Archiv überschreibt keine vorhandenen Medien.",
+      "remaining": "Browser-Publikation erlaubt keine garantierte Exactly-once-Transaktion mit der Plattform."
+    },
+    {
+      "id": 7,
+      "criterion": "Upload-Zuverlässigkeit",
+      "before": 65,
+      "after": 84,
+      "evidence": "Ein Post live bestätigt; verzögerter Login und Onboarding behoben; alle Einstiegspunkte geschützt.",
+      "remaining": "Langzeitquote, weitere Konten, UI-Änderungen und Captchas bleiben offen."
+    },
+    {
+      "id": 8,
+      "criterion": "Warteschlange und Verfügbarkeit",
+      "before": 40,
+      "after": 93,
+      "evidence": "Separater überwachter Upload-Worker; streamfreie Zeit blockiert den Backlog nicht mehr.",
+      "remaining": "Mehrere Tage Dauerbetrieb und geplanter Ausfalltest noch nicht belegt."
+    },
+    {
+      "id": 9,
+      "criterion": "Rendering und technische QC",
+      "before": 62,
+      "after": 68,
+      "evidence": "Echter FFmpeg-/ASS-/Audio-Test, Quelldateierhalt und unveränderte Qualitätsgrenzen.",
+      "remaining": "900 Alt-Clips waren gesperrt; Freeze-/Audio-Ursachen müssen mit echter Sichtprüfung aufgearbeitet werden."
+    },
+    {
+      "id": 10,
+      "criterion": "KI-Auswahl und inhaltliche Qualität",
+      "before": 63,
+      "after": 63,
+      "evidence": "Bestehende Zeitstempel-, Kontext- und Critic-Tests bleiben erhalten.",
+      "remaining": "Keine neue belastbare Verbindung zwischen KI-Urteil, Zuschauerbindung und Erfolg."
+    },
+    {
+      "id": 11,
+      "criterion": "Tests und nachgewiesene Abdeckung",
+      "before": 82,
+      "after": 85,
+      "evidence": "Mehr UI-, CLI-, Sicherheits-, Migrations- und Medienintegrationstests; Coverage wird gemessen.",
+      "remaining": "Rund 70 Prozent kombinierte Zeilen-/Branch-Abdeckung; insbesondere Browser und optionale Integrationen haben Lücken."
+    },
+    {
+      "id": 12,
+      "criterion": "CI und Reproduzierbarkeit",
+      "before": 75,
+      "after": 95,
+      "evidence": "Windows/Linux, Lock-/Export-Abgleich, FFmpeg, Ruff/Format, Paket- und Wheel-Prüfung.",
+      "remaining": "Zusätzliche Python-/Systemversionen und regelmäßige Abhängigkeits-Sicherheitsanalyse fehlen."
+    },
+    {
+      "id": 13,
+      "criterion": "Deployment und Wiederherstellung",
+      "before": 55,
+      "after": 88,
+      "evidence": "Kontrollierter Wartungseinstieg mit Service-Stopp, Lock, vorherigem Commit, Backup und Tests.",
+      "remaining": "Automatischer Rollback über Code-, Unit- und State-Änderungen ist bewusst nicht behauptet."
+    },
+    {
+      "id": 14,
+      "criterion": "Monitoring und Diagnose",
+      "before": 60,
+      "after": 86,
+      "evidence": "Eigener Worker-Heartbeat, Quota-Fälligkeit, Zustandsanzeigen, Browser-Snapshots und Health-Checks.",
+      "remaining": "Externe unabhängige Ausfallalarme und belastbare SLO-Zeitreihen fehlen."
+    },
+    {
+      "id": 15,
+      "criterion": "Zugangsdaten und Sicherheit",
+      "before": 65,
+      "after": 90,
+      "evidence": "Private Runtime, Paket-/Git-Pfad-Guard, Log-Redaktion und Test-Sperren für externe Schreibaufrufe.",
+      "remaining": "Filename-Checks ersetzen keinen vollständigen Secret- oder historischen Sicherheitsaudit."
+    },
+    {
+      "id": 16,
+      "criterion": "Ressourcenverbrauch und Leistung",
+      "before": 45,
+      "after": 88,
+      "evidence": "Aktiver Tab, sechs Archiv-Clips, verzögerte Downloads und keine Inferenz-Imports im Monitoring.",
+      "remaining": "Langzeit-RAM-Messung und Lasttest mit vielen gleichzeitigen Streams fehlen."
+    },
+    {
+      "id": 17,
+      "criterion": "Wartbarkeit und Entwicklungsstandard",
+      "before": 50,
+      "after": 78,
+      "evidence": "Installierbare Module, Import-/Formatregeln, EditorConfig und dokumentierter Entwicklungsablauf.",
+      "remaining": "Große Rendering-, Critic- und Autopilot-Funktionen sind noch nicht vollständig zerlegt."
+    },
+    {
+      "id": 18,
+      "criterion": "Dokumentation und Übergabefähigkeit",
+      "before": 65,
+      "after": 94,
+      "evidence": "Aktuelle Architektur-, Betriebs-, Entwicklungs-, Sicherheits- und Migrationsdokumentation.",
+      "remaining": "Frische Installation durch einen unabhängigen Entwickler ist noch nicht beobachtet."
+    },
+    {
+      "id": 19,
+      "criterion": "Profil und Markenauftritt",
+      "before": 40,
+      "after": 50,
+      "evidence": "Originales CM-Profilbild und freigegebener moderner ClipMaster-Stil; passender 75-Zeichen-Biotext.",
+      "remaining": "TikTok hat das Speichern mit einem menschlichen Captcha blockiert; Live-Übernahme noch nicht bestätigt."
+    },
+    {
+      "id": 20,
+      "criterion": "Messbare Produktwirkung",
+      "before": 30,
+      "after": 30,
+      "evidence": "Technischer Veröffentlichungsnachweis vorhanden; fehlende Daten werden als fehlend ausgewiesen.",
+      "remaining": "Kein belastbarer Nachweis für Wachstum, Retention, Watchtime oder Wirtschaftlichkeit."
+    }
+  ]
+}

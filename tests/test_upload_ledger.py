@@ -4,7 +4,15 @@ practice by _upload_to_tiktok()/_upload_to_youtube()/_upload_to_instagram()."""
 
 import pytest
 
-import upload_ledger
+from autoclip.publishing import upload_ledger
+
+
+def test_corrupt_ledger_blocks_upload_without_overwriting_it():
+    upload_ledger.LEDGER_PATH.write_text("{broken")
+    with pytest.raises(upload_ledger.LedgerUnavailableError):
+        upload_ledger.try_mark_pending("hash1", "tiktok")
+    assert upload_ledger.LEDGER_PATH.read_text() == "{broken"
+
 
 # LEDGER_PATH isolation is handled globally by tests/conftest.py's autouse
 # _isolated_upload_ledger fixture — every test here already gets its own tmp_path-scoped
@@ -100,15 +108,15 @@ def test_try_mark_pending_allows_a_fresh_attempt_after_a_failed_entry():
     assert upload_ledger.try_mark_pending("hash1", "youtube") is True
 
 
-def test_lock_acquisition_failure_fails_open(monkeypatch):
-    """If the ledger's file lock can't be acquired (extreme contention, a stuck lock file),
-    try_mark_pending() must fail OPEN — proceed without a reservation — rather than silently
-    blocking every future upload forever just because one lock attempt timed out."""
+def test_lock_acquisition_failure_defers_upload(monkeypatch):
+    """A temporary lock failure must never bypass duplicate protection."""
+
     def raise_timeout(*a, **k):
         raise upload_ledger.Timeout("simulated lock contention")
+
     monkeypatch.setattr(upload_ledger, "_ledger_lock", lambda: _RaisingLock(raise_timeout))
 
-    assert upload_ledger.try_mark_pending("hash1", "youtube") is True
+    assert upload_ledger.try_mark_pending("hash1", "youtube") is False
 
 
 class _RaisingLock:
@@ -123,6 +131,7 @@ class _RaisingLock:
 
 
 # --- 2026-08-24 incident remediation: stale_pending_counts() -----------------------------------
+
 
 def test_stale_pending_counts_ignores_fresh_pending():
     upload_ledger.try_mark_pending("hash1", "tiktok")
@@ -157,11 +166,14 @@ def test_stale_pending_counts_treats_an_unparseable_timestamp_as_stale():
 # Proactive counterpart to try_mark_pending()'s own per-attempt stale release — see
 # release_stale_pending()'s own docstring for why that per-attempt release alone isn't enough.
 
+
 def _seed_pending(content_hash, platform, minutes_old, title=""):
     updated_at = upload_ledger.datetime.now(upload_ledger.timezone.utc) - upload_ledger.timedelta(minutes=minutes_old)
     ledger = upload_ledger._load_ledger()
     ledger.setdefault(content_hash, {})[platform] = {
-        "status": "pending", "title": title, "updated_at": updated_at.isoformat(),
+        "status": "pending",
+        "title": title,
+        "updated_at": updated_at.isoformat(),
     }
     upload_ledger._save_ledger(ledger)
 

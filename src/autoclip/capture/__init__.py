@@ -1,0 +1,1 @@
+"""Capture services for AutoClip."""

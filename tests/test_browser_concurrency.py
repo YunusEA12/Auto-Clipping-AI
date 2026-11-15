@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-import browser_concurrency
+from autoclip.core import browser_concurrency
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +33,7 @@ def test_a_third_caller_blocks_until_a_slot_frees_up(monkeypatch):
     acquired_third = threading.Event()
 
     with browser_concurrency.browser_slot():
+
         def _try_acquire():
             with browser_concurrency.browser_slot():
                 acquired_third.set()

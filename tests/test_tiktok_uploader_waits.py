@@ -1,6 +1,6 @@
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-import tiktok_uploader
+from autoclip.publishing import tiktok_uploader
 
 
 def test_caption_does_not_repeat_tags_already_in_description():
@@ -34,7 +34,9 @@ class FakeUploadFormPage:
 
 
 def test_upload_form_wait_detects_delayed_login_redirect():
-    page = FakeUploadFormPage([(tiktok_uploader.UPLOAD_URL, 0), ("https://www.tiktok.com/login?redirect_url=upload", 0)])
+    page = FakeUploadFormPage(
+        [(tiktok_uploader.UPLOAD_URL, 0), ("https://www.tiktok.com/login?redirect_url=upload", 0)]
+    )
     assert tiktok_uploader.wait_for_upload_form(page, timeout_ms=2000) is False
     assert page.wait_calls == 1
 
@@ -131,6 +133,7 @@ class FakePage:
 
 # --- _wait_for_caption_filled (M-10) ------------------------------------------------------
 
+
 def test_caption_wait_returns_as_soon_as_text_matches():
     page = FakePage()
     caption_box = FakeCaptionBox(["Cool clip! #fyp #viral"])
@@ -151,6 +154,7 @@ def test_caption_wait_falls_back_gracefully_when_never_confirmed():
 # --- _wait_for_post_confirmation (M-03; toast-based signal replaced the file-input check
 # on 2026-08-18 — see the function's own docstring for why the old check was a false
 # positive that fired almost instantly on every single call) --------------------------------
+
 
 def test_post_confirmation_true_on_redirect():
     page = FakePage(url_changes_after_reads=2)
@@ -178,6 +182,7 @@ def test_post_confirmation_does_not_accept_login_redirect():
         @property
         def url(self):
             return "https://www.tiktok.com/login?redirect_url=upload"
+
     assert tiktok_uploader._wait_for_post_confirmation(LoginPage()) is False
 
 
@@ -186,6 +191,7 @@ def test_post_confirmation_does_not_accept_upload_query_change():
         @property
         def url(self):
             return "https://www.tiktok.com/tiktokstudio/upload?from=another_source"
+
     assert tiktok_uploader._wait_for_post_confirmation(UploadPage()) is False
 
 
@@ -201,6 +207,7 @@ def test_post_confirmation_false_when_daily_check_quota_exhausted():
 
 # --- UploadOutcome shape (M-03) ------------------------------------------------------------
 
+
 def test_upload_outcome_is_a_named_tuple_with_success_and_confirmed():
     outcome = tiktok_uploader.UploadOutcome(success=True, confirmed=False)
     assert outcome.success is True
@@ -211,6 +218,7 @@ def test_upload_outcome_is_a_named_tuple_with_success_and_confirmed():
 
 
 # --- _wait_for_upload_complete (C-01: real success-icon signal, verified 2026-08-18) -------
+
 
 class FakeIconLocator:
     def __init__(self, appears_after_calls):
@@ -264,6 +272,7 @@ def test_upload_complete_falls_back_to_settle_delay_when_icon_never_appears():
 # --- _dismiss_blocking_overlays (real bug caught by an authorized live test run,
 # 2026-08-18: a cookie-consent banner and a "New editing features added" onboarding
 # tooltip both intercept clicks on elements underneath them) ------------------------------
+
 
 class FakeOverlayButton:
     def __init__(self, present):
@@ -343,6 +352,7 @@ def test_dismiss_overlays_handles_only_tooltip_present():
 # TikTok Studio and the mobile app, disproving the earlier assumption this code shipped
 # with) — upload_video()/try_upload_clip() must never open a browser without publish=True.
 
+
 def test_upload_video_without_publish_never_touches_playwright(tmp_path, monkeypatch):
     launch_calls = []
 
@@ -382,6 +392,7 @@ def test_try_upload_clip_without_publish_is_also_a_no_op(tmp_path, monkeypatch):
 
 def test_cli_without_publish_exits_zero_and_does_not_upload(monkeypatch, tmp_path, capsys):
     import sys
+
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"fake video content")
     monkeypatch.setattr(sys, "argv", ["tiktok_uploader.py", str(video), "--description", "test"])
@@ -397,6 +408,7 @@ def test_cli_without_publish_exits_zero_and_does_not_upload(monkeypatch, tmp_pat
 
 
 # --- post-click diagnostic pause (headed-only, never leaks into unattended runs) ----------
+
 
 class FakeSnapshotPage:
     def __init__(self, fail=False):
@@ -428,6 +440,7 @@ def test_try_upload_clip_always_forces_headless_regardless_of_diagnostic_feature
     # must always force headless=True — otherwise the 15s post-click pause could silently
     # leak into an unattended 24/7 run.
     import inspect
+
     source = inspect.getsource(tiktok_uploader.try_upload_clip)
     assert "headless=True" in source
 
@@ -436,6 +449,7 @@ def test_try_upload_clip_always_forces_headless_regardless_of_diagnostic_feature
 # 2026-08-18: clicking post_video_button doesn't always publish directly — if TikTok's
 # content review isn't finished yet, a "Weiter und veröffentlichen?" modal appears instead,
 # and the actual publish only happens once "Jetzt veröffentlichen" is clicked) -------------
+
 
 class FakeConfirmButton:
     def __init__(self, present):
@@ -475,6 +489,7 @@ def test_no_op_when_review_already_finished():
 # public page data showed "textExtra": [] despite the caption visibly containing hashtags.
 # Clicking TikTok's own autocomplete suggestion is what actually tokenizes the just-typed
 # text in place, and that click also auto-appends a trailing space) -----------------------
+
 
 class FakeHashtagCaptionBox:
     """Mimics the subset of Playwright's Locator API _tokenize_hashtag() uses: reading the
@@ -576,6 +591,7 @@ def test_tokenize_hashtag_falls_back_to_plain_text_when_no_suggestion_appears():
 # unrelated real account, so this deliberately only closes the dropdown via Escape rather
 # than trying to resolve/click anything) -----------------------------------------------------
 
+
 class FakeKeyboard:
     def __init__(self, raise_on_press=False):
         self.pressed = []
@@ -614,6 +630,7 @@ def test_upload_video_returns_failed_outcome_when_browser_slot_times_out(tmp_pat
 
     def _raise(*a, **k):
         raise TimeoutError("no browser slot freed up in time")
+
     monkeypatch.setattr(tiktok_uploader.browser_concurrency, "browser_slot", _raise)
     monkeypatch.setattr(
         tiktok_uploader, "sync_playwright", lambda: (_ for _ in ()).throw(AssertionError("must not be reached"))

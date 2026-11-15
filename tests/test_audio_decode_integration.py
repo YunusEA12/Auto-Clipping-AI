@@ -9,8 +9,8 @@ from faster_whisper.audio import decode_audio
 
 def test_whisper_decodes_and_resamples_real_wav():
     buffer = io.BytesIO()
-    samples = (np.sin(np.arange(8000) * 2 * np.pi * 440 / 8000) * 12000).astype('<i2')
-    with wave.open(buffer, 'wb') as audio:
+    samples = (np.sin(np.arange(8000) * 2 * np.pi * 440 / 8000) * 12000).astype("<i2")
+    with wave.open(buffer, "wb") as audio:
         audio.setnchannels(1)
         audio.setsampwidth(2)
         audio.setframerate(8000)

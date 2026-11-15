@@ -18,6 +18,8 @@ Startseite der vernetzten Projekt-Dokumentation. Diese Seite verlinkt die zentra
 
 ## Architektur-Entscheidungen
 
+- [[Professionelles-Projektlayout]] — aktuelles Paket-/Runtime-Layout, Upload-Worker und 20-Punkte-Bewertung (16.11.2026).
+
 - [[Serverbetrieb]] — produktiver Linux-Betrieb, Übernahme der Clip-Prüfung und klare Trennung vom PC.
 
 - [[Clip-Qualitaetsaudit]] — nächste zehn Clips, sieben Qualitätskategorien und Zwölf-Stunden-Check.

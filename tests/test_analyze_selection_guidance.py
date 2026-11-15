@@ -11,7 +11,7 @@ A follow-up request then sharpened this from a mere tie-breaker ("prefer X when 
 strong") to a genuine shift in what counts as a strong pick ("prefer X over a bigger
 spectacle moment when X has the stronger hook, not only when tied")."""
 
-import analyze
+from autoclip.ai import analyze
 
 
 def test_prompt_frames_obvious_spectacle_as_a_fallback_not_the_default():

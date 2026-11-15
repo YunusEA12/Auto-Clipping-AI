@@ -10,7 +10,8 @@ Group=autoclip
 WorkingDirectory=/opt/auto-clipping-ai
 Environment=PYTHONUNBUFFERED=1
 Environment=PATH=/opt/auto-clipping-ai/.tools/bin:/opt/auto-clipping-ai/venv/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/opt/auto-clipping-ai/venv/bin/python project_guardian.py --watch --enable-agent
+Environment=AUTOCLIP_HOME=/opt/auto-clipping-ai
+ExecStart=/opt/auto-clipping-ai/venv/bin/python -m autoclip.observability.project_guardian --watch --enable-agent
 Restart=on-failure
 RestartSec=60
 NoNewPrivileges=true

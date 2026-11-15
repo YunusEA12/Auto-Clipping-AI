@@ -1,8 +1,7 @@
 import json
 import random
 
-import analyze
-import chat_signal
+from autoclip.ai import analyze, chat_signal
 
 
 def realistic_log(seed=7):
@@ -35,8 +34,8 @@ def test_quiet_chat_small_blip_is_ignored():
 
 def test_adjacent_spike_windows_merge_keeping_peak():
     stamps = [float(t) for t in range(0, 300, 10)]
-    stamps += [100 + i * 0.2 for i in range(20)]   # window 100-105: 20
-    stamps += [105 + i * 0.5 for i in range(10)]   # window 105-110: 10
+    stamps += [100 + i * 0.2 for i in range(20)]  # window 100-105: 20
+    stamps += [105 + i * 0.5 for i in range(10)]  # window 105-110: 10
     spikes = chat_signal.find_chat_spikes(stamps)
     assert len(spikes) == 1
     assert spikes[0]["timestamp"] == 100.0

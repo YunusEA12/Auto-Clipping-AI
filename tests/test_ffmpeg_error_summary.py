@@ -9,7 +9,7 @@ current_action, so the banner ended up dumped straight into the dashboard.
 REAL_FFMPEG_STDERR below is a live capture (2026-08-19) from `ffmpeg -i <corrupt file>`,
 not a hand-written approximation."""
 
-import process
+from autoclip.rendering import process
 
 REAL_FFMPEG_STDERR = """ffmpeg version 9.0-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers
   built with gcc 16.1.0 (Rev2, Built by MSYS2 project)

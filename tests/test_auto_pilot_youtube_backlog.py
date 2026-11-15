@@ -10,7 +10,7 @@ that clip is already live and public; a second TikTok attempt would post a dupli
 
 import json
 
-import auto_pilot
+from autoclip.control import auto_pilot
 
 
 def _write_uploaded(uploaded_dir, name, sidecar_data):
@@ -22,6 +22,7 @@ def _write_uploaded(uploaded_dir, name, sidecar_data):
 
 
 # --- find_missing_youtube_uploads ----------------------------------------------------------
+
 
 def test_finds_clip_missing_youtube_upload(tmp_path):
     mp4 = _write_uploaded(tmp_path, "clip_1_A", {"title": "A", "publish": True, "youtube_uploaded": False})
@@ -65,13 +66,28 @@ def test_missing_uploaded_clips_dir_is_empty(tmp_path):
 # every concurrent streamer process, unlike output/<streamer>/ -- without this filter, every
 # streamer's own retry cycle was scanning and attempting the ENTIRE fleet's shared backlog) ---
 
+
 def test_streamer_filter_excludes_another_streamers_clip(tmp_path):
-    mp4 = _write_uploaded(tmp_path, "clip_1_Mine", {
-        "title": "Mine", "publish": True, "youtube_uploaded": False, "streamer_name": "alice",
-    })
-    _write_uploaded(tmp_path, "clip_1_Theirs", {
-        "title": "Theirs", "publish": True, "youtube_uploaded": False, "streamer_name": "bob",
-    })
+    mp4 = _write_uploaded(
+        tmp_path,
+        "clip_1_Mine",
+        {
+            "title": "Mine",
+            "publish": True,
+            "youtube_uploaded": False,
+            "streamer_name": "alice",
+        },
+    )
+    _write_uploaded(
+        tmp_path,
+        "clip_1_Theirs",
+        {
+            "title": "Theirs",
+            "publish": True,
+            "youtube_uploaded": False,
+            "streamer_name": "bob",
+        },
+    )
     assert auto_pilot.find_missing_youtube_uploads(tmp_path, streamer_name="alice") == [mp4]
 
 
@@ -79,32 +95,67 @@ def test_streamer_filter_still_includes_unowned_legacy_clips(tmp_path):
     # A sidecar with no streamer_name at all (archived before this field existed, or a
     # manual/single-video run) must not be silently orphaned by the filter -- nobody else would
     # ever pick it up either.
-    mp4 = _write_uploaded(tmp_path, "clip_1_Legacy", {
-        "title": "Legacy", "publish": True, "youtube_uploaded": False,
-    })
+    mp4 = _write_uploaded(
+        tmp_path,
+        "clip_1_Legacy",
+        {
+            "title": "Legacy",
+            "publish": True,
+            "youtube_uploaded": False,
+        },
+    )
     assert auto_pilot.find_missing_youtube_uploads(tmp_path, streamer_name="alice") == [mp4]
 
 
 def test_no_streamer_filter_returns_every_streamers_clips(tmp_path):
     # streamer_name=None (the default) preserves the old, unscoped behavior.
-    mine = _write_uploaded(tmp_path, "clip_1_Mine", {
-        "title": "Mine", "publish": True, "youtube_uploaded": False, "streamer_name": "alice",
-    })
-    theirs = _write_uploaded(tmp_path, "clip_1_Theirs", {
-        "title": "Theirs", "publish": True, "youtube_uploaded": False, "streamer_name": "bob",
-    })
+    mine = _write_uploaded(
+        tmp_path,
+        "clip_1_Mine",
+        {
+            "title": "Mine",
+            "publish": True,
+            "youtube_uploaded": False,
+            "streamer_name": "alice",
+        },
+    )
+    theirs = _write_uploaded(
+        tmp_path,
+        "clip_1_Theirs",
+        {
+            "title": "Theirs",
+            "publish": True,
+            "youtube_uploaded": False,
+            "streamer_name": "bob",
+        },
+    )
     assert auto_pilot.find_missing_youtube_uploads(tmp_path) == [mine, theirs]
 
 
 def test_retry_missing_youtube_uploads_passes_streamer_filter_through(tmp_path, monkeypatch):
-    _write_uploaded(tmp_path, "clip_1_Mine", {
-        "title": "Mine", "publish": True, "youtube_uploaded": False, "streamer_name": "alice",
-    })
-    _write_uploaded(tmp_path, "clip_1_Theirs", {
-        "title": "Theirs", "publish": True, "youtube_uploaded": False, "streamer_name": "bob",
-    })
+    _write_uploaded(
+        tmp_path,
+        "clip_1_Mine",
+        {
+            "title": "Mine",
+            "publish": True,
+            "youtube_uploaded": False,
+            "streamer_name": "alice",
+        },
+    )
+    _write_uploaded(
+        tmp_path,
+        "clip_1_Theirs",
+        {
+            "title": "Theirs",
+            "publish": True,
+            "youtube_uploaded": False,
+            "streamer_name": "bob",
+        },
+    )
     monkeypatch.setattr(
-        auto_pilot.upload_manager, "_upload_to_youtube",
+        auto_pilot.upload_manager,
+        "_upload_to_youtube",
         lambda *a, **k: auto_pilot.upload_manager.YouTubeOutcome(attempted=True, success=True, video_id="x"),
     )
 
@@ -118,18 +169,29 @@ def test_retry_missing_youtube_uploads_passes_streamer_filter_through(tmp_path, 
 
 # --- retry_missing_youtube_uploads ---------------------------------------------------------
 
+
 def test_retry_success_updates_sidecar_and_never_touches_tiktok(tmp_path, monkeypatch):
-    _write_uploaded(tmp_path, "clip_1_D", {
-        "title": "D", "description": "desc", "hashtags": ["#fyp"], "publish": True, "youtube_uploaded": False,
-    })
+    _write_uploaded(
+        tmp_path,
+        "clip_1_D",
+        {
+            "title": "D",
+            "description": "desc",
+            "hashtags": ["#fyp"],
+            "publish": True,
+            "youtube_uploaded": False,
+        },
+    )
 
     tiktok_calls = []
     monkeypatch.setattr(
-        auto_pilot.tiktok_uploader, "try_upload_clip",
+        auto_pilot.tiktok_uploader,
+        "try_upload_clip",
         lambda *a, **k: tiktok_calls.append((a, k)),
     )
     monkeypatch.setattr(
-        auto_pilot.upload_manager, "_upload_to_youtube",
+        auto_pilot.upload_manager,
+        "_upload_to_youtube",
         lambda *a, **k: auto_pilot.upload_manager.YouTubeOutcome(attempted=True, success=True, video_id="abc123"),
     )
 
@@ -144,12 +206,21 @@ def test_retry_success_updates_sidecar_and_never_touches_tiktok(tmp_path, monkey
 
 
 def test_retry_failure_leaves_sidecar_untouched(tmp_path, monkeypatch):
-    _write_uploaded(tmp_path, "clip_1_E", {
-        "title": "E", "publish": True, "youtube_uploaded": False,
-    })
+    _write_uploaded(
+        tmp_path,
+        "clip_1_E",
+        {
+            "title": "E",
+            "publish": True,
+            "youtube_uploaded": False,
+        },
+    )
     monkeypatch.setattr(
-        auto_pilot.upload_manager, "_upload_to_youtube",
-        lambda *a, **k: auto_pilot.upload_manager.YouTubeOutcome(attempted=True, success=False, detail="quota exceeded"),
+        auto_pilot.upload_manager,
+        "_upload_to_youtube",
+        lambda *a, **k: auto_pilot.upload_manager.YouTubeOutcome(
+            attempted=True, success=False, detail="quota exceeded"
+        ),
     )
 
     ok, failed = auto_pilot.retry_missing_youtube_uploads(tmp_path)
@@ -166,8 +237,11 @@ def test_retry_respects_batch_limit(tmp_path, monkeypatch):
 
     calls = []
     monkeypatch.setattr(
-        auto_pilot.upload_manager, "_upload_to_youtube",
-        lambda *a, **k: (calls.append(a) or auto_pilot.upload_manager.YouTubeOutcome(attempted=True, success=True, video_id="x")),
+        auto_pilot.upload_manager,
+        "_upload_to_youtube",
+        lambda *a, **k: (
+            calls.append(a) or auto_pilot.upload_manager.YouTubeOutcome(attempted=True, success=True, video_id="x")
+        ),
     )
 
     ok, failed = auto_pilot.retry_missing_youtube_uploads(tmp_path)

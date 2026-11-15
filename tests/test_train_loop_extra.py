@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 
-import train_loop
+from autoclip.ai import train_loop
 
 
 def _verdict(title, score=5):
@@ -9,6 +9,7 @@ def _verdict(title, score=5):
 
 
 # --- filter_verdicts_to_known_clips (M-04) -----------------------------------------------
+
 
 def test_keeps_verdicts_matching_real_clips():
     clips = [{"title": "A"}, {"title": "B"}]
@@ -40,6 +41,7 @@ def test_empty_batch_stays_empty():
 
 # --- ai_guidelines.txt rule capping (L-04) -----------------------------------------------
 
+
 def test_cap_rules_leaves_short_list_untouched():
     rules = ["a", "b", "c"]
     assert train_loop._cap_rules(rules, max_count=10) == rules
@@ -55,6 +57,7 @@ def test_cap_rules_keeps_most_recent_when_over_limit():
 # full of 0-view entries checked minutes after upload — TikTok hadn't distributed them yet,
 # not a real flop signal, but load_viral_memory_section() used to hand it to the critic
 # unfiltered as if it meant something) -----------------------------------------------------
+
 
 def _iso(hours_ago):
     return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
@@ -90,12 +93,21 @@ def test_old_enough_false_on_non_string_uploaded_at_does_not_raise():
 
 def test_viral_memory_section_excludes_fresh_zero_view_clips(tmp_path, monkeypatch):
     memory_path = tmp_path / "viral_memory.json"
-    memory_path.write_text(json.dumps({
-        "fresh_clip": {
-            "title": "Fresh Clip", "viral_score": 8, "energy_rating": 8,
-            "views": 0, "likes": 0, "uploaded_at": _iso(1),
-        },
-    }), encoding="utf-8")
+    memory_path.write_text(
+        json.dumps(
+            {
+                "fresh_clip": {
+                    "title": "Fresh Clip",
+                    "viral_score": 8,
+                    "energy_rating": 8,
+                    "views": 0,
+                    "likes": 0,
+                    "uploaded_at": _iso(1),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(train_loop, "VIRAL_MEMORY_PATH", memory_path)
 
     assert train_loop.load_viral_memory_section() == ""
@@ -103,12 +115,21 @@ def test_viral_memory_section_excludes_fresh_zero_view_clips(tmp_path, monkeypat
 
 def test_viral_memory_section_includes_old_enough_clips(tmp_path, monkeypatch):
     memory_path = tmp_path / "viral_memory.json"
-    memory_path.write_text(json.dumps({
-        "old_clip": {
-            "title": "Old Clip", "viral_score": 9, "energy_rating": 9,
-            "views": 15000, "likes": 900, "uploaded_at": _iso(48),
-        },
-    }), encoding="utf-8")
+    memory_path.write_text(
+        json.dumps(
+            {
+                "old_clip": {
+                    "title": "Old Clip",
+                    "viral_score": 9,
+                    "energy_rating": 9,
+                    "views": 15000,
+                    "likes": 900,
+                    "uploaded_at": _iso(48),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(train_loop, "VIRAL_MEMORY_PATH", memory_path)
 
     section = train_loop.load_viral_memory_section()
@@ -121,6 +142,7 @@ def test_viral_memory_section_includes_old_enough_clips(tmp_path, monkeypatch):
 # reading pre-existing entries written in the old flat views/likes shape too, since some of
 # those can never be rewritten -- their uploaded_clips/ sidecar is already gone by the time a
 # clip is confirmed twice on TikTok, see metrics_tracker._delete_confirmed_upload()) ---------
+
 
 def test_format_platform_metrics_shows_both_platforms_when_both_present():
     entry = {"tiktok_views": 100, "tiktok_likes": 10, "youtube_views": 50, "youtube_likes": 5}
@@ -157,12 +179,21 @@ def test_entry_has_metrics_false_when_nothing_checked_yet():
 
 def test_viral_memory_section_includes_youtube_only_clip(tmp_path, monkeypatch):
     memory_path = tmp_path / "viral_memory.json"
-    memory_path.write_text(json.dumps({
-        "yt_clip": {
-            "title": "YouTube Only Clip", "viral_score": 7, "energy_rating": 6,
-            "youtube_views": 4200, "youtube_likes": 300, "uploaded_at": _iso(48),
-        },
-    }), encoding="utf-8")
+    memory_path.write_text(
+        json.dumps(
+            {
+                "yt_clip": {
+                    "title": "YouTube Only Clip",
+                    "viral_score": 7,
+                    "energy_rating": 6,
+                    "youtube_views": 4200,
+                    "youtube_likes": 300,
+                    "uploaded_at": _iso(48),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(train_loop, "VIRAL_MEMORY_PATH", memory_path)
 
     section = train_loop.load_viral_memory_section()
@@ -176,6 +207,7 @@ def test_viral_memory_section_includes_youtube_only_clip(tmp_path, monkeypatch):
 # the critic already scored highly and that made it to a confirmed publish is still a
 # weaker, but meaningful, signal worth reinforcing in the meantime) -------------------------
 
+
 def test_accepted_clips_section_empty_when_dir_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(train_loop, "UPLOADED_CLIPS_DIR", tmp_path / "nope")
     assert train_loop.load_accepted_clips_section() == ""
@@ -183,9 +215,17 @@ def test_accepted_clips_section_empty_when_dir_missing(tmp_path, monkeypatch):
 
 def test_accepted_clips_section_includes_confirmed_high_score_clip(tmp_path, monkeypatch):
     monkeypatch.setattr(train_loop, "UPLOADED_CLIPS_DIR", tmp_path)
-    (tmp_path / "clip_1.json").write_text(json.dumps({
-        "title": "Great Clip", "viral_score": 9, "energy_rating": 8, "confirmed": True,
-    }), encoding="utf-8")
+    (tmp_path / "clip_1.json").write_text(
+        json.dumps(
+            {
+                "title": "Great Clip",
+                "viral_score": 9,
+                "energy_rating": 8,
+                "confirmed": True,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     section = train_loop.load_accepted_clips_section()
 
@@ -195,18 +235,32 @@ def test_accepted_clips_section_includes_confirmed_high_score_clip(tmp_path, mon
 
 def test_accepted_clips_section_excludes_unconfirmed_clip(tmp_path, monkeypatch):
     monkeypatch.setattr(train_loop, "UPLOADED_CLIPS_DIR", tmp_path)
-    (tmp_path / "clip_1.json").write_text(json.dumps({
-        "title": "Unconfirmed Clip", "viral_score": 9, "confirmed": False,
-    }), encoding="utf-8")
+    (tmp_path / "clip_1.json").write_text(
+        json.dumps(
+            {
+                "title": "Unconfirmed Clip",
+                "viral_score": 9,
+                "confirmed": False,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     assert train_loop.load_accepted_clips_section() == ""
 
 
 def test_accepted_clips_section_excludes_low_score_clip(tmp_path, monkeypatch):
     monkeypatch.setattr(train_loop, "UPLOADED_CLIPS_DIR", tmp_path)
-    (tmp_path / "clip_1.json").write_text(json.dumps({
-        "title": "Meh Clip", "viral_score": 4, "confirmed": True,
-    }), encoding="utf-8")
+    (tmp_path / "clip_1.json").write_text(
+        json.dumps(
+            {
+                "title": "Meh Clip",
+                "viral_score": 4,
+                "confirmed": True,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     assert train_loop.load_accepted_clips_section() == ""
 
@@ -214,9 +268,16 @@ def test_accepted_clips_section_excludes_low_score_clip(tmp_path, monkeypatch):
 def test_accepted_clips_section_ignores_unreadable_sidecar(tmp_path, monkeypatch):
     monkeypatch.setattr(train_loop, "UPLOADED_CLIPS_DIR", tmp_path)
     (tmp_path / "corrupt.json").write_text("{not valid json", encoding="utf-8")
-    (tmp_path / "good.json").write_text(json.dumps({
-        "title": "Good Clip", "viral_score": 8, "confirmed": True,
-    }), encoding="utf-8")
+    (tmp_path / "good.json").write_text(
+        json.dumps(
+            {
+                "title": "Good Clip",
+                "viral_score": 8,
+                "confirmed": True,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     section = train_loop.load_accepted_clips_section()
 

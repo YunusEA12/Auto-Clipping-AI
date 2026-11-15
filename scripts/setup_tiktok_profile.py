@@ -23,20 +23,26 @@ import json
 import logging
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
+
+import cv2
+import numpy as np
+import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 
-import logging_setup
-import tiktok_uploader
+from autoclip import runtime
+from autoclip.core import logging_setup
+from autoclip.publishing import tiktok_uploader
 
 logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ASSETS_DIR = REPO_ROOT / "profile_assets"
+ASSETS_DIR = runtime.path("profile_assets")
 # /setting is account settings (privacy, notifications) and holds none of the profile
 # fields. /profile redirects to the signed-in user's own @handle page, which is where the
 # "Edit profile" modal lives.
@@ -126,6 +132,8 @@ def _wait_out_captcha(page, timeout_ms: int) -> bool:
             logger.info("Captcha geloest — weiter.")
             return True
     return False
+
+
 AVATAR_INPUT_SELECTORS = [
     "input[type='file'][accept*='image']",
     "input[type='file']",
@@ -170,20 +178,39 @@ def _set_text(field, text: str) -> bool:
     """
     field.fill("")
     field.fill(text)
-    if (field.input_value() or "").strip():
+    if (field.input_value() or "").strip() == text.strip():
         return True
 
     field.click()
     field.type(text.replace("\n", " "), delay=40)
-    return bool((field.input_value() or "").strip())
+    return (field.input_value() or "").strip() == text.replace("\n", " ").strip()
+
+
+def _avatar_matches(page, expected: Path) -> bool:
+    """Compare perceptual signatures across TikTok's resizing/recompression."""
+
+    def signature(raw):
+        image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            raise ValueError("Avatar is not a decodable image")
+        spectrum = cv2.dct(cv2.resize(image, (32, 32)).astype(np.float32))[:8, :8]
+        return spectrum > np.median(spectrum[1:])
+
+    try:
+        src = page.locator("[data-e2e='user-avatar'] img").first.get_attribute("src") or ""
+        if urlsplit(src).scheme != "https" or "tiktokcdn" not in (urlsplit(src).hostname or ""):
+            return False
+        response = requests.get(src, timeout=20)
+        response.raise_for_status()
+        return bool(np.count_nonzero(signature(response.content) != signature(expected.read_bytes())) <= 8)
+    except (requests.RequestException, PlaywrightTimeout, ValueError, OSError):
+        return False
 
 
 def _load_profile_copy() -> dict:
     path = ASSETS_DIR / "profile.json"
     if not path.exists():
-        raise SystemExit(
-            f"{path} fehlt — zuerst `python scripts/generate_profile_assets.py` laufen lassen."
-        )
+        raise SystemExit(f"{path} fehlt — zuerst `python scripts/generate_profile_assets.py` laufen lassen.")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -192,14 +219,15 @@ def run(dry_run: bool, headed: bool, skip_avatar: bool) -> int:
     if not cookies:
         logger.error(
             "Keine brauchbare Session in %s. Zuerst `python scripts/capture_tiktok_session.py` "
-            "laufen lassen und sich im Fenster anmelden.", tiktok_uploader.COOKIES_PATH,
+            "laufen lassen und sich im Fenster anmelden.",
+            tiktok_uploader.COOKIES_PATH,
         )
         return 1
 
     copy = _load_profile_copy()
     avatar_path = ASSETS_DIR / "avatar.png"
     if not skip_avatar and not avatar_path.exists():
-        logger.error("%s fehlt — `python scripts/draw_avatar.py` erzeugt es.", avatar_path)
+        logger.error("%s fehlt — `python scripts/generate_profile_assets.py` bereitet es vor.", avatar_path)
         return 1
 
     with sync_playwright() as pw:
@@ -217,6 +245,10 @@ def run(dry_run: bool, headed: bool, skip_avatar: bool) -> int:
                 return 1
 
             logger.info("Eingeloggt als: %s", page.url)
+            expected_handle = copy.get("expected_handle")
+            if expected_handle and urlsplit(page.url).path.rstrip("/") != f"/@{expected_handle}":
+                logger.error("Account does not match approved branding target; nothing changed")
+                return 1
 
             edit_button, matched = _first_visible(page, EDIT_BUTTON_SELECTORS)
             if edit_button is None:
@@ -233,15 +265,22 @@ def run(dry_run: bool, headed: bool, skip_avatar: bool) -> int:
 
             name_field, name_sel = _first_visible(page, NAME_SELECTORS)
             bio_field, bio_sel = _first_visible(page, BIO_SELECTORS)
-            file_input, file_sel = _first_visible(page, AVATAR_INPUT_SELECTORS, timeout_ms=1500)
+            file_input, file_sel = None, None
+            for selector in AVATAR_INPUT_SELECTORS:
+                if page.locator(selector).count():
+                    file_input, file_sel = page.locator(selector).first, selector
+                    break
 
-            logger.info("Gefunden — Name: %s | Bio: %s | Datei-Upload: %s",
-                        name_sel or "NEIN", bio_sel or "NEIN", file_sel or "NEIN")
+            logger.info(
+                "Gefunden — Name: %s | Bio: %s | Datei-Upload: %s",
+                name_sel or "NEIN",
+                bio_sel or "NEIN",
+                file_sel or "NEIN",
+            )
 
             if dry_run:
                 page.screenshot(path=str(ASSETS_DIR / "profile_page_dryrun.png"), full_page=True)
-                logger.info("Dry run — nichts geaendert. Screenshot: %s",
-                            ASSETS_DIR / "profile_page_dryrun.png")
+                logger.info("Dry run — nichts geaendert. Screenshot: %s", ASSETS_DIR / "profile_page_dryrun.png")
                 return 0
 
             changed = []
@@ -266,7 +305,7 @@ def run(dry_run: bool, headed: bool, skip_avatar: bool) -> int:
                     logger.warning("Profilbild konnte nicht gesetzt werden: %s", str(e)[:200])
                     skipped.append("Profilbild (Fehler)")
 
-            if name_field is not None:
+            if name_field is not None and name_field.input_value().strip() != copy["display_name"]:
                 _dismiss_overlays(page)
                 _set_text(name_field, copy["display_name"])
                 changed.append("Anzeigename")
@@ -327,22 +366,27 @@ def run(dry_run: bool, headed: bool, skip_avatar: bool) -> int:
                     live_bio = page.locator("[data-e2e='user-bio']").first.inner_text().strip()
                 except Exception:
                     pass
-                # First line only: TikTok renders the bio with its own line breaks.
-                wanted = copy["bio"].splitlines()[0].strip()
-                (verified if wanted and wanted in live_bio else unverified).append("Bio")
+                wanted = " ".join(copy["bio"].split())
+                (verified if wanted and wanted == " ".join(live_bio.split()) else unverified).append("Bio")
                 changed.remove("Bio")
 
             if "Profilbild" in changed:
-                src = ""
-                try:
-                    src = page.locator("[data-e2e='user-avatar'] img").first.get_attribute("src") or ""
-                except Exception:
-                    pass
-                # A real uploaded avatar comes from the CDN; the letter placeholder has no img.
-                (verified if "tiktokcdn" in src else unverified).append("Profilbild")
+                matches = _avatar_matches(page, avatar_path)
+                (verified if matches else unverified).append("Profilbild")
                 changed.remove("Profilbild")
 
             verified.extend(changed)
+            from autoclip.core import atomic_io
+
+            atomic_io.atomic_write_json(
+                ASSETS_DIR / "result.json",
+                {
+                    "account": copy.get("expected_handle"),
+                    "verified": verified,
+                    "unverified": unverified,
+                    "skipped": skipped,
+                },
+            )
 
             if verified:
                 logger.info("✅ Nachweislich geaendert: %s", ", ".join(verified))
@@ -353,7 +397,9 @@ def run(dry_run: bool, headed: bool, skip_avatar: bool) -> int:
                     "❌ Angeblich gespeichert, aber auf dem Profil NICHT angekommen: %s. "
                     "Fast immer TikToks Captcha: der Speichern-Request meldet trotzdem "
                     "Erfolg. Diese Felder von Hand in der TikTok-App setzen — der Text "
-                    "steht in %s.", ", ".join(unverified), ASSETS_DIR / "profile.txt",
+                    "steht in %s.",
+                    ", ".join(unverified),
+                    ASSETS_DIR / "profile.txt",
                 )
             logger.info("   Kontrollbild: %s", ASSETS_DIR / "profile_after.png")
             return 1 if unverified else 0

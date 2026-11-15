@@ -1,10 +1,17 @@
-import analyze
+from autoclip.ai import analyze
 
 
 def _clip(title, start=0.0, end=10.0):
     return analyze.Clip(
-        start_time=start, end_time=end, title=title, hook_explanation="x", hook_style="other",
-        viral_score=5, energy_rating=5, description="x", hashtags=["#fyp"],
+        start_time=start,
+        end_time=end,
+        title=title,
+        hook_explanation="x",
+        hook_style="other",
+        viral_score=5,
+        energy_rating=5,
+        description="x",
+        hashtags=["#fyp"],
     )
 
 

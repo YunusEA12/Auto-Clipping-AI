@@ -14,15 +14,16 @@ from pathlib import Path
 
 import pytest
 
-import process
-import vision
-
+from autoclip.ai import vision
+from autoclip.rendering import process
 
 # --- resolve_layout --------------------------------------------------------------------
+
 
 def test_resolve_layout_manual_choice_bypasses_detection(monkeypatch):
     def boom(*a, **k):
         raise AssertionError("detection should not run for a non-auto layout")
+
     monkeypatch.setattr(process.vision, "detect_faces_for_layout", boom)
     resolved, detection_ts = process.resolve_layout(process.LAYOUT_SPLIT_SCREEN, Path("x.mp4"), 1.0)
     assert resolved == process.LAYOUT_SPLIT_SCREEN
@@ -42,7 +43,10 @@ def test_resolve_layout_no_faces_with_static_override_uses_split_screen(monkeypa
     # position is known independently of any single clip's own detection.
     monkeypatch.setattr(process.vision, "detect_faces_for_layout", lambda *a, **k: (0, None, 1920, 1080))
     resolved, detection_ts = process.resolve_layout(
-        process.LAYOUT_AUTO, Path("x.mp4"), 1.0, has_static_override=True,
+        process.LAYOUT_AUTO,
+        Path("x.mp4"),
+        1.0,
+        has_static_override=True,
     )
     assert resolved == process.LAYOUT_SPLIT_SCREEN
     assert detection_ts == 1.0
@@ -65,7 +69,9 @@ def test_resolve_layout_multiple_confident_faces_still_uses_the_primary_one(monk
     # portrait used to do exactly this).
     box = (0, 0, 100, 100)  # small + off-center on a 1920x1080 frame -> split_screen
     monkeypatch.setattr(
-        process.vision, "detect_faces_for_layout", lambda *a, **k: (2, box, 1920, 1080),
+        process.vision,
+        "detect_faces_for_layout",
+        lambda *a, **k: (2, box, 1920, 1080),
     )
     assert process.resolve_layout(process.LAYOUT_AUTO, Path("x.mp4"), 1.0)[0] == process.LAYOUT_SPLIT_SCREEN
 
@@ -147,6 +153,7 @@ def test_resolve_layout_retries_on_ambiguous_first_frame_when_clip_end_given(mon
 # other clip in it, instead of just falling back for this one clip like a genuine 0-face
 # reading already does) ------------------------------------------------------------------
 
+
 def test_resolve_layout_recovers_from_unreadable_frame_by_trying_next_timestamp(monkeypatch):
     box = (0, 0, 200, 200)
     calls = []
@@ -203,9 +210,13 @@ def test_resolve_layout_still_falls_back_to_center_crop_after_exhausting_retries
 # empty and silently fall back to vision._fallback_box()'s static corner box instead of the
 # real, just-confirmed face -- live in the default LAYOUT_AUTO path. ------------------------
 
+
 def test_process_clips_iter_crops_at_resolve_layouts_detection_ts_not_clip_start(tmp_path, monkeypatch):
-    monkeypatch.setattr(process.vision, "locate_persistent_facecam", lambda *a, **k:
-                        process.vision.FacecamScan((.82, .05, .92, .2), 1., 16, 16, .9))
+    monkeypatch.setattr(
+        process.vision,
+        "locate_persistent_facecam",
+        lambda *a, **k: process.vision.FacecamScan((0.82, 0.05, 0.92, 0.2), 1.0, 16, 16, 0.9),
+    )
     monkeypatch.setattr(process, "TEMP_DIR", tmp_path / "temp")
     monkeypatch.setattr(process, "find_source_video", lambda explicit: tmp_path / "source.mp4")
     monkeypatch.setattr(process, "get_video_dimensions", lambda video_path: (1920, 1080))
@@ -230,20 +241,28 @@ def test_process_clips_iter_crops_at_resolve_layouts_detection_ts_not_clip_start
 
     clips_data = {"clips": [{"start_time": 0.0, "end_time": 10.0, "title": "Clip"}]}
     monkeypatch.setattr(
-        process, "load_json",
+        process,
+        "load_json",
         lambda path: dict(clips_data) if "clips" in path.name else {"segments": []},
     )
 
-    list(process.process_clips_iter(
-        source_video=tmp_path / "source.mp4", layout=process.LAYOUT_AUTO, output_dir=tmp_path / "out",
-    ))
+    list(
+        process.process_clips_iter(
+            source_video=tmp_path / "source.mp4",
+            layout=process.LAYOUT_AUTO,
+            output_dir=tmp_path / "out",
+        )
+    )
 
     assert captured_timestamps == [3.33]
 
 
 def _process_clips_iter_common_mocks(monkeypatch, tmp_path, clips_data):
-    monkeypatch.setattr(process.vision, "locate_persistent_facecam", lambda *a, **k:
-                        process.vision.FacecamScan((.82, .05, .92, .2), 1., 16, 16, .9))
+    monkeypatch.setattr(
+        process.vision,
+        "locate_persistent_facecam",
+        lambda *a, **k: process.vision.FacecamScan((0.82, 0.05, 0.92, 0.2), 1.0, 16, 16, 0.9),
+    )
     monkeypatch.setattr(process, "TEMP_DIR", tmp_path / "temp")
     monkeypatch.setattr(process, "find_source_video", lambda explicit: tmp_path / "source.mp4")
     monkeypatch.setattr(process, "get_video_dimensions", lambda video_path: (1920, 1080))
@@ -255,7 +274,8 @@ def _process_clips_iter_common_mocks(monkeypatch, tmp_path, clips_data):
     monkeypatch.setattr(process.atomic_io, "atomic_write_json", lambda *a, **k: None)
     monkeypatch.setattr(process, "resolve_layout", lambda *a, **k: (process.LAYOUT_SPLIT_SCREEN, 0.0))
     monkeypatch.setattr(
-        process, "load_json",
+        process,
+        "load_json",
         lambda path: dict(clips_data) if "clips" in path.name else {"segments": []},
     )
 
@@ -276,9 +296,13 @@ def test_process_clips_iter_passes_clip_end_for_temporal_smoothing(tmp_path, mon
     monkeypatch.setattr(process.vision, "get_facecam_coordinates", fake_get_facecam_coordinates)
     monkeypatch.setattr(process.streamers, "load_streamers", lambda: [])
 
-    list(process.process_clips_iter(
-        source_video=tmp_path / "source.mp4", layout=process.LAYOUT_AUTO, output_dir=tmp_path / "out",
-    ))
+    list(
+        process.process_clips_iter(
+            source_video=tmp_path / "source.mp4",
+            layout=process.LAYOUT_AUTO,
+            output_dir=tmp_path / "out",
+        )
+    )
 
     assert captured_kwargs["clip_end"] == 12.5
 
@@ -297,14 +321,19 @@ def test_process_clips_iter_threads_streamer_facecam_override(tmp_path, monkeypa
 
     monkeypatch.setattr(process.vision, "get_facecam_coordinates", fake_get_facecam_coordinates)
     monkeypatch.setattr(
-        process.streamers, "load_streamers",
+        process.streamers,
+        "load_streamers",
         lambda: [{"name": "papaplatte", "facecam_box": [0.6, 0.0, 1.0, 0.4], "facecam_padding": 0.25}],
     )
 
-    list(process.process_clips_iter(
-        source_video=tmp_path / "source.mp4", layout=process.LAYOUT_AUTO, output_dir=tmp_path / "out",
-        streamer_name="papaplatte",
-    ))
+    list(
+        process.process_clips_iter(
+            source_video=tmp_path / "source.mp4",
+            layout=process.LAYOUT_AUTO,
+            output_dir=tmp_path / "out",
+            streamer_name="papaplatte",
+        )
+    )
 
     assert captured_kwargs["override_box_ratio"] == [0.6, 0.0, 1.0, 0.4]
     assert captured_kwargs["padding_factor"] == process.vision.padding_factor_from_margin(0.25)
@@ -324,12 +353,19 @@ def test_process_clips_iter_no_streamer_name_means_no_override(tmp_path, monkeyp
     monkeypatch.setattr(process.vision, "get_facecam_coordinates", fake_get_facecam_coordinates)
 
     def boom():
-        raise AssertionError("streamers.load_streamers() should not be called without a streamer_name")
+        raise AssertionError(
+            "autoclip.configuration.streamers.load_streamers() should not be called without a streamer_name"
+        )
+
     monkeypatch.setattr(process.streamers, "load_streamers", boom)
 
-    list(process.process_clips_iter(
-        source_video=tmp_path / "source.mp4", layout=process.LAYOUT_AUTO, output_dir=tmp_path / "out",
-    ))
+    list(
+        process.process_clips_iter(
+            source_video=tmp_path / "source.mp4",
+            layout=process.LAYOUT_AUTO,
+            output_dir=tmp_path / "out",
+        )
+    )
 
     assert captured_kwargs["override_box_ratio"] is None
     assert captured_kwargs["padding_factor"] == process.vision.PADDING_FACTOR
@@ -339,6 +375,7 @@ def test_process_clips_iter_no_streamer_name_means_no_override(tmp_path, monkeyp
 # Real symptom: a Discord call / podcast / collab grid forced into the single-primary-face
 # split_screen decision produced ~40%+ black gaps where the two zones' crops landed on the
 # grid's own margins instead of real content — see process.resolve_layout()'s own docstring.
+
 
 def test_resolve_layout_multi_cam_grid_routes_to_multi_cam(monkeypatch):
     boxes = [(0, 0, 100, 100), (200, 0, 100, 100), (400, 0, 100, 100)]
@@ -386,10 +423,14 @@ def test_resolve_layout_zero_confident_faces_ordinary_dropout_still_uses_overrid
 # checks alike — only the whole-chunk persistence scan separates a camera from something the
 # game drew. See vision.locate_persistent_facecam) ------------------------------------------
 
+
 def _scan(box_ratio, samples_read=16, samples_with_face=2, persistence=0.125):
     return vision.FacecamScan(
-        box_ratio=box_ratio, persistence=persistence, samples_with_face=samples_with_face,
-        samples_read=samples_read, mean_confidence=0.9,
+        box_ratio=box_ratio,
+        persistence=persistence,
+        samples_with_face=samples_with_face,
+        samples_read=samples_read,
+        mean_confidence=0.9,
     )
 
 
@@ -400,7 +441,10 @@ def test_split_screen_is_vetoed_when_the_chunk_has_no_persistent_facecam(monkeyp
     monkeypatch.setattr(process.vision, "looks_like_busy_multi_face_scene", lambda *a, **k: False)
 
     resolved, _ = process.resolve_layout(
-        process.LAYOUT_AUTO, Path("x.mp4"), 1.0, facecam_scan=_scan(box_ratio=None),
+        process.LAYOUT_AUTO,
+        Path("x.mp4"),
+        1.0,
+        facecam_scan=_scan(box_ratio=None),
     )
 
     assert resolved == process.LAYOUT_CENTER_CROP
@@ -413,7 +457,9 @@ def test_split_screen_survives_when_the_chunk_does_have_a_persistent_facecam(mon
     monkeypatch.setattr(process.vision, "looks_like_busy_multi_face_scene", lambda *a, **k: False)
 
     resolved, _ = process.resolve_layout(
-        process.LAYOUT_AUTO, Path("x.mp4"), 1.0,
+        process.LAYOUT_AUTO,
+        Path("x.mp4"),
+        1.0,
         facecam_scan=_scan(box_ratio=(0.8, 0.05, 0.95, 0.2), persistence=0.9, samples_with_face=14),
     )
 
@@ -428,7 +474,9 @@ def test_a_failed_scan_is_not_treated_as_evidence_against_a_facecam(monkeypatch)
     monkeypatch.setattr(process.vision, "looks_like_busy_multi_face_scene", lambda *a, **k: False)
 
     resolved, _ = process.resolve_layout(
-        process.LAYOUT_AUTO, Path("x.mp4"), 1.0,
+        process.LAYOUT_AUTO,
+        Path("x.mp4"),
+        1.0,
         facecam_scan=_scan(box_ratio=None, samples_read=0, samples_with_face=0, persistence=0.0),
     )
 
@@ -456,7 +504,10 @@ def test_full_cam_is_deliberately_not_vetoed(monkeypatch):
     monkeypatch.setattr(process.vision, "looks_like_busy_multi_face_scene", lambda *a, **k: False)
 
     resolved, _ = process.resolve_layout(
-        process.LAYOUT_AUTO, Path("x.mp4"), 1.0, facecam_scan=_scan(box_ratio=None),
+        process.LAYOUT_AUTO,
+        Path("x.mp4"),
+        1.0,
+        facecam_scan=_scan(box_ratio=None),
     )
 
     assert resolved == process.LAYOUT_FULL_CAM
@@ -464,13 +515,18 @@ def test_full_cam_is_deliberately_not_vetoed(monkeypatch):
 
 # --- build_filter_complex: full_cam branch ----------------------------------------------
 
+
 def test_build_filter_complex_full_cam_crops_source_and_fills_full_canvas(tmp_path):
     ass_path = tmp_path / "subs.ass"
     ass_path.write_text("", encoding="utf-8")
     facecam_box = (10, 20, 300, 400)
 
     filter_str = process.build_filter_complex(
-        process.LAYOUT_FULL_CAM, ass_path, 1080, 1920, facecam_box=facecam_box,
+        process.LAYOUT_FULL_CAM,
+        ass_path,
+        1080,
+        1920,
+        facecam_box=facecam_box,
     )
 
     assert "crop=300:400:10:20" in filter_str
@@ -482,6 +538,7 @@ def test_build_filter_complex_full_cam_crops_source_and_fills_full_canvas(tmp_pa
 
 # --- build_filter_complex: multi_cam branch (2026-08-24 incident) ------------------------
 
+
 def test_build_filter_complex_multi_cam_slots_sum_to_exact_canvas_height(tmp_path):
     # The bug this generalizes the fix for: a vstack whose zone heights don't sum to EXACTLY
     # output_h leaves an unaccounted vertical gap between zones.
@@ -490,7 +547,11 @@ def test_build_filter_complex_multi_cam_slots_sum_to_exact_canvas_height(tmp_pat
     boxes = [(0, 0, 300, 300), (400, 0, 300, 300), (800, 0, 300, 300)]
 
     filter_str = process.build_filter_complex(
-        process.LAYOUT_MULTI_CAM, ass_path, 1080, 1920, multi_cam_boxes=boxes,
+        process.LAYOUT_MULTI_CAM,
+        ass_path,
+        1080,
+        1920,
+        multi_cam_boxes=boxes,
     )
 
     # 1920 // 3 = 640 for the first two slots; the third absorbs the // remainder (0 here).
@@ -505,7 +566,11 @@ def test_build_filter_complex_multi_cam_two_slots_remainder_absorbed_by_last():
     boxes = [(0, 0, 300, 300), (400, 0, 300, 300)]
 
     filter_str = process.build_filter_complex(
-        process.LAYOUT_MULTI_CAM, ass_path, 1080, 1921, multi_cam_boxes=boxes,
+        process.LAYOUT_MULTI_CAM,
+        ass_path,
+        1080,
+        1921,
+        multi_cam_boxes=boxes,
     )
 
     # 1921 // 2 = 960 for the first slot, 961 for the second (absorbs the odd remainder) --
@@ -516,11 +581,13 @@ def test_build_filter_complex_multi_cam_two_slots_remainder_absorbed_by_last():
 
 def test_build_filter_complex_unknown_layout_still_raises():
     import pytest
+
     with pytest.raises(ValueError):
         process.build_filter_complex("not_a_real_layout", Path("x.ass"), 1080, 1920)
 
 
 # --- build_ass_for_clip: white title-box hook --------------------------------------------
+
 
 def test_build_ass_for_clip_includes_title_box_dialogue_line(tmp_path, monkeypatch):
     monkeypatch.setattr(process, "TEMP_DIR", tmp_path)
@@ -545,7 +612,12 @@ def test_build_ass_for_clip_split_screen_uses_safe_top_margin_not_the_seam(tmp_p
     transcript = {"segments": []}
 
     ass_path = process.build_ass_for_clip(
-        clip, transcript, index=1, output_w=1080, output_h=1920, layout=process.LAYOUT_SPLIT_SCREEN,
+        clip,
+        transcript,
+        index=1,
+        output_w=1080,
+        output_h=1920,
+        layout=process.LAYOUT_SPLIT_SCREEN,
     )
     content = ass_path.read_text(encoding="utf-8")
 
@@ -562,7 +634,12 @@ def test_build_ass_for_clip_full_cam_uses_flat_title_ratio(tmp_path, monkeypatch
     transcript = {"segments": []}
 
     ass_path = process.build_ass_for_clip(
-        clip, transcript, index=1, output_w=1080, output_h=1920, layout=process.LAYOUT_FULL_CAM,
+        clip,
+        transcript,
+        index=1,
+        output_w=1080,
+        output_h=1920,
+        layout=process.LAYOUT_FULL_CAM,
     )
     content = ass_path.read_text(encoding="utf-8")
 

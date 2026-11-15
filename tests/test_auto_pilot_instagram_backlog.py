@@ -11,7 +11,7 @@ treated as done — only success AND confirmed marks instagram_uploaded."""
 
 import json
 
-import auto_pilot
+from autoclip.control import auto_pilot
 
 
 def _write_uploaded(uploaded_dir, name, sidecar_data):
@@ -23,6 +23,7 @@ def _write_uploaded(uploaded_dir, name, sidecar_data):
 
 
 # --- find_missing_instagram_uploads --------------------------------------------------------
+
 
 def test_finds_clip_missing_instagram_upload(tmp_path):
     mp4 = _write_uploaded(tmp_path, "clip_1_A", {"title": "A", "instagram_enabled": True, "instagram_uploaded": False})
@@ -73,37 +74,69 @@ def test_missing_uploaded_clips_dir_is_empty(tmp_path):
 
 # --- streamer_name scoping (same reasoning as the YouTube sweep) --------------------------
 
+
 def test_streamer_filter_excludes_another_streamers_clip(tmp_path):
-    mp4 = _write_uploaded(tmp_path, "clip_1_Mine", {
-        "title": "Mine", "instagram_enabled": True, "instagram_uploaded": False, "streamer_name": "alice",
-    })
-    _write_uploaded(tmp_path, "clip_1_Theirs", {
-        "title": "Theirs", "instagram_enabled": True, "instagram_uploaded": False, "streamer_name": "bob",
-    })
+    mp4 = _write_uploaded(
+        tmp_path,
+        "clip_1_Mine",
+        {
+            "title": "Mine",
+            "instagram_enabled": True,
+            "instagram_uploaded": False,
+            "streamer_name": "alice",
+        },
+    )
+    _write_uploaded(
+        tmp_path,
+        "clip_1_Theirs",
+        {
+            "title": "Theirs",
+            "instagram_enabled": True,
+            "instagram_uploaded": False,
+            "streamer_name": "bob",
+        },
+    )
     assert auto_pilot.find_missing_instagram_uploads(tmp_path, streamer_name="alice") == [mp4]
 
 
 def test_streamer_filter_still_includes_unowned_legacy_clips(tmp_path):
-    mp4 = _write_uploaded(tmp_path, "clip_1_Legacy", {
-        "title": "Legacy", "instagram_enabled": True, "instagram_uploaded": False,
-    })
+    mp4 = _write_uploaded(
+        tmp_path,
+        "clip_1_Legacy",
+        {
+            "title": "Legacy",
+            "instagram_enabled": True,
+            "instagram_uploaded": False,
+        },
+    )
     assert auto_pilot.find_missing_instagram_uploads(tmp_path, streamer_name="alice") == [mp4]
 
 
 # --- retry_missing_instagram_uploads -------------------------------------------------------
 
+
 def test_retry_success_updates_sidecar_and_never_touches_tiktok(tmp_path, monkeypatch):
-    _write_uploaded(tmp_path, "clip_1_D", {
-        "title": "D", "description": "desc", "hashtags": ["#fyp"], "instagram_enabled": True, "instagram_uploaded": False,
-    })
+    _write_uploaded(
+        tmp_path,
+        "clip_1_D",
+        {
+            "title": "D",
+            "description": "desc",
+            "hashtags": ["#fyp"],
+            "instagram_enabled": True,
+            "instagram_uploaded": False,
+        },
+    )
 
     tiktok_calls = []
     monkeypatch.setattr(
-        auto_pilot.tiktok_uploader, "try_upload_clip",
+        auto_pilot.tiktok_uploader,
+        "try_upload_clip",
         lambda *a, **k: tiktok_calls.append((a, k)),
     )
     monkeypatch.setattr(
-        auto_pilot.upload_manager, "_upload_to_instagram",
+        auto_pilot.upload_manager,
+        "_upload_to_instagram",
         lambda *a, **k: auto_pilot.upload_manager.InstagramOutcome(attempted=True, success=True, confirmed=True),
     )
 
@@ -119,11 +152,18 @@ def test_retry_success_updates_sidecar_and_never_touches_tiktok(tmp_path, monkey
 def test_retry_success_but_unconfirmed_is_not_marked_done(tmp_path, monkeypatch):
     # Instagram's own "clicked but no confirming signal seen" ambiguity -- must stay eligible
     # for another retry next cycle rather than being guessed as done.
-    _write_uploaded(tmp_path, "clip_1_U", {
-        "title": "U", "instagram_enabled": True, "instagram_uploaded": False,
-    })
+    _write_uploaded(
+        tmp_path,
+        "clip_1_U",
+        {
+            "title": "U",
+            "instagram_enabled": True,
+            "instagram_uploaded": False,
+        },
+    )
     monkeypatch.setattr(
-        auto_pilot.upload_manager, "_upload_to_instagram",
+        auto_pilot.upload_manager,
+        "_upload_to_instagram",
         lambda *a, **k: auto_pilot.upload_manager.InstagramOutcome(attempted=True, success=True, confirmed=False),
     )
 
@@ -136,11 +176,18 @@ def test_retry_success_but_unconfirmed_is_not_marked_done(tmp_path, monkeypatch)
 
 
 def test_retry_failure_leaves_sidecar_untouched(tmp_path, monkeypatch):
-    _write_uploaded(tmp_path, "clip_1_E", {
-        "title": "E", "instagram_enabled": True, "instagram_uploaded": False,
-    })
+    _write_uploaded(
+        tmp_path,
+        "clip_1_E",
+        {
+            "title": "E",
+            "instagram_enabled": True,
+            "instagram_uploaded": False,
+        },
+    )
     monkeypatch.setattr(
-        auto_pilot.upload_manager, "_upload_to_instagram",
+        auto_pilot.upload_manager,
+        "_upload_to_instagram",
         lambda *a, **k: auto_pilot.upload_manager.InstagramOutcome(attempted=True, success=False, detail="crashed"),
     )
 
@@ -154,12 +201,17 @@ def test_retry_failure_leaves_sidecar_untouched(tmp_path, monkeypatch):
 
 def test_retry_respects_batch_limit(tmp_path, monkeypatch):
     for i in range(auto_pilot.INSTAGRAM_RETRY_BATCH_LIMIT + 3):
-        _write_uploaded(tmp_path, f"clip_{i}_X", {"title": f"X{i}", "instagram_enabled": True, "instagram_uploaded": False})
+        _write_uploaded(
+            tmp_path, f"clip_{i}_X", {"title": f"X{i}", "instagram_enabled": True, "instagram_uploaded": False}
+        )
 
     calls = []
     monkeypatch.setattr(
-        auto_pilot.upload_manager, "_upload_to_instagram",
-        lambda *a, **k: (calls.append(a) or auto_pilot.upload_manager.InstagramOutcome(attempted=True, success=True, confirmed=True)),
+        auto_pilot.upload_manager,
+        "_upload_to_instagram",
+        lambda *a, **k: (
+            calls.append(a) or auto_pilot.upload_manager.InstagramOutcome(attempted=True, success=True, confirmed=True)
+        ),
     )
 
     ok, failed = auto_pilot.retry_missing_instagram_uploads(tmp_path)

@@ -8,7 +8,7 @@ only) — these tests cover the override mechanism directly."""
 
 import json
 
-import auto_pilot
+from autoclip.control import auto_pilot
 
 
 def test_resolves_to_shared_path_by_default(monkeypatch):

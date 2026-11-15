@@ -15,7 +15,7 @@ import random
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-import tiktok_uploader
+from autoclip.publishing import tiktok_uploader
 
 
 @pytest.fixture(autouse=True)
@@ -139,9 +139,15 @@ class FakeSoundPage:
     results, matching a real "nothing found" search)."""
 
     def __init__(
-        self, sounds_button_present=True, got_it_present=False, tab_present=True,
-        search_results=None, search_box_present=True,
-        close_button_present=True, volume_input_present=True, save_button_present=True,
+        self,
+        sounds_button_present=True,
+        got_it_present=False,
+        tab_present=True,
+        search_results=None,
+        search_box_present=True,
+        close_button_present=True,
+        volume_input_present=True,
+        save_button_present=True,
     ):
         self.sounds_button = FakeClickable(sounds_button_present)
         self.got_it_button = FakeClickable(got_it_present)
@@ -202,6 +208,7 @@ class FakeSoundPage:
 
 # --- _add_background_sound: happy path (search-based, 2026-08-19) --------------------------
 
+
 def test_adds_the_first_pool_track_whose_search_succeeds(monkeypatch):
     monkeypatch.setattr(random, "shuffle", lambda seq: None)  # keep SOUND_TRACK_POOL's own order
     row = FakeRow("Dexter - The blood theme")
@@ -242,14 +249,17 @@ def test_adjusts_volume_after_adding(monkeypatch):
 # TikTok's library at any given moment -- "A Long Way Home" currently returns zero real
 # results -- so a search coming up empty must fall through to the next pool entry) -----------
 
+
 def test_falls_through_to_the_next_pool_entry_when_the_first_search_is_empty(monkeypatch):
     order = ["A Long Way Home", "Veridis Quo", "Dexter - The blood theme"]
     monkeypatch.setattr(random, "shuffle", lambda seq: seq.sort(key=order.index))
     row = FakeRow("Veridis Quo")
-    page = FakeSoundPage(search_results={
-        "A Long Way Home": [],  # no results for this one, as confirmed live
-        "Veridis Quo": [row],
-    })
+    page = FakeSoundPage(
+        search_results={
+            "A Long Way Home": [],  # no results for this one, as confirmed live
+            "Veridis Quo": [row],
+        }
+    )
 
     title = tiktok_uploader._add_background_sound(page)
 
@@ -263,6 +273,7 @@ def test_returns_none_when_every_pool_entry_s_search_is_empty(monkeypatch):
 
 
 # --- permanent blacklist (2026-08-19, explicit account-owner call) --------------------------
+
 
 def test_blacklisted_track_is_skipped_in_favor_of_the_next_result(monkeypatch):
     monkeypatch.setattr(random, "shuffle", lambda seq: None)
@@ -301,6 +312,7 @@ def test_row_whose_title_read_fails_is_skipped_not_fatal(monkeypatch):
 # pool-browsing version -- avoid two consecutive clips carrying the same track when a
 # different pool entry is also available) ----------------------------------------------------
 
+
 def test_ordered_search_queries_deprioritizes_the_last_added_track(monkeypatch):
     monkeypatch.setattr(tiktok_uploader, "_last_track_title", "Veridis Quo")
     monkeypatch.setattr(random, "shuffle", lambda seq: None)  # keep SOUND_TRACK_POOL's own order
@@ -321,10 +333,12 @@ def test_second_upload_avoids_repeating_the_first_upload_s_track(monkeypatch):
     monkeypatch.setattr(tiktok_uploader, "_last_track_title", "Dexter - The blood theme")
     monkeypatch.setattr(random, "shuffle", lambda seq: None)
     row = FakeRow("Veridis Quo")
-    page = FakeSoundPage(search_results={
-        "Dexter - The blood theme": [FakeRow("Dexter - The blood theme")],
-        "Veridis Quo": [row],
-    })
+    page = FakeSoundPage(
+        search_results={
+            "Dexter - The blood theme": [FakeRow("Dexter - The blood theme")],
+            "Veridis Quo": [row],
+        }
+    )
 
     title = tiktok_uploader._add_background_sound(page)
 
@@ -342,6 +356,7 @@ def test_add_background_sound_remembers_the_track_it_added(monkeypatch):
 
 
 # --- _add_background_sound: best-effort degradation -----------------------------------------
+
 
 def test_returns_none_when_sounds_panel_cannot_open():
     page = FakeSoundPage(sounds_button_present=False)
@@ -388,6 +403,7 @@ def test_volume_adjustment_failure_does_not_lose_the_added_track(monkeypatch):
 # side-panel only closes THAT sub-panel, not the whole editor overlay sitting on top of the
 # normal upload page underneath it) -----------------------------------------------------------
 
+
 def test_exit_video_editor_clicks_save():
     page = FakeSoundPage()
     tiktok_uploader._exit_video_editor(page)
@@ -433,6 +449,7 @@ def test_add_background_sound_exits_editor_even_when_add_click_fails(monkeypatch
 
 # --- upload_video wiring ---------------------------------------------------------------------
 
+
 def test_upload_video_skips_sound_step_when_disabled(monkeypatch, tmp_path):
     # add_background_sound=False must mean _add_background_sound is never even called.
     called = []
@@ -447,5 +464,6 @@ def test_upload_video_skips_sound_step_when_disabled(monkeypatch, tmp_path):
 
 def test_try_upload_clip_passes_through_add_background_sound_flag():
     import inspect
+
     source = inspect.getsource(tiktok_uploader.try_upload_clip)
     assert "add_background_sound=add_background_sound" in source

@@ -1,9 +1,9 @@
 from datetime import datetime, timedelta, timezone
 
-import optimization_engine
-
+from autoclip.observability import optimization_engine
 
 # --- classify_title_style ---------------------------------------------------------------
+
 
 def test_classify_title_style_question():
     assert optimization_engine.classify_title_style("Wait, did that really just happen?") == "question"
@@ -28,10 +28,13 @@ def test_classify_title_style_empty_title():
 
 # --- analyze_performance -----------------------------------------------------------------
 
+
 def _entry(views, likes, checked_at="2026-08-21T00:00:00+00:00", **attrs):
     return {
-        "tiktok_views": views, "tiktok_likes": likes,
-        "youtube_views": None, "youtube_likes": None,
+        "tiktok_views": views,
+        "tiktok_likes": likes,
+        "youtube_views": None,
+        "youtube_likes": None,
         "checked_at": checked_at,
         **attrs,
     }
@@ -51,10 +54,7 @@ def test_analyze_performance_excludes_unmeasured_entries():
 def test_analyze_performance_requires_min_samples_before_preferring_a_bucket():
     # Only 2 measured uploads for "full_cam" — below MIN_SAMPLES_PER_BUCKET (5) — so layout
     # must show up as insufficient data, not a confident preference.
-    memory = {
-        f"clip_{i}": _entry(100, 5, layout="full_cam")
-        for i in range(2)
-    }
+    memory = {f"clip_{i}": _entry(100, 5, layout="full_cam") for i in range(2)}
     result = optimization_engine.analyze_performance(memory)
     assert "layout" in result["insufficient_data_for"]
     assert "layout" not in result["preferred"]
@@ -90,6 +90,7 @@ def test_analyze_performance_ignores_entries_missing_the_attribute():
 
 # --- build_prompt_section -----------------------------------------------------------------
 
+
 def test_build_prompt_section_empty_when_no_summary_lines():
     assert optimization_engine.build_prompt_section({"summary_lines": []}) == ""
     assert optimization_engine.build_prompt_section({}) == ""
@@ -98,7 +99,9 @@ def test_build_prompt_section_empty_when_no_summary_lines():
 def test_build_prompt_section_includes_summary_and_soft_language():
     state = {
         "sample_size_total": 12,
-        "llm_summary_lines": ["hook_style=curiosity_gap (n=6, 20.0% engagement vs 11.0% avg across measured hook_style values)"],
+        "llm_summary_lines": [
+            "hook_style=curiosity_gap (n=6, 20.0% engagement vs 11.0% avg across measured hook_style values)"
+        ],
     }
     section = optimization_engine.build_prompt_section(state)
     assert "hook_style=curiosity_gap" in section
@@ -134,6 +137,7 @@ def test_analyze_performance_only_puts_llm_actionable_attributes_in_llm_summary_
 
 # --- preferred_music_track ----------------------------------------------------------------
 
+
 def test_preferred_music_track_reads_from_state(monkeypatch, tmp_path):
     state_path = tmp_path / "optimization_state.json"
     state_path.write_text('{"preferred": {"music_track": "lofi_drift_g_minor.mp3"}}', encoding="utf-8")
@@ -147,6 +151,7 @@ def test_preferred_music_track_none_when_state_missing(monkeypatch, tmp_path):
 
 
 # --- run_daily_report gating --------------------------------------------------------------
+
 
 def test_run_daily_report_runs_when_no_prior_state(monkeypatch, tmp_path):
     monkeypatch.setattr(optimization_engine, "VIRAL_MEMORY_PATH", tmp_path / "viral_memory.json")

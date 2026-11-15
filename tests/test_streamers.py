@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pydantic
 import pytest
 
-import streamers
+from autoclip.configuration import streamers
 
 
 def test_save_and_load_roundtrip(tmp_path):
@@ -38,6 +38,7 @@ def test_remove_streamer(tmp_path):
 # publish/url/profile on an EXISTING entry without deleting and recreating it -- lost its
 # position in the list and required re-typing everything for a quick remote toggle) --------
 
+
 def test_update_streamer_changes_only_the_given_fields(tmp_path):
     path = tmp_path / "streamers.json"
     streamers.add_streamer("elias", "https://twitch.tv/elias", profile="p1", auto_upload=True, path=path)
@@ -47,8 +48,8 @@ def test_update_streamer_changes_only_the_given_fields(tmp_path):
     entry = streamers.load_streamers(path)[0]
     assert entry["publish"] is True
     assert entry["url"] == "https://twitch.tv/elias"  # untouched
-    assert entry["profile"] == "p1"                    # untouched
-    assert entry["auto_upload"] is True                 # untouched
+    assert entry["profile"] == "p1"  # untouched
+    assert entry["auto_upload"] is True  # untouched
 
 
 def test_update_streamer_can_change_multiple_fields_at_once(tmp_path):
@@ -56,7 +57,12 @@ def test_update_streamer_can_change_multiple_fields_at_once(tmp_path):
     streamers.add_streamer("elias", "https://twitch.tv/elias", path=path)
 
     streamers.update_streamer(
-        "elias", url="https://twitch.tv/new_elias", profile="p2", auto_upload=True, publish=True, path=path,
+        "elias",
+        url="https://twitch.tv/new_elias",
+        profile="p2",
+        auto_upload=True,
+        publish=True,
+        path=path,
     )
 
     entry = streamers.load_streamers(path)[0]
@@ -128,6 +134,7 @@ def test_save_leaves_no_temp_files_behind(tmp_path):
 # tabs, could each read the same list and the later save would silently discard the
 # earlier caller's addition) -----------------------------------------------------------
 
+
 def test_concurrent_add_streamer_does_not_lose_an_update(tmp_path):
     path = tmp_path / "streamers.json"
     streamers.save_streamers([], path)  # pre-create the file so both threads race on the same content
@@ -155,6 +162,7 @@ def test_concurrent_add_streamer_does_not_lose_an_update(tmp_path):
 # --- publish field (safety-model correction, 2026-08-18: TikTok has no draft-save action,
 # so auto_upload and publish must be tracked as separate, independent choices) ------------
 
+
 def test_publish_defaults_to_false():
     entry = streamers.StreamerEntry(name="x", url="https://twitch.tv/x")
     assert entry.publish is False
@@ -180,6 +188,7 @@ def test_add_streamer_publish_defaults_false_even_with_auto_upload(tmp_path):
 # process.py/vision.py as a high-confidence fallback when a given clip's own dynamic face
 # detection is missing or low-confidence -----------------------------------------------------
 
+
 def test_facecam_box_and_padding_default_to_none():
     entry = streamers.StreamerEntry(name="x", url="https://twitch.tv/x")
     assert entry.facecam_box is None
@@ -188,21 +197,32 @@ def test_facecam_box_and_padding_default_to_none():
 
 def test_facecam_box_roundtrips_through_save_and_load(tmp_path):
     path = tmp_path / "streamers.json"
-    streamers.save_streamers([
-        {"name": "elias", "url": "https://twitch.tv/elias", "facecam_box": [0.6, 0.0, 1.0, 0.35], "facecam_padding": 0.25},
-    ], path=path)
+    streamers.save_streamers(
+        [
+            {
+                "name": "elias",
+                "url": "https://twitch.tv/elias",
+                "facecam_box": [0.6, 0.0, 1.0, 0.35],
+                "facecam_padding": 0.25,
+            },
+        ],
+        path=path,
+    )
     entry = streamers.load_streamers(path)[0]
     assert entry["facecam_box"] == [0.6, 0.0, 1.0, 0.35]
     assert entry["facecam_padding"] == 0.25
 
 
-@pytest.mark.parametrize("bad_box", [
-    [0.1, 0.1, 0.1],           # wrong length
-    [1.0, 0.0, 0.5, 1.0],      # x1 >= x2
-    [0.0, 1.0, 1.0, 0.5],      # y1 >= y2
-    [-0.1, 0.0, 1.0, 1.0],     # x1 out of 0..1
-    [0.0, 0.0, 1.5, 1.0],      # x2 out of 0..1
-])
+@pytest.mark.parametrize(
+    "bad_box",
+    [
+        [0.1, 0.1, 0.1],  # wrong length
+        [1.0, 0.0, 0.5, 1.0],  # x1 >= x2
+        [0.0, 1.0, 1.0, 0.5],  # y1 >= y2
+        [-0.1, 0.0, 1.0, 1.0],  # x1 out of 0..1
+        [0.0, 0.0, 1.5, 1.0],  # x2 out of 0..1
+    ],
+)
 def test_facecam_box_rejects_invalid_coordinates(bad_box):
     with pytest.raises(pydantic.ValidationError):
         streamers.StreamerEntry(name="x", url="https://twitch.tv/x", facecam_box=bad_box)
@@ -223,10 +243,15 @@ def test_load_streamers_skips_entry_with_invalid_facecam_box(tmp_path):
     # (see its own try/except) -- a malformed hand-edited facecam_box shouldn't crash the
     # whole load, just drop that one entry.
     path = tmp_path / "streamers.json"
-    path.write_text(json.dumps([
-        {"name": "good", "url": "https://twitch.tv/good"},
-        {"name": "bad", "url": "https://twitch.tv/bad", "facecam_box": [1.0, 0.0, 0.0, 1.0]},
-    ]), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            [
+                {"name": "good", "url": "https://twitch.tv/good"},
+                {"name": "bad", "url": "https://twitch.tv/bad", "facecam_box": [1.0, 0.0, 0.0, 1.0]},
+            ]
+        ),
+        encoding="utf-8",
+    )
     entries = streamers.load_streamers(path)
     assert [e["name"] for e in entries] == ["good"]
 
@@ -237,12 +262,18 @@ def test_load_streamers_skips_entry_with_invalid_facecam_box(tmp_path):
 # "papaplatte twice" symptom, even though in that specific case the real cause was a stale
 # agent_state.json, not a duplicate here) --------------------------------------------------
 
+
 def test_load_streamers_drops_duplicate_name_keeping_first(tmp_path):
     path = tmp_path / "streamers.json"
-    path.write_text(json.dumps([
-        {"name": "papaplatte", "url": "https://twitch.tv/papaplatte", "auto_upload": True},
-        {"name": "papaplatte", "url": "https://twitch.tv/papaplatte-old-url", "auto_upload": False},
-    ]), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            [
+                {"name": "papaplatte", "url": "https://twitch.tv/papaplatte", "auto_upload": True},
+                {"name": "papaplatte", "url": "https://twitch.tv/papaplatte-old-url", "auto_upload": False},
+            ]
+        ),
+        encoding="utf-8",
+    )
 
     entries = streamers.load_streamers(path)
 
@@ -253,10 +284,15 @@ def test_load_streamers_drops_duplicate_name_keeping_first(tmp_path):
 
 def test_load_streamers_keeps_distinct_names(tmp_path):
     path = tmp_path / "streamers.json"
-    path.write_text(json.dumps([
-        {"name": "a", "url": "https://twitch.tv/a"},
-        {"name": "b", "url": "https://twitch.tv/b"},
-    ]), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            [
+                {"name": "a", "url": "https://twitch.tv/a"},
+                {"name": "b", "url": "https://twitch.tv/b"},
+            ]
+        ),
+        encoding="utf-8",
+    )
 
     entries = streamers.load_streamers(path)
     assert [e["name"] for e in entries] == ["a", "b"]
@@ -267,20 +303,32 @@ def test_load_streamers_keeps_distinct_names(tmp_path):
 # agent_state_papaplatte.json, both showing "papaplatte" in the dashboard at once, one of
 # them over 9 hours stale) -------------------------------------------------------------
 
+
 def _iso(hours_ago):
     return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
 
 
 def _write_state(path, target_streamer, hours_ago):
-    path.write_text(json.dumps({
-        "target_streamer": target_streamer, "last_updated": _iso(hours_ago),
-    }), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            {
+                "target_streamer": target_streamer,
+                "last_updated": _iso(hours_ago),
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _write_orchestrator_state(root, live_by_name):
-    (root / "orchestrator_state.json").write_text(json.dumps({
-        "streamers": {name: {"live": live} for name, live in live_by_name.items()},
-    }), encoding="utf-8")
+    (root / "orchestrator_state.json").write_text(
+        json.dumps(
+            {
+                "streamers": {name: {"live": live} for name, live in live_by_name.items()},
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_purge_removes_orphaned_state_not_in_streamers_json(tmp_path):
@@ -313,6 +361,7 @@ def test_purge_removes_stale_state_for_a_still_configured_streamer(tmp_path):
 # just stopped updating (a real crash/hang) should stay visible as an actionable problem for
 # the full max_age_hours) --------------------------------------------------------------
 
+
 def test_default_offline_grace_period_is_short_not_an_hour():
     # 2026-08-19: the original 1-hour default was itself the bug the account owner reported —
     # a card stayed in Agent Status for up to an hour after actually going offline. Pin the
@@ -328,7 +377,10 @@ def test_purge_uses_short_grace_period_for_a_streamer_currently_offline(tmp_path
     _write_state(stale, "https://twitch.tv/eliasn97", hours_ago=2)  # well under max_age_hours=24
 
     deleted = streamers.purge_stale_agent_states(
-        streamers_path=streamers_path, root=tmp_path, max_age_hours=24, offline_grace_hours=1,
+        streamers_path=streamers_path,
+        root=tmp_path,
+        max_age_hours=24,
+        offline_grace_hours=1,
     )
 
     assert "agent_state_eliasn97.json" in deleted
@@ -343,7 +395,10 @@ def test_purge_keeps_offline_streamer_within_its_grace_period(tmp_path):
     _write_state(fresh, "https://twitch.tv/eliasn97", hours_ago=0.5)  # under offline_grace_hours=1
 
     deleted = streamers.purge_stale_agent_states(
-        streamers_path=streamers_path, root=tmp_path, max_age_hours=24, offline_grace_hours=1,
+        streamers_path=streamers_path,
+        root=tmp_path,
+        max_age_hours=24,
+        offline_grace_hours=1,
     )
 
     assert deleted == []
@@ -360,7 +415,10 @@ def test_purge_uses_long_threshold_for_a_streamer_still_reported_live(tmp_path):
     _write_state(stuck, "https://twitch.tv/eliasn97", hours_ago=2)  # past offline_grace_hours=1
 
     deleted = streamers.purge_stale_agent_states(
-        streamers_path=streamers_path, root=tmp_path, max_age_hours=24, offline_grace_hours=1,
+        streamers_path=streamers_path,
+        root=tmp_path,
+        max_age_hours=24,
+        offline_grace_hours=1,
     )
 
     assert deleted == []
@@ -376,7 +434,10 @@ def test_purge_uses_long_threshold_when_orchestrator_state_has_no_opinion(tmp_pa
     _write_state(unknown, "https://twitch.tv/eliasn97", hours_ago=2)  # past offline_grace_hours=1
 
     deleted = streamers.purge_stale_agent_states(
-        streamers_path=streamers_path, root=tmp_path, max_age_hours=24, offline_grace_hours=1,
+        streamers_path=streamers_path,
+        root=tmp_path,
+        max_age_hours=24,
+        offline_grace_hours=1,
     )
 
     assert deleted == []
@@ -445,6 +506,7 @@ def test_purge_leaves_unparseable_timestamp_alone(tmp_path):
 
 # --- load_streamers_diagnostics ------------------------------------------------------------
 
+
 def test_diagnostics_missing_file_is_not_unreadable(tmp_path):
     # A missing file is a legitimately empty fleet (e.g. first run), not a read failure.
     path = tmp_path / "streamers.json"
@@ -475,11 +537,16 @@ def test_diagnostics_detects_corrupt_json(tmp_path):
 
 def test_diagnostics_counts_entries_skipped_as_invalid(tmp_path):
     path = tmp_path / "streamers.json"
-    path.write_text(json.dumps([
-        {"name": "papaplatte", "url": "https://twitch.tv/papaplatte"},
-        {"name": "papaplatte", "url": "https://twitch.tv/papaplatte-dup"},  # duplicate name
-        {"name": "bad", "url": "https://twitch.tv/bad", "facecam_box": [0.1]},  # invalid shape
-    ]), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            [
+                {"name": "papaplatte", "url": "https://twitch.tv/papaplatte"},
+                {"name": "papaplatte", "url": "https://twitch.tv/papaplatte-dup"},  # duplicate name
+                {"name": "bad", "url": "https://twitch.tv/bad", "facecam_box": [0.1]},  # invalid shape
+            ]
+        ),
+        encoding="utf-8",
+    )
     diag = streamers.load_streamers_diagnostics(path)
     assert diag == {"unreadable": False, "raw_count": 3, "loaded_count": 1}
 

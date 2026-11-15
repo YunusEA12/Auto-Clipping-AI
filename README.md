@@ -1,90 +1,101 @@
-# Auto-Clipping-AI 🎬🤖
+# AutoClip · ClipMaster
 
-Auto-Clipping-AI ist eine modulare, hardware-schonende Python-Pipeline, die den gesamten Prozess der Content-Erstellung für TikTok automatisiert. Aktuell läuft die Pipeline im TikTok-only-Modus: YouTube-Uploads sind abgeschaltet (`upload_manager.YOUTUBE_UPLOADS_ENABLED`), das 9:16-Format eignet sich aber technisch auch für andere Kurzvideo-Plattformen. 
+CPU-orientierte Pipeline für deutsche Stream-Highlights: aufnehmen, transkribieren,
+Szenen auswählen, vertikal rendern, technisch prüfen und kontrolliert auf TikTok veröffentlichen.
+Der produktive Dauerbetrieb läuft auf dem Linux-VPS; der Windows-PC ist Entwicklungsumgebung.
+YouTube und Instagram sind zusätzliche Integrationen und standardmäßig deaktiviert.
 
-Das Tool nimmt lange Video-Dateien (oder Streams) entgegen, transkribiert diese lokal auf der CPU und nutzt Large Language Models (LLMs), um virale oder spannende Segmente semantisch zu erkennen. Anschließend wird das Video automatisch in ein 9:16 Split-Screen-Format (Facecam + Gameplay) gecroppt und mit dynamischen, wortgenauen Untertiteln versehen.
+## Aufbau
 
-## 🚀 Kernfunktionen
-- **Automatisierte Ingestion:** Herunterladen und Extrahieren von Audiospuren via `yt-dlp` und `FFmpeg`.
-- **Lokale Transkription:** CPU-optimiertes Speech-to-Text mit wortgenauen Timestamps (via `faster-whisper`).
-- **Intelligente Szenenauswahl:** Semantische Analyse des Transkripts durch LLMs, um die besten 30- bis 60-sekündigen Clips basierend auf Humor, Emotionen und Hooks zu finden.
-- **Auto-Compositing:** Vollautomatischer Schnitt, Split-Screen-Generierung (9:16) und Hardcoding von `.ass`-Untertiteln.
+```text
+src/autoclip/       installierbares Python-Paket mit elf Fachbereichen
+assets/branding/   freigegebenes ClipMaster-Profilbild und Profiltext
+config/            lokale Streamer-Konfiguration und editierbare Profile
+deploy/            systemd und reproduzierbarer Server-Update-Ablauf
+docs/              Architektur, Betrieb und Qualitätsbewertung
+tests/             isolierte Tests einschließlich UI und echtem FFmpeg-Render
+var/               private Zustände, Zugangsdaten, Medien und Prüfberichte
+```
 
-## 🛠️ Tech-Stack
-- **Sprache:** Python 3
-- **Media Processing:** FFmpeg, ffmpeg-python
-- **AI & NLP:** faster-whisper (lokal), LLM APIs (für strukturierte JSON-Szenenanalyse)
-- **Architektur:** Optimiert für Systeme ohne dedizierte Nvidia-GPU (Intel/CPU-Fokus).
+[Architektur](docs/architecture.md) · [Entwicklung](CONTRIBUTING.md) ·
+[Serverbetrieb](docs/operations.md) · [20 Bewertungskriterien](docs/quality/scorecard.md)
 
-## Lokal starten (Windows / PowerShell)
+## Lokal starten
 
-Voraussetzungen: Python >=3.11, [uv](https://docs.astral.sh/uv/getting-started/installation/)
-und FFmpeg/FFprobe auf `PATH`. API-Schlüssel stehen ausschließlich in der lokalen `.env`
-(Vorlage: `.env.example`). TikTok benötigt zusätzlich deine lokale `cookies.json`;
-siehe [README_UPLOAD.md](README_UPLOAD.md).
+Python 3.12, `uv`, FFmpeg und FFprobe müssen installiert sein. Keine CUDA-GPU erforderlich.
 
 ```powershell
-git pull --ff-only
 uv sync --locked --group dev
 uv run --locked playwright install chromium
+Copy-Item .env.example .env                # nur bei einer neuen Installation
+Copy-Item config/streamers.example.json config/streamers.json
 ./start.ps1 check
-./start.ps1                 # Dashboard auf http://127.0.0.1:8501
+./start.ps1                               # Dashboard: http://127.0.0.1:8501
 ```
 
-In einem zweiten Terminal startet `./start.ps1 supervisor` die Stream-Überwachung und
-die Metrikerfassung. Das Dashboard allein startet keine Hintergrundverarbeitung.
-Beenden mit Strg+C; Fleet-Pause/Start erfolgt im Dashboard. Automatische Veröffentlichungen
-richten sich nach `auto_upload` und `publish` je Streamer in `streamers.json`.
+API-Schlüssel ausschließlich in `.env` eintragen. Die Beispielkonfiguration veröffentlicht
+nichts. `./start.ps1 supervisor` startet die Verarbeitung separat vom Dashboard. Eine
+vorhandene Fleet-Pause bleibt nach Neustarts erhalten.
 
-„Clips behalten“ bedeutet nur, dass der Critic den Clip akzeptiert hat. Der separate
-Radar-Zähler „TikTok bestätigt“ zählt bestätigte Veröffentlichungen seit Agent-Start.
-Für lokale Verarbeitung erscheint ein eigener Hinweis. In der Streamer-Verwaltung müssen
-für echte Posts sowohl Auto-Upload als auch Veröffentlichen eingeschaltet sein; laufende
-Agenten laden geänderte Startoptionen erst beim Neustart. Nicht bestätigte Post-Klicks
-bleiben lokal und werden niemals als erfolgreiche Veröffentlichung gezählt.
-
-Die Startdatei verwendet immer `uv.lock` und `.venv`, unabhängig von einer eventuell noch
-vorhandenen alten `venv`. Keine manuelle Aktivierung erforderlich. Alternativ direkt:
-`uv run --locked python process_supervisor.py` bzw.
-`uv run --locked streamlit run app.py --server.address 127.0.0.1`.
-
-Prüfen: `./start.ps1 test` (Tests) und `./start.ps1 check` (lokale Voraussetzungen,
-einschließlich echtem Audiodecoding; keine API-Aufrufe oder Veröffentlichungen).
-Ein grüner lokaler Check bestätigt keine gültige TikTok-Sitzung. Diese lässt sich mit
-`uv run --locked python verify_tiktok_selectors.py --headless` separat prüfen.
-Editor- und Sound-Selektoren erscheinen erst nach Videoauswahl bzw. Öffnen des Sound-Panels.
-
-Abhängigkeiten gezielt aktualisieren: `uv lock --upgrade`, dann `uv sync --locked --group dev`
-und Tests ausführen. `av<19` ist absichtlich begrenzt: Faster-Whisper 1.2.1 verwendet einen
-in PyAV 19 entfernten Parameter; siehe [Upstream-Fehler #1589](https://github.com/SYSTRAN/faster-whisper/issues/1589).
-Die Decoder-Integration wird deshalb mit einer echten WAV-Datei ohne Modell-Download getestet.
-
-## Die nächsten zehn Clips prüfen
+Für ein bestehendes Checkout vor dem ersten Start von Version 0.2 alle lokalen Dienste
+stoppen und die Laufzeitdaten migrieren:
 
 ```powershell
-uv run --locked python clip_quality_audit.py --init --limit 10 --check-after-hours 12
-./start.ps1 audit
+uv run --locked autoclip migrate-runtime           # Vorschau
+uv run --locked autoclip migrate-runtime --apply   # Kollisionen werden nicht überschrieben
 ```
 
-Der laufende Autopilot sichert die nächsten zehn neu gerenderten Videos vor Löschung oder
-Upload in `quality_audit/`. Der separate Prüfer bewertet Video **mit Ton** und protokolliert
-je 0–10 für Schnitt, Untertiteltext/Timing, Textposition/Safe-Zone, Bildlayout, Audio,
-Sinn/Hook/Payoff und Viralitätspotenzial. Fehlende Evidenz ergibt „nicht prüfbar“.
-Die Prüfung läuft zusätzlich zum bisherigen Critic und verändert keine Veröffentlichungsfreigaben.
+Die Migration erhält Ledger, Tageszähler und Cookies, legt ein Manifest an und übersetzt
+gespeicherte Medienpfade. Neue Pfade stehen in [docs/operations.md](docs/operations.md).
 
-Ergebnisse: `quality_audit/report.md`, pro Clip `assessment.md/json`. Videos, Transkripte,
-Messwerte und Berichte bleiben privat und außerhalb von Git. Der erste Check nach zwölf Stunden
-wird unter `quality_audit/checkpoint_12h.md/json` gesichert. Er enthält nur tatsächlich gemessene
-Performance; eine Viralitätsprognose ist keine Garantie und ersetzt keine Watchtime-/Retention-Daten.
-Weniger als zehn neue Clips werden ausdrücklich als unvollständige Stichprobe ausgewiesen.
-Eine vorhandene Kampagne wird durch erneutes `--init` nicht zurückgesetzt.
+## Dienste und Veröffentlichung
 
-## Serverbetrieb
+```powershell
+uv run --locked autoclip --help
+uv run --locked autoclip supervisor
+uv run --locked autoclip uploads --once            # ohne --publish keine Posts
+uv run --locked autoclip qc-summary --limit 50
+uv run --locked autoclip audit --watch
+```
 
-Der Dauerbetrieb läuft seit dem 29.10.2026 auf dem Linux-Server (systemd-Dienste für
-Supervisor, Dashboard und Audit); der PC muss dafür **nicht** mehr eingeschaltet sein. Die
-lokale Windows-Fleet bleibt pausiert. Nur ein lokaler Chat-Follow-up des Codex-Checks braucht
-weiterhin den PC und die Desktop-App. Details: `obsidian_vault/02_wiki/Serverbetrieb.md`,
-Einrichtung: [SETUP_SERVER.md](SETUP_SERVER.md), Audit-Dienst: `deploy/auto-clipping-quality-audit.service`.
-Ein Git-Push allein aktualisiert keine laufenden Serverprozesse – ein Update muss auf dem
-Server explizit installiert und validiert werden.
+Der Supervisor überwacht Live-Aufnahmen, Metrikerfassung und einen eigenen Upload-Worker.
+Der Worker kann freigegebene Clips auch hochladen, wenn der betreffende Streamer offline ist.
+Er respektiert Fleet-Pause, `auto_upload` und `publish` je Streamer, Critic-Bewertung,
+technische QC, Duplikat-Ledger und globale Upload-Limits. Standard: maximal vier Versuche
+pro Tag, mindestens drei Stunden Abstand. Zurückgestellte Clips bleiben lokal.
+
+TikTok bietet in diesem Ablauf keinen verlässlichen Entwurfsmodus. Ohne explizites
+`publish=True` wird kein Upload-Browser geöffnet. Vorhandene Cookies bestätigen keinen
+gültigen Login; 100 % Übertragung bestätigen noch keinen veröffentlichten Post.
+
+[Sitzung einrichten und prüfen](README_UPLOAD.md) · [Profilmaterial](assets/branding/README.md)
+
+## Qualität und Nachweise
+
+```powershell
+./start.ps1 test
+uv run --locked ruff check .
+uv run --locked python -m scripts.check_repository
+uv build --wheel
+uv run --locked python -m scripts.check_wheel
+```
+
+CI prüft Windows und Linux, Lockfile/Requirements-Abgleich, Lint, Format, Paketgrenzen,
+Wheel-Inhalt und Tests mit Coverage. Tests verwenden ein isoliertes Anwendungsverzeichnis
+und blockieren echte Veröffentlichungen sowie bezahlte Modellaufrufe. Die Medienintegration
+rendert synthetisches Video mit ASS und Audio und prüft, dass die Quelle erhalten bleibt.
+
+Technische QC und KI-Urteile sind keine gemessene Zuschauerbindung. Die bestehende
+Audit-Kampagne dokumentiert zehn Bewertungen; Watchtime, Retention und Wachstum werden
+erst bewertet, wenn belastbare Messwerte vorliegen.
+
+## Produktiv aktualisieren
+
+```bash
+sudo bash deploy/update.sh
+```
+
+Ein Push aktualisiert die laufenden Dienste nicht. Das Wartungsskript stoppt sie, installiert
+die gesperrten Abhängigkeiten und den passenden Browser, migriert bei Bedarf, prüft und
+startet anschließend neu. Beim ersten Struktur-Upgrade sind zusätzlich die geprüften neuen
+systemd-Einstiegspunkte zu installieren: [SETUP_SERVER.md](SETUP_SERVER.md).

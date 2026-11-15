@@ -38,10 +38,9 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
-      # requirements.txt is what the production server installs from, while everything
-      # here is tested against uv.lock. If the two drift, CI goes green for versions the
-      # server never runs — which is exactly how a silent Playwright upgrade broke every
-      # upload on 2026-11-15. Regenerate with the command in requirements.txt's header.
+      # Production and CI both install uv.lock. Keep the requirements export consistent
+      # for environments that still need pip; a browser/version mismatch broke uploads
+      # on 2026-11-15. Regenerate with the command in requirements.txt's header.
       - name: requirements.txt matches uv.lock
         if: runner.os == 'Linux'
         run: |
@@ -53,4 +52,16 @@ jobs:
         if: runner.os == 'Linux'
         run: uv run --locked ruff check .
 
-      - run: uv run --locked pytest -q
+      - name: Format
+        run: uv run --locked ruff format --check src tests scripts app.py conftest.py
+
+      - name: Package boundaries and secret-path guard
+        run: uv run --locked python -m scripts.check_repository
+
+      - name: Build distributable wheel
+        run: uv build --wheel
+
+      - name: Verify wheel outside repository
+        run: uv run --locked python -m scripts.check_wheel
+
+      - run: uv run --locked pytest -q --cov=autoclip --cov-report=term --cov-report=xml:var/reports/coverage.xml

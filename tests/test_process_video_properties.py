@@ -3,16 +3,25 @@ import time
 
 import pytest
 
-import process
+from autoclip.rendering import process
 
 
 def _make_test_video(path, duration=3, size="64x64", fps=10):
     subprocess.run(
         [
-            "ffmpeg", "-y", "-f", "lavfi", "-i", f"testsrc=duration={duration}:size={size}:rate={fps}",
-            "-pix_fmt", "yuv420p", str(path),
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc=duration={duration}:size={size}:rate={fps}",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
         ],
-        capture_output=True, check=True, timeout=30,
+        capture_output=True,
+        check=True,
+        timeout=30,
     )
 
 
@@ -27,6 +36,7 @@ def test_video(tmp_path):
 
 
 # --- get_video_properties vs individual functions (M-02) -------------------------------
+
 
 def test_video_properties_matches_individual_functions(test_video):
     width, height, duration = process.get_video_properties(test_video)
@@ -47,6 +57,7 @@ def test_get_video_duration_still_works_standalone(test_video):
 
 
 # --- preview-frame extraction caching (L-05) --------------------------------------------
+
 
 def test_frame_extraction_is_cached_on_second_call(test_video, tmp_path):
     frames_dir = tmp_path / "frames"

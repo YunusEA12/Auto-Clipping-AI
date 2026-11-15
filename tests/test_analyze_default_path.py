@@ -1,6 +1,6 @@
 import pytest
 
-import analyze
+from autoclip.ai import analyze
 
 
 def test_analyze_default_transcription_path_respects_monkeypatch(tmp_path, monkeypatch):

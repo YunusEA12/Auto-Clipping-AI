@@ -1,7 +1,7 @@
 import subprocess
 from pathlib import Path
 
-import stream_watcher
+from autoclip.capture import stream_watcher
 
 # Captured before any test's autouse fixtures run (tests/conftest.py's _block_real_chunk_cleanup
 # patches stream_watcher.cleanup_stale_chunks to raise, project-wide, so no test accidentally
@@ -40,6 +40,7 @@ def _patch_subprocesses(monkeypatch, tmp_path):
 # cycles start a recording within the same wall-clock second used to collide on an identical
 # temp/live_chunk_<timestamp>.ts filename) --------------------------------------------------
 
+
 def test_chunk_filename_includes_streamer_slug_when_given(tmp_path, monkeypatch):
     _patch_subprocesses(monkeypatch, tmp_path)
     result = stream_watcher.record_stream_chunk("https://twitch.tv/x", duration=5, streamer_slug="eliasn97")
@@ -68,9 +69,11 @@ def test_two_streamers_same_second_get_different_filenames(tmp_path, monkeypatch
 # in auto_pilot.py cannot run if that process is killed abruptly (OOM, a restart mid-render).
 # This is an independent, periodic, age-based safety net for exactly those interrupted cycles.
 
+
 def _make_chunk(temp_dir, name, age_seconds, with_siblings=False):
     import os
     import time as time_mod
+
     path = temp_dir / f"{name}.ts"
     path.write_bytes(b"fake ts data")
     mtime = time_mod.time() - age_seconds
@@ -125,13 +128,15 @@ def test_cleanup_disk_pressure_deletes_additional_chunks_oldest_first(tmp_path, 
 
     import itertools
     from collections import namedtuple
+
     DiskUsage = namedtuple("DiskUsage", "total used free")
     # Free space climbs back above the floor (20GB) once enough has been deleted: 5GB, 15GB,
     # 25GB on the 1st/2nd/3rd call (the 3rd, after deleting 2 chunks, clears the floor), then
     # stays at 25GB for the function's own final status-log call.
     free_sequence_gb = itertools.chain([5, 15, 25], itertools.repeat(25))
     monkeypatch.setattr(
-        stream_watcher.shutil, "disk_usage",
+        stream_watcher.shutil,
+        "disk_usage",
         lambda path: DiskUsage(total=100 * 1024**3, used=0, free=int(next(free_sequence_gb) * 1e9)),
     )
 
@@ -186,6 +191,7 @@ def test_orchestrator_style_call_is_blocked_by_default(monkeypatch):
     # iteration) WITHOUT locally restoring the real cleanup_stale_chunks() must raise, not
     # silently touch the real TEMP_DIR.
     import pytest
+
     # Absichtlich breit: geprueft wird, DASS es scheitert statt stillschweigend das
     # echte TEMP_DIR anzufassen - welcher Fehlertyp dabei herauskommt, ist egal.
     with pytest.raises(Exception):  # noqa: B017

@@ -5,11 +5,19 @@
 - **Modularity Check:** Ensure any new code fits into the modular pipeline. Do not mix domains. UI features must go through `dashboard_api.py`, not directly into backend logic.
 
 ## Core Architecture & 24/7 Workflow
+Since version 0.2, production modules live under `src/autoclip/`, grouped by domain.
+Use the installed `autoclip` CLI and qualified imports. Mutable files are resolved through
+`autoclip.runtime.path`: configuration in `config/`, state/media/secrets in ignored `var/`.
+The filenames below identify modules, not legacy root-level scripts. See `AGENTS.md`
+and `docs/architecture.md` for the canonical layout and test/deployment commands.
+
 The system has evolved from a manual script to an autonomous 24/7 supervisor-driven pipeline.
 - **Phase 1 (Supervision & Monitoring):** `process_supervisor.py` manages `orchestrator.py` and `metrics_tracker.py`. Real-time stream ingestion is handled by `stream_watcher.py` (Twitch).
 - **Phase 2 (Analysis & Vision Critic):** `auto_pilot.py` manages Audio Extraction -> Whisper Transcription -> LLM Analysis -> `train_loop.py` (Vision Critic / AI Feedback loop).
 - **Phase 3 (Render & Output):** `process.py` uses FFmpeg for rendering -> `tiktok_uploader.py` handles Playwright automation.
 - **Dashboard:** `app.py` (Streamlit) provides read-only oversight and configuration, strictly decoupled via `dashboard_api.py`.
+- **Independent uploads:** the supervisor also manages `control/upload_worker.py`; it respects
+  fleet pause, enabled streamer flags, critic/QC gates, the ledger and global pacing even when no stream is live.
 
 ## TikTok Upload Safety Model (CRITICAL)
 - **No Implicit Drafts:** TikTok Web no longer reliably saves drafts when closing the browser without clicking anything. 

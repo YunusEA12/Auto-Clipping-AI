@@ -27,12 +27,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import logging_setup
+from autoclip import runtime
+from autoclip.core import logging_setup
 
 logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _runtime_path(name):
+    if name == "top_performers.json":
+        return runtime.RESOURCES / name
+    return runtime.path(name, home=REPO_ROOT)
+
 
 # Learned from the old account's (throttled) performance numbers. Keeping these would teach
 # the new account's analysis the patterns of an account TikTok had already stopped showing.
@@ -66,7 +74,10 @@ def _is_git_tracked(relative_path: str) -> bool:
     try:
         result = subprocess.run(
             ["git", "ls-files", "--error-unmatch", relative_path],
-            cwd=REPO_ROOT, capture_output=True, text=True, check=False,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
         )
     except OSError:
         return False
@@ -81,7 +92,18 @@ def _fleet_is_running() -> list:
         logger.warning("psutil not available — cannot verify the fleet is stopped. Make sure it is.")
         return []
 
-    watched = {"process_supervisor.py", "orchestrator.py", "auto_pilot.py", "metrics_tracker.py"}
+    watched = {
+        "process_supervisor.py",
+        "orchestrator.py",
+        "auto_pilot.py",
+        "metrics_tracker.py",
+        "upload_worker.py",
+        "autoclip.control.process_supervisor",
+        "autoclip.control.orchestrator",
+        "autoclip.control.auto_pilot",
+        "autoclip.observability.metrics_tracker",
+        "autoclip.control.upload_worker",
+    }
     running = []
     for proc in psutil.process_iter(["name", "cmdline"]):
         try:
@@ -99,10 +121,14 @@ def _fleet_is_running() -> list:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Reset per-account state for a TikTok account switch.")
     parser.add_argument("--dry-run", action="store_true", help="Only print what would change.")
-    parser.add_argument("--clear-output", action="store_true",
-                        help="Also move rendered clips out of output/ so the new account starts fresh.")
-    parser.add_argument("--force", action="store_true",
-                        help="Proceed even though pipeline processes appear to be running.")
+    parser.add_argument(
+        "--clear-output",
+        action="store_true",
+        help="Also move rendered clips out of output/ so the new account starts fresh.",
+    )
+    parser.add_argument(
+        "--force", action="store_true", help="Proceed even though pipeline processes appear to be running."
+    )
     args = parser.parse_args()
 
     running = _fleet_is_running()
@@ -110,12 +136,13 @@ def main() -> int:
         logger.error(
             "These pipeline processes are still running: %s. Stop the fleet first (dashboard, or "
             "`sudo systemctl stop auto-clipping-supervisor` on the server), then re-run. "
-            "Use --force to override.", ", ".join(running),
+            "Use --force to override.",
+            ", ".join(running),
         )
         return 1
 
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup_dir = REPO_ROOT / f"backup_alter_account/{stamp}"
+    backup_dir = _runtime_path("backup_alter_account") / stamp
     prefix = "[dry-run] " if args.dry_run else ""
 
     if not args.dry_run:
@@ -123,14 +150,14 @@ def main() -> int:
 
     moved = 0
     for name in ARCHIVE_FILES:
-        src = REPO_ROOT / name
+        src = _runtime_path(name)
         if not src.exists():
             logger.info("%s%s: not present, skipping", prefix, name)
             continue
         if _is_git_tracked(name):
             logger.warning(
-                "%s is tracked by git, so it is repository content rather than account state "
-                "— leaving it alone.", name,
+                "%s is tracked by git, so it is repository content rather than account state — leaving it alone.",
+                name,
             )
             continue
         logger.info("%sarchiving %s -> %s", prefix, name, backup_dir.relative_to(REPO_ROOT) / name)
@@ -139,7 +166,7 @@ def main() -> int:
         moved += 1
 
     for name in DELETE_FILES:
-        target = REPO_ROOT / name
+        target = _runtime_path(name)
         if not target.exists():
             logger.info("%s%s: not present, skipping", prefix, name)
             continue
@@ -148,29 +175,31 @@ def main() -> int:
             target.unlink()
 
     for name in DELETE_DIRS:
-        target = REPO_ROOT / name
+        target = _runtime_path(name)
         if not target.exists():
             continue
         logger.info("%sdeleting directory %s", prefix, name)
         if not args.dry_run:
-            shutil.rmtree(target, ignore_errors=True)
+            if not target.resolve().is_relative_to(REPO_ROOT.resolve()):
+                raise ValueError("Browser profile escapes application home")
+            shutil.move(str(target), str(backup_dir / "browser_profile"))
 
     if args.clear_output:
-        output_dir = REPO_ROOT / "output"
-        clips = sorted(output_dir.glob("*.mp4")) if output_dir.exists() else []
+        output_dir = _runtime_path("output")
+        clips = sorted(output_dir.rglob("*.mp4")) if output_dir.exists() else []
         if clips:
             parked = backup_dir / "output"
-            logger.info("%smoving %d rendered clip(s) out of output/ -> %s", prefix, len(clips),
-                        parked.relative_to(REPO_ROOT))
+            logger.info(
+                "%smoving %d rendered clip(s) out of output/ -> %s", prefix, len(clips), parked.relative_to(REPO_ROOT)
+            )
             if not args.dry_run:
-                parked.mkdir(parents=True, exist_ok=True)
-                for clip in clips:
-                    shutil.move(str(clip), str(parked / clip.name))
+                shutil.move(str(output_dir), str(parked))
+                output_dir.mkdir(parents=True)
         else:
             logger.info("%soutput/: no rendered clips to move", prefix)
 
     for name in KEEP_FILES:
-        if (REPO_ROOT / name).exists():
+        if _runtime_path(name).exists():
             logger.info("keeping %s (intentionally)", name)
 
     logger.info("")
@@ -180,8 +209,8 @@ def main() -> int:
 
     logger.info("✅ Per-account state reset. Archive: %s", backup_dir.relative_to(REPO_ROOT))
     logger.info("Next: 1) log into the NEW account in your normal browser and close it,")
-    logger.info("      2) python get_cookies.py")
-    logger.info("      3) python verify_tiktok_selectors.py --headless")
+    logger.info("      2) autoclip cookies")
+    logger.info("      3) autoclip verify-session --headless")
     if moved:
         logger.info("      (the archived learning files stay on disk — delete them yourself once happy)")
     return 0

@@ -3,10 +3,10 @@ import platform
 
 import pytest
 
-import atomic_io
-
+from autoclip.core import atomic_io
 
 # --- secure_file_permissions (M-07) -------------------------------------------------------
+
 
 def test_secure_file_permissions_never_raises_on_a_real_file(tmp_path):
     target = tmp_path / "cookies.json"

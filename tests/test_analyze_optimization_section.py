@@ -1,5 +1,5 @@
-import analyze
-import optimization_engine
+from autoclip.ai import analyze
+from autoclip.observability import optimization_engine
 
 
 def test_load_optimization_preferences_section_empty_when_no_state(monkeypatch, tmp_path):

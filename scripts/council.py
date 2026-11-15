@@ -72,12 +72,14 @@ def check_sensitive(text: str, blocklist: List[str]) -> None:
         match = pattern.search(text)
         if match:
             raise SensitiveContentError(
-                f"Mögliches Geheimnis gefunden ({match.group(0)[:12]}…). Stelle schwärzen, z. B. <SECRET>.")
+                f"Mögliches Geheimnis gefunden ({match.group(0)[:12]}…). Stelle schwärzen, z. B. <SECRET>."
+            )
     lowered = text.lower()
     for term in blocklist:
         if term and term.lower() in lowered:
             raise SensitiveContentError(
-                f"Begriff von der Sperrliste gefunden: {term!r}. Inhalt weglassen oder Nutzer fragen.")
+                f"Begriff von der Sperrliste gefunden: {term!r}. Inhalt weglassen oder Nutzer fragen."
+            )
 
 
 def load_blocklist(jobs_dir: Path = JOBS_DIR) -> List[str]:
@@ -122,8 +124,9 @@ def _redact(text: str) -> str:
     return text.replace(value, "<SECRET>") if value else text
 
 
-def run_job(mode: str, question: str, context: str, own_answer: str,
-            jobs_dir: Path = JOBS_DIR, gemini=ask_gemini) -> dict:
+def run_job(
+    mode: str, question: str, context: str, own_answer: str, jobs_dir: Path = JOBS_DIR, gemini=ask_gemini
+) -> dict:
     prompt = build_prompt(mode, question, context)
     if len(prompt) > MAX_CONTEXT_CHARS:
         raise ValueError(f"Kontext zu groß ({len(prompt)} Zeichen, max. {MAX_CONTEXT_CHARS}). Auszüge senden.")
@@ -133,16 +136,23 @@ def run_job(mode: str, question: str, context: str, own_answer: str,
     try:
         review = {"ok": True, "text": gemini(prompt)}
     except Exception as e:  # a provider failure is reported, never fatal
-        review = {"ok": False, "text": "Gemini-Gutachten nicht verfügbar.",
-                  "error": f"{type(e).__name__}: {_redact(str(e))[:300]}"}
+        review = {
+            "ok": False,
+            "text": "Gemini-Gutachten nicht verfügbar.",
+            "error": f"{type(e).__name__}: {_redact(str(e))[:300]}",
+        }
 
     job_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
     jobs_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = jobs_dir / f"{job_id}-chatgpt-prompt.md"
     prompt_path.write_text(chatgpt_prompt(prompt), encoding="utf-8")
     job = {
-        "job_id": job_id, "created_at": datetime.now(timezone.utc).isoformat(), "mode": mode,
-        "question": question, "own_answer": own_answer, "gemini": review,
+        "job_id": job_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "mode": mode,
+        "question": question,
+        "own_answer": own_answer,
+        "gemini": review,
         "chatgpt_prompt": str(prompt_path),
     }
     (jobs_dir / f"{job_id}.json").write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -166,8 +176,11 @@ def status(jobs_dir: Path = JOBS_DIR) -> str:
         f"Gemini-Modell: {os.environ.get('COUNCIL_GEMINI_MODEL', DEFAULT_GEMINI_MODEL)} (Gratis-Tarif)",
         "GPT: manuell über die ChatGPT-App (kostenlos)",
     ]
-    jobs = ([json.loads(p.read_text(encoding="utf-8")) for p in sorted(jobs_dir.glob("*.json"))]
-            if jobs_dir.exists() else [])
+    jobs = (
+        [json.loads(p.read_text(encoding="utf-8")) for p in sorted(jobs_dir.glob("*.json"))]
+        if jobs_dir.exists()
+        else []
+    )
     ok = sum(1 for j in jobs if j["gemini"]["ok"])
     lines.append(f"Jobs: {len(jobs)} (Gemini: {ok} erfolgreich, {len(jobs) - ok} ausgefallen)")
     failed = [j["gemini"].get("error") for j in jobs if not j["gemini"]["ok"]]
@@ -176,8 +189,10 @@ def status(jobs_dir: Path = JOBS_DIR) -> str:
     rated = [j for j in jobs if "contribution" in j]
     if rated:
         total = sum(j["contribution"] for j in rated)
-        lines.append(f"Mehrwert: {total} berechtigte neue Punkte in {len(rated)} bewerteten Jobs "
-                     f"({sum(1 for j in rated if j['contribution'] == 0)} ohne neuen Beitrag)")
+        lines.append(
+            f"Mehrwert: {total} berechtigte neue Punkte in {len(rated)} bewerteten Jobs "
+            f"({sum(1 for j in rated if j['contribution'] == 0)} ohne neuen Beitrag)"
+        )
     return "\n".join(lines)
 
 
@@ -204,6 +219,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         from dotenv import load_dotenv
+
         load_dotenv(ROOT / ".env")
     except ImportError:
         pass

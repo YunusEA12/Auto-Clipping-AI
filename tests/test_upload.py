@@ -5,10 +5,10 @@ CLI (upload_video()/upload_all()), which stays untouched (still defaults to priv
 import pytest
 from googleapiclient.errors import HttpError
 
-import upload
-
+from autoclip.publishing import upload
 
 # --- _append_shorts_tag (pure function) ------------------------------------------------------
+
 
 def test_append_shorts_tag_adds_tag_when_absent():
     assert upload._append_shorts_tag("Cool clip") == "Cool clip #shorts"
@@ -41,6 +41,7 @@ def test_append_shorts_tag_existing_tag_still_truncated_to_max_length():
 
 
 # --- upload_clip() body construction ----------------------------------------------------------
+
 
 class FakeRequest:
     def __init__(self, video_id="abc123"):
@@ -152,6 +153,7 @@ def test_upload_clip_always_includes_shorts_in_tags_without_duplicating(fake_you
 # --- upload_all()/upload_video() untouched (2026-08-20: still the manual/batch CLI path,
 # deliberately left at its existing private default) -------------------------------------------
 
+
 def test_upload_video_still_defaults_to_private():
     assert upload.PRIVACY_STATUS == "private"
 
@@ -219,7 +221,8 @@ def test_get_stats_service_builds_client_for_already_valid_token(tmp_path, monke
     token_path.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(upload, "TOKEN_PATH", token_path)
     monkeypatch.setattr(
-        upload.Credentials, "from_authorized_user_file",
+        upload.Credentials,
+        "from_authorized_user_file",
         classmethod(lambda cls, path, scopes: FakeCreds(valid=True)),
     )
     sentinel = object()
@@ -234,7 +237,8 @@ def test_get_stats_service_refreshes_expired_token_non_interactively(tmp_path, m
     monkeypatch.setattr(upload, "TOKEN_PATH", token_path)
     fake_creds = FakeCreds(valid=False, expired=True, refresh_token="rt")
     monkeypatch.setattr(
-        upload.Credentials, "from_authorized_user_file",
+        upload.Credentials,
+        "from_authorized_user_file",
         classmethod(lambda cls, path, scopes: fake_creds),
     )
     monkeypatch.setattr(upload, "build", lambda *a, **k: object())
@@ -250,14 +254,18 @@ def test_get_stats_service_refreshes_expired_token_non_interactively(tmp_path, m
 # 403 earlier the same session: a stored token issued before SCOPES grew a new entry keeps
 # whatever it was originally granted forever, and refresh() can't add a scope) --------------
 
-def test_get_stats_service_returns_none_when_token_missing_required_scope(tmp_path, monkeypatch, real_get_stats_service):
+
+def test_get_stats_service_returns_none_when_token_missing_required_scope(
+    tmp_path, monkeypatch, real_get_stats_service
+):
     token_path = tmp_path / "token.json"
     token_path.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(upload, "TOKEN_PATH", token_path)
     # Only youtube.upload, missing youtube.readonly — exactly the pre-fix token.json shape.
     stale_creds = FakeCreds(valid=True, scopes=["https://www.googleapis.com/auth/youtube.upload"])
     monkeypatch.setattr(
-        upload.Credentials, "from_authorized_user_file",
+        upload.Credentials,
+        "from_authorized_user_file",
         classmethod(lambda cls, path, scopes: stale_creds),
     )
     monkeypatch.setattr(upload, "build", lambda *a, **k: object())
@@ -265,7 +273,9 @@ def test_get_stats_service_returns_none_when_token_missing_required_scope(tmp_pa
     assert upload.get_stats_service() is None
 
 
-def test_get_authenticated_service_still_returns_a_client_when_scope_missing(tmp_path, monkeypatch, real_get_authenticated_service):
+def test_get_authenticated_service_still_returns_a_client_when_scope_missing(
+    tmp_path, monkeypatch, real_get_authenticated_service
+):
     # get_authenticated_service() (the real upload path) warns but doesn't fail outright on a
     # scope-insufficient token — forcing reauth here would hang on a headless VPS with no
     # browser, the exact problem get_stats_service() was split out to avoid.
@@ -277,7 +287,8 @@ def test_get_authenticated_service_still_returns_a_client_when_scope_missing(tmp
     monkeypatch.setattr(upload, "CLIENT_SECRET_PATH", client_secret_path)
     stale_creds = FakeCreds(valid=True, scopes=["https://www.googleapis.com/auth/youtube.upload"])
     monkeypatch.setattr(
-        upload.Credentials, "from_authorized_user_file",
+        upload.Credentials,
+        "from_authorized_user_file",
         classmethod(lambda cls, path, scopes: stale_creds),
     )
     sentinel = object()
@@ -291,7 +302,9 @@ def test_missing_scopes_empty_when_all_scopes_present():
     assert upload._missing_scopes(creds) == set()
 
 
-def test_get_stats_service_returns_none_when_expired_without_refresh_token(tmp_path, monkeypatch, real_get_stats_service):
+def test_get_stats_service_returns_none_when_expired_without_refresh_token(
+    tmp_path, monkeypatch, real_get_stats_service
+):
     # Must NOT fall through to the interactive flow.run_local_server() flow -- that would hang
     # forever on a headless VPS with no browser to complete it in.
     token_path = tmp_path / "token.json"
@@ -299,7 +312,8 @@ def test_get_stats_service_returns_none_when_expired_without_refresh_token(tmp_p
     monkeypatch.setattr(upload, "TOKEN_PATH", token_path)
     fake_creds = FakeCreds(valid=False, expired=True, refresh_token=None)
     monkeypatch.setattr(
-        upload.Credentials, "from_authorized_user_file",
+        upload.Credentials,
+        "from_authorized_user_file",
         classmethod(lambda cls, path, scopes: fake_creds),
     )
 
@@ -312,7 +326,8 @@ def test_get_stats_service_returns_none_when_refresh_raises(tmp_path, monkeypatc
     monkeypatch.setattr(upload, "TOKEN_PATH", token_path)
     fake_creds = FakeCreds(valid=False, expired=True, refresh_token="rt", raise_on_refresh=True)
     monkeypatch.setattr(
-        upload.Credentials, "from_authorized_user_file",
+        upload.Credentials,
+        "from_authorized_user_file",
         classmethod(lambda cls, path, scopes: fake_creds),
     )
 
@@ -321,9 +336,11 @@ def test_get_stats_service_returns_none_when_refresh_raises(tmp_path, monkeypatc
 
 # --- fetch_video_stats() (2026-08-21) ---------------------------------------------------------
 
+
 def _fake_http_error(status=500):
     class Resp:
         reason = "Server Error"
+
     Resp.status = status
     return HttpError(Resp(), b"error content")
 
@@ -341,6 +358,7 @@ class _FakeVideosListRequest:
 
 class _FakeVideosResource:
     """Returns one canned response/error per call, in order."""
+
     def __init__(self, responses=None, errors=None):
         self._queue = list(responses or [])
         self._error_queue = list(errors or [])
@@ -362,9 +380,9 @@ class _FakeYouTubeClient:
 
 
 def test_fetch_video_stats_parses_view_and_like_counts():
-    youtube = _FakeYouTubeClient(responses=[
-        {"items": [{"id": "abc", "statistics": {"viewCount": "1234", "likeCount": "56"}}]}
-    ])
+    youtube = _FakeYouTubeClient(
+        responses=[{"items": [{"id": "abc", "statistics": {"viewCount": "1234", "likeCount": "56"}}]}]
+    )
 
     stats = upload.fetch_video_stats(youtube, ["abc"])
 

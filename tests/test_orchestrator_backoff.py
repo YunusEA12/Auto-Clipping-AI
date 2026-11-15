@@ -1,29 +1,34 @@
-import streamers as streamers_module
-
-import optimization_engine
-import orchestrator
-import stream_watcher
-import upload_ledger
-
+from autoclip.capture import stream_watcher
+from autoclip.configuration import streamers as streamers_module
+from autoclip.control import orchestrator
+from autoclip.observability import optimization_engine
+from autoclip.publishing import upload_ledger
 
 # --- build_auto_pilot_cmd's publish threading (safety-model correction, 2026-08-18: TikTok
 # has no draft-save action, so --publish must only ever be passed through when the
 # streamer's own config explicitly opts into it, not whenever auto_upload is on) ----------
 
+
 def test_cmd_never_includes_publish_when_auto_upload_is_off():
-    cmd = orchestrator.build_auto_pilot_cmd({"name": "x", "url": "https://twitch.tv/x", "auto_upload": False, "publish": True})
+    cmd = orchestrator.build_auto_pilot_cmd(
+        {"name": "x", "url": "https://twitch.tv/x", "auto_upload": False, "publish": True}
+    )
     assert "--auto-upload" not in cmd
     assert "--publish" not in cmd
 
 
 def test_cmd_omits_publish_when_auto_upload_on_but_publish_off():
-    cmd = orchestrator.build_auto_pilot_cmd({"name": "x", "url": "https://twitch.tv/x", "auto_upload": True, "publish": False})
+    cmd = orchestrator.build_auto_pilot_cmd(
+        {"name": "x", "url": "https://twitch.tv/x", "auto_upload": True, "publish": False}
+    )
     assert "--auto-upload" in cmd
     assert "--publish" not in cmd
 
 
 def test_cmd_includes_publish_only_when_both_flags_set():
-    cmd = orchestrator.build_auto_pilot_cmd({"name": "x", "url": "https://twitch.tv/x", "auto_upload": True, "publish": True})
+    cmd = orchestrator.build_auto_pilot_cmd(
+        {"name": "x", "url": "https://twitch.tv/x", "auto_upload": True, "publish": True}
+    )
     assert "--auto-upload" in cmd
     assert "--publish" in cmd
 
@@ -38,6 +43,7 @@ def test_cmd_omits_publish_when_missing_from_entry_entirely():
 # --- build_auto_pilot_cmd's instagram threading (2026-08-21) — a separate opt-in from
 # publish itself, since upload_instagram_playwright.py's automation has never been verified
 # against a live session; must default off even for a streamer already publishing live -----
+
 
 def test_cmd_omits_instagram_when_publish_on_but_instagram_off():
     cmd = orchestrator.build_auto_pilot_cmd(
@@ -77,6 +83,7 @@ def test_cmd_omits_instagram_when_instagram_set_but_publish_off():
 
 # --- --streamer-name always threaded through (2026-08-18: H-14 — without it, two streamers
 # live at once share agent_state.json, output/, and recording chunk filenames) -------------
+
 
 def test_cmd_always_includes_streamer_name():
     cmd = orchestrator.build_auto_pilot_cmd({"name": "eliasn97", "url": "https://twitch.tv/eliasn97"})

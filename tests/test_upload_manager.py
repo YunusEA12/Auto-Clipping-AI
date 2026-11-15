@@ -18,11 +18,16 @@ from pathlib import Path
 import pytest
 from googleapiclient.errors import HttpError
 
-import tiktok_uploader
-import upload as youtube_uploader
-import upload_instagram_playwright as instagram_uploader
-import upload_ledger
-import upload_manager
+from autoclip.publishing import tiktok_uploader, upload_ledger, upload_manager
+from autoclip.publishing import upload as youtube_uploader
+from autoclip.publishing import upload_instagram_playwright as instagram_uploader
+
+
+def test_corrupt_pacing_state_never_resets_daily_quota():
+    upload_manager.UPLOAD_PACING_STATE_PATH.write_text("{broken")
+    assert upload_manager.tiktok_pacing_status()["ready"] is False
+    assert upload_manager._try_reserve_upload_pacing_slot("tiktok", 10800, 4) is False
+    assert upload_manager.UPLOAD_PACING_STATE_PATH.read_text() == "{broken"
 
 
 class FakeHttpResponse:
@@ -83,6 +88,7 @@ def fake_tiktok_failure(monkeypatch):
 
 # --- publish=False gates BOTH platforms identically -------------------------------------------
 
+
 def test_publish_false_skips_youtube_without_calling_it(monkeypatch, fake_tiktok_success, clip_path):
     called = []
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: called.append(1))
@@ -100,7 +106,8 @@ def test_publish_false_still_calls_tiktok_which_no_ops_internally(monkeypatch, c
     # existing behavior (and tiktok_uploader's own logging of the no-op) is preserved.
     calls = []
     monkeypatch.setattr(
-        tiktok_uploader, "try_upload_clip",
+        tiktok_uploader,
+        "try_upload_clip",
         lambda *a, **k: calls.append(k) or tiktok_uploader.UploadOutcome(success=False, confirmed=False),
     )
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
@@ -112,6 +119,7 @@ def test_publish_false_still_calls_tiktok_which_no_ops_internally(monkeypatch, c
 
 
 # --- publish=True: both platforms actually attempted, with a delay between them ---------------
+
 
 def test_publish_true_attempts_both_platforms(monkeypatch, fake_tiktok_success, clip_path):
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-video-id")
@@ -152,6 +160,7 @@ def test_publish_false_never_sleeps(monkeypatch, fake_tiktok_failure, clip_path)
 # blocking sleep here stalled the entire per-streamer capture loop, not just the upload step —
 # found live the next day). Isolated from the real state file by tests/conftest.py's autouse
 # _isolated_upload_pacing_state fixture.
+
 
 def test_reserve_never_sleeps_and_grants_the_first_ever_attempt(monkeypatch, tmp_path):
     monkeypatch.setattr(upload_manager, "UPLOAD_PACING_STATE_PATH", tmp_path / "pacing.json")
@@ -263,14 +272,18 @@ def test_denied_slot_is_not_a_regression_to_blocking_the_caller(monkeypatch, tmp
     result = upload_manager.upload_clip_everywhere(clip_path, "Title", "desc", publish=True)
 
     assert result.tiktok.success is False  # denied this cycle, not attempted
-    assert all(s <= upload_manager.UPLOAD_DELAY_MAX_SECONDS for s in sleep_calls)  # only the platform stagger, never a 9999s pacing wait
+    assert all(
+        s <= upload_manager.UPLOAD_DELAY_MAX_SECONDS for s in sleep_calls
+    )  # only the platform stagger, never a 9999s pacing wait
 
 
 # --- a YouTube failure never propagates past this module ---------------------------------------
 
+
 def test_youtube_generic_exception_does_not_raise(monkeypatch, fake_tiktok_success, clip_path):
     def boom(*a, **k):
         raise RuntimeError("network blip")
+
     monkeypatch.setattr(youtube_uploader, "upload_clip", boom)
 
     result = upload_manager.upload_clip_everywhere(clip_path, "Title", "desc", publish=True)
@@ -284,6 +297,7 @@ def test_youtube_generic_exception_does_not_raise(monkeypatch, fake_tiktok_succe
 def test_youtube_quota_http_error_does_not_raise(monkeypatch, fake_tiktok_success, clip_path):
     def boom(*a, **k):
         raise _make_http_error(403, b'{"error": {"errors": [{"reason": "quotaExceeded"}]}}')
+
     monkeypatch.setattr(youtube_uploader, "upload_clip", boom)
 
     result = upload_manager.upload_clip_everywhere(clip_path, "Title", "desc", publish=True)
@@ -295,6 +309,7 @@ def test_youtube_quota_http_error_does_not_raise(monkeypatch, fake_tiktok_succes
 def test_youtube_non_quota_http_error_does_not_raise(monkeypatch, fake_tiktok_success, clip_path):
     def boom(*a, **k):
         raise _make_http_error(500, b"server error")
+
     monkeypatch.setattr(youtube_uploader, "upload_clip", boom)
 
     result = upload_manager.upload_clip_everywhere(clip_path, "Title", "desc", publish=True)
@@ -313,11 +328,14 @@ UPLOAD_LIMIT_ERROR = (
 )
 
 
-def test_upload_limit_exceeded_records_backoff_and_does_not_raise(monkeypatch, tmp_path, fake_tiktok_success, clip_path):
+def test_upload_limit_exceeded_records_backoff_and_does_not_raise(
+    monkeypatch, tmp_path, fake_tiktok_success, clip_path
+):
     monkeypatch.setattr(upload_manager, "UPLOAD_LIMIT_BACKOFF_PATH", tmp_path / "backoff.json")
 
     def boom(*a, **k):
         raise _make_http_error(400, UPLOAD_LIMIT_ERROR)
+
     monkeypatch.setattr(youtube_uploader, "upload_clip", boom)
 
     result = upload_manager.upload_clip_everywhere(clip_path, "Title", "desc", publish=True)
@@ -334,6 +352,7 @@ def test_second_attempt_during_backoff_skips_the_real_api_call(monkeypatch, tmp_
     def boom(*a, **k):
         calls.append(1)
         raise _make_http_error(400, UPLOAD_LIMIT_ERROR)
+
     monkeypatch.setattr(youtube_uploader, "upload_clip", boom)
 
     clip_1 = tmp_path / "clip_1.mp4"
@@ -377,19 +396,22 @@ def test_backoff_clears_after_the_window_elapses(monkeypatch, tmp_path, fake_tik
 
 DAILY_VIDEO_QUOTA_ERROR = (
     b'{"error": {"message": "Quota exceeded for quota metric \'Video Uploads\' and limit '
-    b'\'Video Uploads per day\' of service \'youtube.googleapis.com\' for consumer '
+    b"'Video Uploads per day' of service 'youtube.googleapis.com' for consumer "
     b'\'project_number:736355812141\'.", "errors": [{"reason": "rateLimitExceeded", '
     b'"domain": "global", "message": "Quota exceeded for quota metric \'Video Uploads\' and '
-    b'limit \'Video Uploads per day\' of service \'youtube.googleapis.com\' for consumer '
-    b'\'project_number:736355812141\'."}]}}'
+    b"limit 'Video Uploads per day' of service 'youtube.googleapis.com' for consumer "
+    b"'project_number:736355812141'.\"}]}}"
 )
 
 
-def test_daily_video_quota_429_records_backoff_and_does_not_raise(monkeypatch, tmp_path, fake_tiktok_success, clip_path):
+def test_daily_video_quota_429_records_backoff_and_does_not_raise(
+    monkeypatch, tmp_path, fake_tiktok_success, clip_path
+):
     monkeypatch.setattr(upload_manager, "UPLOAD_LIMIT_BACKOFF_PATH", tmp_path / "backoff.json")
 
     def boom(*a, **k):
         raise _make_http_error(429, DAILY_VIDEO_QUOTA_ERROR)
+
     monkeypatch.setattr(youtube_uploader, "upload_clip", boom)
 
     result = upload_manager.upload_clip_everywhere(clip_path, "Title", "desc", publish=True)
@@ -399,13 +421,16 @@ def test_daily_video_quota_429_records_backoff_and_does_not_raise(monkeypatch, t
     assert upload_manager._upload_limit_backoff_until() is not None
 
 
-def test_second_attempt_during_daily_video_quota_backoff_skips_the_real_api_call(monkeypatch, tmp_path, fake_tiktok_success):
+def test_second_attempt_during_daily_video_quota_backoff_skips_the_real_api_call(
+    monkeypatch, tmp_path, fake_tiktok_success
+):
     monkeypatch.setattr(upload_manager, "UPLOAD_LIMIT_BACKOFF_PATH", tmp_path / "backoff.json")
     calls = []
 
     def boom(*a, **k):
         calls.append(1)
         raise _make_http_error(429, DAILY_VIDEO_QUOTA_ERROR)
+
     monkeypatch.setattr(youtube_uploader, "upload_clip", boom)
 
     clip_1 = tmp_path / "clip_1.mp4"
@@ -422,7 +447,9 @@ def test_second_attempt_during_daily_video_quota_backoff_skips_the_real_api_call
     assert result.youtube.success is False
 
 
-def test_quota_exceeded_and_upload_limit_exceeded_are_detected_distinctly(monkeypatch, tmp_path, fake_tiktok_success, clip_path):
+def test_quota_exceeded_and_upload_limit_exceeded_are_detected_distinctly(
+    monkeypatch, tmp_path, fake_tiktok_success, clip_path
+):
     # A 403 quotaExceeded must NOT be mistaken for the 400 uploadLimitExceeded case -- they
     # need different handling (quota resets are a Google Cloud project concern, not this
     # channel's own daily cap) and must not share the same backoff state.
@@ -430,6 +457,7 @@ def test_quota_exceeded_and_upload_limit_exceeded_are_detected_distinctly(monkey
 
     def boom(*a, **k):
         raise _make_http_error(403, b'{"error": {"errors": [{"reason": "quotaExceeded"}]}}')
+
     monkeypatch.setattr(youtube_uploader, "upload_clip", boom)
 
     upload_manager.upload_clip_everywhere(clip_path, "Title", "desc", publish=True)
@@ -438,6 +466,7 @@ def test_quota_exceeded_and_upload_limit_exceeded_are_detected_distinctly(monkey
 
 
 # --- MultiPlatformOutcome.any_success ----------------------------------------------------------
+
 
 def test_any_success_true_when_only_tiktok_succeeds(monkeypatch, fake_tiktok_success, clip_path):
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
@@ -461,7 +490,8 @@ def test_any_success_false_when_tiktok_succeeds_but_unconfirmed(monkeypatch, cli
     # success=True but confirmed=False must NOT count as a real success (matches how
     # auto_pilot.py itself treats an unconfirmed click as a failure).
     monkeypatch.setattr(
-        tiktok_uploader, "try_upload_clip",
+        tiktok_uploader,
+        "try_upload_clip",
         lambda *a, **k: tiktok_uploader.UploadOutcome(success=True, confirmed=False),
     )
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
@@ -473,14 +503,20 @@ def test_any_success_false_when_tiktok_succeeds_but_unconfirmed(monkeypatch, cli
 
 # --- add_background_sound passthrough (2026-08-19 feature, must survive this refactor) --------
 
+
 def test_add_background_sound_flag_passed_through_to_tiktok(monkeypatch, fake_tiktok_success, clip_path):
     calls = []
     monkeypatch.setattr(
-        tiktok_uploader, "try_upload_clip",
+        tiktok_uploader,
+        "try_upload_clip",
         lambda *a, **k: calls.append(k) or fake_tiktok_success,
     )
     upload_manager.upload_clip_everywhere(
-        clip_path, "Title", "desc", publish=False, add_background_sound=False,
+        clip_path,
+        "Title",
+        "desc",
+        publish=False,
+        add_background_sound=False,
     )
     assert calls[0]["add_background_sound"] is False
 
@@ -490,12 +526,15 @@ def test_add_background_sound_flag_passed_through_to_tiktok(monkeypatch, fake_ti
 # (see that module's own docstring): instagram_enabled must default False and require BOTH
 # publish=True and instagram_enabled=True before the real automation is ever touched --------
 
+
 def test_instagram_not_attempted_when_disabled_even_with_publish_true(monkeypatch, fake_tiktok_success, clip_path):
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
     called = []
     monkeypatch.setattr(instagram_uploader, "try_upload_clip", lambda *a, **k: called.append(1))
 
-    result = upload_manager.upload_clip_everywhere(clip_path, "Title", "desc", publish=True)  # instagram_enabled defaults False
+    result = upload_manager.upload_clip_everywhere(
+        clip_path, "Title", "desc", publish=True
+    )  # instagram_enabled defaults False
 
     assert called == []
     assert result.instagram.attempted is False
@@ -507,7 +546,11 @@ def test_instagram_not_attempted_when_publish_false_even_if_enabled(monkeypatch,
     monkeypatch.setattr(instagram_uploader, "try_upload_clip", lambda *a, **k: called.append(1))
 
     result = upload_manager.upload_clip_everywhere(
-        clip_path, "Title", "desc", publish=False, instagram_enabled=True,
+        clip_path,
+        "Title",
+        "desc",
+        publish=False,
+        instagram_enabled=True,
     )
 
     assert called == []
@@ -517,12 +560,17 @@ def test_instagram_not_attempted_when_publish_false_even_if_enabled(monkeypatch,
 def test_instagram_attempted_when_both_publish_and_enabled_true(monkeypatch, fake_tiktok_success, clip_path):
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
     monkeypatch.setattr(
-        instagram_uploader, "try_upload_clip",
+        instagram_uploader,
+        "try_upload_clip",
         lambda *a, **k: instagram_uploader.UploadOutcome(success=True, confirmed=True),
     )
 
     result = upload_manager.upload_clip_everywhere(
-        clip_path, "Title", "desc", publish=True, instagram_enabled=True,
+        clip_path,
+        "Title",
+        "desc",
+        publish=True,
+        instagram_enabled=True,
     )
 
     assert result.instagram.attempted is True
@@ -535,10 +583,15 @@ def test_instagram_exception_does_not_raise_or_block_other_platforms(monkeypatch
 
     def boom(*a, **k):
         raise RuntimeError("playwright blew up")
+
     monkeypatch.setattr(instagram_uploader, "try_upload_clip", boom)
 
     result = upload_manager.upload_clip_everywhere(
-        clip_path, "Title", "desc", publish=True, instagram_enabled=True,
+        clip_path,
+        "Title",
+        "desc",
+        publish=True,
+        instagram_enabled=True,
     )
 
     assert result.instagram.success is False
@@ -548,6 +601,7 @@ def test_instagram_exception_does_not_raise_or_block_other_platforms(monkeypatch
 
 
 # --- In-call retry with exponential backoff (2026-08-22 upload-parity audit) ---------------
+
 
 def test_instagram_retries_a_failure_and_succeeds_on_a_later_attempt(monkeypatch, fake_tiktok_success, clip_path):
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
@@ -565,10 +619,15 @@ def test_instagram_retries_a_failure_and_succeeds_on_a_later_attempt(monkeypatch
             # branch instead of the "outcome exists but failed" branch the crash lived in.
             return instagram_uploader.UploadOutcome(success=False, confirmed=False)
         return instagram_uploader.UploadOutcome(success=True, confirmed=True)
+
     monkeypatch.setattr(instagram_uploader, "try_upload_clip", flaky)
 
     result = upload_manager.upload_clip_everywhere(
-        clip_path, "Title", "desc", publish=True, instagram_enabled=True,
+        clip_path,
+        "Title",
+        "desc",
+        publish=True,
+        instagram_enabled=True,
     )
 
     assert len(calls) == upload_manager.INSTAGRAM_UPLOAD_MAX_RETRIES
@@ -580,12 +639,17 @@ def test_instagram_gives_up_after_max_retries_and_marks_failed(monkeypatch, fake
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
     calls = []
     monkeypatch.setattr(
-        instagram_uploader, "try_upload_clip",
+        instagram_uploader,
+        "try_upload_clip",
         lambda *a, **k: (calls.append(1), instagram_uploader.UploadOutcome(success=False, confirmed=False))[1],
     )
 
     result = upload_manager.upload_clip_everywhere(
-        clip_path, "Title", "desc", publish=True, instagram_enabled=True,
+        clip_path,
+        "Title",
+        "desc",
+        publish=True,
+        instagram_enabled=True,
     )
 
     assert len(calls) == upload_manager.INSTAGRAM_UPLOAD_MAX_RETRIES
@@ -600,12 +664,17 @@ def test_instagram_does_not_retry_an_unconfirmed_success(monkeypatch, fake_tikto
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
     calls = []
     monkeypatch.setattr(
-        instagram_uploader, "try_upload_clip",
+        instagram_uploader,
+        "try_upload_clip",
         lambda *a, **k: (calls.append(1), instagram_uploader.UploadOutcome(success=True, confirmed=False))[1],
     )
 
     result = upload_manager.upload_clip_everywhere(
-        clip_path, "Title", "desc", publish=True, instagram_enabled=True,
+        clip_path,
+        "Title",
+        "desc",
+        publish=True,
+        instagram_enabled=True,
     )
 
     assert len(calls) == 1
@@ -617,7 +686,8 @@ def test_instagram_succeeds_on_first_attempt_without_extra_retries(monkeypatch, 
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
     calls = []
     monkeypatch.setattr(
-        instagram_uploader, "try_upload_clip",
+        instagram_uploader,
+        "try_upload_clip",
         lambda *a, **k: (calls.append(1), instagram_uploader.UploadOutcome(success=True, confirmed=True))[1],
     )
 
@@ -633,10 +703,15 @@ def test_instagram_retries_across_repeated_exceptions_then_gives_up(monkeypatch,
     def boom(*a, **k):
         calls.append(1)
         raise RuntimeError("playwright blew up")
+
     monkeypatch.setattr(instagram_uploader, "try_upload_clip", boom)
 
     result = upload_manager.upload_clip_everywhere(
-        clip_path, "Title", "desc", publish=True, instagram_enabled=True,
+        clip_path,
+        "Title",
+        "desc",
+        publish=True,
+        instagram_enabled=True,
     )
 
     assert len(calls) == upload_manager.INSTAGRAM_UPLOAD_MAX_RETRIES
@@ -653,12 +728,17 @@ def test_instagram_non_exception_failure_does_not_crash_the_retry_log(monkeypatc
     into its 90s error cooldown (DEFAULT_ERROR_COOLDOWN_SECONDS)."""
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
     monkeypatch.setattr(
-        instagram_uploader, "try_upload_clip",
+        instagram_uploader,
+        "try_upload_clip",
         lambda *a, **k: instagram_uploader.UploadOutcome(success=False, confirmed=False),
     )
 
     result = upload_manager.upload_clip_everywhere(
-        clip_path, "Title", "desc", publish=True, instagram_enabled=True,
+        clip_path,
+        "Title",
+        "desc",
+        publish=True,
+        instagram_enabled=True,
     )  # must not raise
 
     assert result.instagram.success is False
@@ -667,12 +747,17 @@ def test_instagram_non_exception_failure_does_not_crash_the_retry_log(monkeypatc
 def test_any_success_true_when_only_instagram_succeeds(monkeypatch, fake_tiktok_failure, clip_path):
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
     monkeypatch.setattr(
-        instagram_uploader, "try_upload_clip",
+        instagram_uploader,
+        "try_upload_clip",
         lambda *a, **k: instagram_uploader.UploadOutcome(success=True, confirmed=True),
     )
 
     result = upload_manager.upload_clip_everywhere(
-        clip_path, "Title", "desc", publish=True, instagram_enabled=True,
+        clip_path,
+        "Title",
+        "desc",
+        publish=True,
+        instagram_enabled=True,
     )
 
     assert result.any_success is True
@@ -681,12 +766,17 @@ def test_any_success_true_when_only_instagram_succeeds(monkeypatch, fake_tiktok_
 def test_any_success_false_when_instagram_succeeds_but_unconfirmed(monkeypatch, fake_tiktok_failure, clip_path):
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
     monkeypatch.setattr(
-        instagram_uploader, "try_upload_clip",
+        instagram_uploader,
+        "try_upload_clip",
         lambda *a, **k: instagram_uploader.UploadOutcome(success=True, confirmed=False),
     )
 
     result = upload_manager.upload_clip_everywhere(
-        clip_path, "Title", "desc", publish=True, instagram_enabled=True,
+        clip_path,
+        "Title",
+        "desc",
+        publish=True,
+        instagram_enabled=True,
     )
 
     assert result.any_success is False
@@ -696,6 +786,7 @@ def test_any_success_false_when_instagram_succeeds_but_unconfirmed(monkeypatch, 
 # for the two real production incidents this closes: a single real clip getting 3 separate
 # real YouTube videos and 3 separate real Instagram posts because nothing durable recorded
 # what had already succeeded across retries, crashes, and supervisor restarts. -----------------
+
 
 def test_youtube_not_reuploaded_when_ledger_already_shows_done(monkeypatch, fake_tiktok_success, clip_path):
     calls = []
@@ -720,7 +811,11 @@ def test_instagram_not_reuploaded_when_ledger_already_shows_done(monkeypatch, fa
     upload_ledger.mark_done(content_hash, "instagram")
 
     result = upload_manager.upload_clip_everywhere(
-        clip_path, "Title", "desc", publish=True, instagram_enabled=True,
+        clip_path,
+        "Title",
+        "desc",
+        publish=True,
+        instagram_enabled=True,
     )
 
     assert calls == []
@@ -731,7 +826,8 @@ def test_instagram_not_reuploaded_when_ledger_already_shows_done(monkeypatch, fa
 def test_tiktok_not_reuploaded_when_ledger_already_shows_done(monkeypatch, clip_path):
     calls = []
     monkeypatch.setattr(
-        tiktok_uploader, "try_upload_clip",
+        tiktok_uploader,
+        "try_upload_clip",
         lambda *a, **k: calls.append(1) or tiktok_uploader.UploadOutcome(success=True, confirmed=True),
     )
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
@@ -750,8 +846,9 @@ def test_pending_tiktok_duplicate_does_not_spend_fleet_pacing_slot(monkeypatch, 
     content_hash = upload_ledger.compute_content_hash(clip_path)
     upload_ledger.try_mark_pending(content_hash, "tiktok")
     reservations = []
-    monkeypatch.setattr(upload_manager, "_try_reserve_upload_pacing_slot",
-                        lambda *args: reservations.append(args) or True)
+    monkeypatch.setattr(
+        upload_manager, "_try_reserve_upload_pacing_slot", lambda *args: reservations.append(args) or True
+    )
     outcome = upload_manager._upload_to_tiktok(clip_path, "desc", [], True, False)
     assert outcome.success is False
     assert reservations == []
@@ -760,8 +857,11 @@ def test_pending_tiktok_duplicate_does_not_spend_fleet_pacing_slot(monkeypatch, 
 
 def test_pacing_denial_releases_own_tiktok_pending_claim(monkeypatch, clip_path):
     monkeypatch.setattr(upload_manager, "_try_reserve_upload_pacing_slot", lambda *args: False)
-    monkeypatch.setattr(tiktok_uploader, "try_upload_clip",
-                        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not upload")))
+    monkeypatch.setattr(
+        tiktok_uploader,
+        "try_upload_clip",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not upload")),
+    )
     outcome = upload_manager._upload_to_tiktok(clip_path, "desc", [], True, False)
     assert outcome.success is False
     entry = upload_ledger.get_entry(upload_ledger.compute_content_hash(clip_path), "tiktok")
@@ -811,7 +911,8 @@ def test_instagram_unconfirmed_success_marks_unresolved_not_done_or_failed(monke
     subject to the same cooldown as a genuine in-flight attempt."""
     monkeypatch.setattr(youtube_uploader, "upload_clip", lambda *a, **k: "yt-id")
     monkeypatch.setattr(
-        instagram_uploader, "try_upload_clip",
+        instagram_uploader,
+        "try_upload_clip",
         lambda *a, **k: instagram_uploader.UploadOutcome(success=True, confirmed=False),
     )
 
@@ -849,6 +950,7 @@ def test_two_different_clips_with_same_title_are_not_confused_by_the_ledger(monk
 
 
 # --- TikTok-only mode: YOUTUBE_UPLOADS_ENABLED global kill switch (2026-08-25) -----------------
+
 
 def test_youtube_uploads_disabled_skips_youtube_without_calling_it(monkeypatch, fake_tiktok_success, clip_path):
     monkeypatch.setattr(upload_manager, "YOUTUBE_UPLOADS_ENABLED", False)

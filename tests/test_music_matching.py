@@ -1,8 +1,7 @@
 import json
 import random
 
-import music_matching
-import process
+from autoclip.rendering import music_matching, process
 
 
 def _make_music_dir(tmp_path, tags=None):

@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PIL import Image, ImageDraw
 
-import logging_setup
+from autoclip.core import logging_setup
 
 logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
@@ -83,7 +83,10 @@ def draw_avatar(size: int) -> Image.Image:
     band_rx, band_ry = s * 0.305, s * 0.345
     draw.arc(
         [cx - band_rx, cy - band_ry, cx + band_rx, cy + band_ry],
-        start=200, end=340, fill=HEADPHONE_DARK, width=int(stroke * 3.2),
+        start=200,
+        end=340,
+        fill=HEADPHONE_DARK,
+        width=int(stroke * 3.2),
     )
 
     _blob(draw, cx, cy, body_rx, body_ry, POTATO_FILL, OUTLINE, stroke)
@@ -111,7 +114,10 @@ def draw_avatar(size: int) -> Image.Image:
     mouth_w, mouth_y = body_rx * 0.40, cy + body_ry * 0.22
     draw.arc(
         [cx - mouth_w, mouth_y - body_ry * 0.16, cx + mouth_w, mouth_y + body_ry * 0.22],
-        start=20, end=160, fill=OUTLINE, width=stroke,
+        start=20,
+        end=160,
+        fill=OUTLINE,
+        width=stroke,
     )
     for sign in (-1, 1):
         mr = stroke * 0.5
@@ -131,11 +137,15 @@ def draw_avatar(size: int) -> Image.Image:
         uy = cy - body_ry * 0.06
         draw.rounded_rectangle(
             [ux - cup_rx, uy - cup_ry, ux + cup_rx, uy + cup_ry],
-            radius=cup_rx * 0.75, fill=HEADPHONE_FILL, outline=OUTLINE, width=stroke,
+            radius=cup_rx * 0.75,
+            fill=HEADPHONE_FILL,
+            outline=OUTLINE,
+            width=stroke,
         )
         draw.rounded_rectangle(
             [ux - cup_rx * 0.46, uy - cup_ry * 0.58, ux + cup_rx * 0.46, uy + cup_ry * 0.58],
-            radius=cup_rx * 0.4, fill=HEADPHONE_DARK,
+            radius=cup_rx * 0.4,
+            fill=HEADPHONE_DARK,
         )
 
     return image.resize((size, size), Image.LANCZOS)
@@ -151,8 +161,9 @@ def main() -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     image = draw_avatar(args.size)
     image.save(out_path, format="PNG", optimize=True)
-    logger.info("✅ Avatar gezeichnet: %s (%dx%d, %d KB)",
-                out_path, args.size, args.size, out_path.stat().st_size // 1024)
+    logger.info(
+        "✅ Avatar gezeichnet: %s (%dx%d, %d KB)", out_path, args.size, args.size, out_path.stat().st_size // 1024
+    )
     return 0
 
 

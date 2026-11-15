@@ -8,16 +8,15 @@ import subprocess
 
 import pytest
 
-import dashboard_api
-import streamers as streamers_module
-import profiles
+from autoclip.configuration import profiles
+from autoclip.configuration import streamers as streamers_module
+from autoclip.dashboard import dashboard_api
 
 
 def test_paths_are_reexported_from_the_real_modules():
-    import analyze
-    import auto_pilot
-    import orchestrator
-    import train_loop
+    from autoclip.ai import analyze, train_loop
+    from autoclip.control import auto_pilot, orchestrator
+
     assert dashboard_api.AGENT_STATE_PATH == auto_pilot.AGENT_STATE_PATH
     assert dashboard_api.AI_GUIDELINES_PATH == analyze.AI_GUIDELINES_PATH
     assert dashboard_api.ORCHESTRATOR_STATE_PATH == orchestrator.ORCHESTRATOR_STATE_PATH
@@ -25,7 +24,8 @@ def test_paths_are_reexported_from_the_real_modules():
 
 
 def test_layout_constants_match_process_module():
-    import process
+    from autoclip.rendering import process
+
     assert dashboard_api.LAYOUT_AUTO == process.LAYOUT_AUTO
     assert dashboard_api.LAYOUT_SPLIT_SCREEN == process.LAYOUT_SPLIT_SCREEN
     assert dashboard_api.LAYOUT_BLUR_BACKGROUND == process.LAYOUT_BLUR_BACKGROUND
@@ -37,6 +37,7 @@ def test_layout_constants_match_process_module():
 # write the single shared agent_state.json, corrupting each other's dashboard state; each
 # now writes its own agent_state_<slug>.json and app.py reads every one of them) -----------
 
+
 def test_list_agent_state_paths_finds_legacy_and_per_streamer_files(tmp_path):
     (tmp_path / "agent_state.json").write_text("{}", encoding="utf-8")
     (tmp_path / "agent_state_eliasn97.json").write_text("{}", encoding="utf-8")
@@ -46,7 +47,9 @@ def test_list_agent_state_paths_finds_legacy_and_per_streamer_files(tmp_path):
     paths = dashboard_api.list_agent_state_paths(root=tmp_path)
 
     assert {p.name for p in paths} == {
-        "agent_state.json", "agent_state_eliasn97.json", "agent_state_papaplatte.json",
+        "agent_state.json",
+        "agent_state_eliasn97.json",
+        "agent_state_papaplatte.json",
     }
 
 
@@ -66,6 +69,7 @@ def test_purge_stale_agent_states_delegates_to_streamers_module(monkeypatch):
 # for a streamer that had just restarted and was genuinely live/recording, purely because its
 # own agent_state file hadn't caught up yet -- this cross-references orchestrator_state.json's
 # real-time ground truth, the same source the main "Konfigurierte Streamer" section trusts) ---
+
 
 def test_agent_live_status_by_slug_reflects_orchestrator_state(tmp_path, monkeypatch):
     path = tmp_path / "streamers.json"
@@ -127,14 +131,17 @@ def test_streamer_crud_roundtrip_through_the_facade(tmp_path, monkeypatch):
 # --- Fleet Start/Stop (2026-08-19) — app.py's Start/Stop Fleet button, thinly delegating to
 # process_supervisor.py's own fleet_control.json read/write ---------------------------------
 
+
 def test_fleet_state_constants_match_process_supervisor():
-    import process_supervisor
+    from autoclip.control import process_supervisor
+
     assert dashboard_api.FLEET_STATE_RUNNING == process_supervisor.FLEET_STATE_RUNNING
     assert dashboard_api.FLEET_STATE_PAUSED == process_supervisor.FLEET_STATE_PAUSED
 
 
 def test_set_then_read_fleet_target_state_roundtrips(tmp_path, monkeypatch):
-    import process_supervisor
+    from autoclip.control import process_supervisor
+
     monkeypatch.setattr(process_supervisor, "FLEET_CONTROL_PATH", tmp_path / "fleet_control.json")
 
     dashboard_api.set_fleet_target_state(dashboard_api.FLEET_STATE_PAUSED)
@@ -145,12 +152,14 @@ def test_set_then_read_fleet_target_state_roundtrips(tmp_path, monkeypatch):
 
 
 def test_read_fleet_target_state_defaults_to_running_without_touching_real_project_state(tmp_path, monkeypatch):
-    import process_supervisor
+    from autoclip.control import process_supervisor
+
     monkeypatch.setattr(process_supervisor, "FLEET_CONTROL_PATH", tmp_path / "never_written.json")
     assert dashboard_api.read_fleet_target_state() == dashboard_api.FLEET_STATE_RUNNING
 
 
 # --- Remote deployment control (2026-08-21: "Git Pull & Restart" button, VPS-only) ----------
+
 
 def test_is_systemd_deployment_true_when_unit_file_present(tmp_path, monkeypatch):
     monkeypatch.setattr(dashboard_api, "_SYSTEMD_UNIT_DIR", tmp_path)
@@ -168,67 +177,6 @@ class _FakeCompletedProcess:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
-
-
-def test_git_pull_and_restart_supervisor_success(monkeypatch):
-    calls = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        if cmd[:2] == ["git", "pull"]:
-            return _FakeCompletedProcess(returncode=0, stdout="Already up to date.\n")
-        return _FakeCompletedProcess(returncode=0)
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    success, detail = dashboard_api.git_pull_and_restart_supervisor()
-
-    assert success is True
-    assert "Already up to date" in detail
-    assert calls[0] == ["git", "pull"]
-    assert calls[1] == ["sudo", "systemctl", "restart", dashboard_api.SUPERVISOR_SYSTEMD_UNIT]
-
-
-def test_git_pull_and_restart_supervisor_stops_on_git_failure_never_restarts(monkeypatch):
-    calls = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        return _FakeCompletedProcess(returncode=1, stderr="merge conflict")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    success, detail = dashboard_api.git_pull_and_restart_supervisor()
-
-    assert success is False
-    assert "merge conflict" in detail
-    assert len(calls) == 1  # never even attempted the restart
-
-
-def test_git_pull_and_restart_supervisor_reports_restart_failure(monkeypatch):
-    def fake_run(cmd, **kwargs):
-        if cmd[:2] == ["git", "pull"]:
-            return _FakeCompletedProcess(returncode=0, stdout="ok")
-        return _FakeCompletedProcess(returncode=1, stderr="Unit not found")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    success, detail = dashboard_api.git_pull_and_restart_supervisor()
-
-    assert success is False
-    assert "Unit not found" in detail
-
-
-def test_git_pull_and_restart_supervisor_handles_timeout(monkeypatch):
-    def fake_run(cmd, **kwargs):
-        raise subprocess.TimeoutExpired(cmd, 60)
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    success, detail = dashboard_api.git_pull_and_restart_supervisor()
-
-    assert success is False
-    assert "git pull" in detail.lower()
 
 
 def test_restart_dashboard_service_uses_popen_not_run(monkeypatch):
@@ -259,14 +207,16 @@ def test_list_profiles_delegates_to_profiles_module(tmp_path, monkeypatch):
 
 
 def test_parse_guidelines_file_delegates_correctly():
-    import train_loop
+    from autoclip.ai import train_loop
+
     content = train_loop.CATEGORY_HEADERS["content_positive"] + "\n- some rule\n"
     result = dashboard_api.parse_guidelines_file(content)
     assert result["content_positive"] == ["some rule"]
 
 
 def test_tiktok_cookies_status_returns_a_tuple(tmp_path, monkeypatch):
-    import tiktok_uploader
+    from autoclip.publishing import tiktok_uploader
+
     monkeypatch.setattr(tiktok_uploader, "COOKIES_PATH", tmp_path / "cookies.json")
     ready, detail = dashboard_api.tiktok_cookies_status()
     assert ready is False
@@ -274,15 +224,18 @@ def test_tiktok_cookies_status_returns_a_tuple(tmp_path, monkeypatch):
 
 
 def test_default_hashtags_matches_tiktok_uploader():
-    import tiktok_uploader
+    from autoclip.publishing import tiktok_uploader
+
     assert dashboard_api.DEFAULT_HASHTAGS == tiktok_uploader.DEFAULT_HASHTAGS
 
 
 def test_get_stale_pending_uploads_delegates_to_upload_ledger(monkeypatch):
-    import upload_ledger
+    from autoclip.publishing import upload_ledger
+
     calls = []
     monkeypatch.setattr(
-        upload_ledger, "stale_pending_counts",
+        upload_ledger,
+        "stale_pending_counts",
         lambda stale_minutes=upload_ledger.PENDING_STALE_MINUTES: calls.append(stale_minutes) or {"tiktok": 3},
     )
     assert dashboard_api.get_stale_pending_uploads() == {"tiktok": 3}
@@ -290,3 +243,13 @@ def test_get_stale_pending_uploads_delegates_to_upload_ledger(monkeypatch):
 
     assert dashboard_api.get_stale_pending_uploads(stale_minutes=5) == {"tiktok": 3}
     assert calls == [upload_ledger.PENDING_STALE_MINUTES, 5]
+
+
+def test_dashboard_does_not_modify_a_running_deployment(monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Dashboard must not pull code or restart the fleet")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    success, detail = dashboard_api.git_pull_and_restart_supervisor()
+    assert success is False
+    assert "deploy/update.sh" in detail

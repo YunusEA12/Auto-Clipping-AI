@@ -27,9 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from playwright.sync_api import sync_playwright
 
-import atomic_io
-import logging_setup
-import tiktok_uploader
+from autoclip.core import atomic_io, logging_setup
+from autoclip.publishing import tiktok_uploader
 
 logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
@@ -115,7 +114,9 @@ def capture(out_path: Path, timeout_seconds: float, keep_open: bool) -> int:
 
         logger.error(
             "Zeitfenster abgelaufen, ohne dass ein '%s'-Cookie erschienen ist. "
-            "Nichts gespeichert — %s bleibt unveraendert.", SESSION_COOKIE, out_path,
+            "Nichts gespeichert — %s bleibt unveraendert.",
+            SESSION_COOKIE,
+            out_path,
         )
         return 1
     return 1
@@ -123,10 +124,11 @@ def capture(out_path: Path, timeout_seconds: float, keep_open: bool) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Capture a hand-made TikTok login into cookies.json.")
-    parser.add_argument("--out", default="cookies.json", help="Where to write the cookies (default: cookies.json)")
+    parser.add_argument("--out", default=str(tiktok_uploader.COOKIES_PATH), help="Where to write session cookies")
     parser.add_argument("--timeout", type=float, default=900, help="Seconds to wait for the login (default: 900)")
     parser.add_argument("--no-keep-open", action="store_true", help="Close the window immediately after saving")
     args = parser.parse_args()
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     return capture(Path(args.out), args.timeout, keep_open=not args.no_keep_open)
 
 

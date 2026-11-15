@@ -8,7 +8,7 @@ finally block in run_cycle() so it runs on every exit path, not just the happy o
 
 import pytest
 
-import auto_pilot
+from autoclip.control import auto_pilot
 
 
 def _touch(path):
@@ -58,6 +58,7 @@ def test_cleanup_tolerates_already_missing_files(tmp_path):
 # of orphaned live_chunk_*.ts/.wav/*_transcription.json files that accumulated, unbounded,
 # every 90s-cooldown retry for as long as the failure persisted.) -------------------------
 
+
 def test_run_cycle_cleans_up_temp_files_when_analysis_raises(tmp_path, monkeypatch):
     video_path = _touch(tmp_path / "live_chunk_1.ts")
     wav_path = _touch(tmp_path / "live_chunk_1.wav")
@@ -72,19 +73,33 @@ def test_run_cycle_cleans_up_temp_files_when_analysis_raises(tmp_path, monkeypat
 
     def _raise(*args, **kwargs):
         raise FakeAnalysisError("401 UNAUTHENTICATED — missing/invalid GEMINI_API_KEY")
+
     monkeypatch.setattr(auto_pilot.analyze, "analyze", _raise)
 
     cleanup_calls = []
     monkeypatch.setattr(
-        auto_pilot, "_cleanup_cycle_temp_files", lambda *args: cleanup_calls.append(args),
+        auto_pilot,
+        "_cleanup_cycle_temp_files",
+        lambda *args: cleanup_calls.append(args),
     )
 
     with pytest.raises(FakeAnalysisError):
         auto_pilot.run_cycle(
-            video_path=video_path, profile=None, layout="split_screen", video_format="9:16",
-            highlight_color="#FFFFFF", purge_threshold=-2, critic_model="gemini-x", cycle=1,
-            target_streamer="eliasn97", kept_total=0, purged_total=0, uploaded_total=0,
-            live=True, auto_upload=False, publish=False,
+            video_path=video_path,
+            profile=None,
+            layout="split_screen",
+            video_format="9:16",
+            highlight_color="#FFFFFF",
+            purge_threshold=-2,
+            critic_model="gemini-x",
+            cycle=1,
+            target_streamer="eliasn97",
+            kept_total=0,
+            purged_total=0,
+            uploaded_total=0,
+            live=True,
+            auto_upload=False,
+            publish=False,
         )
 
     assert len(cleanup_calls) == 1

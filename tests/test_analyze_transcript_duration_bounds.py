@@ -2,14 +2,20 @@ import types
 
 import pytest
 
-import analyze
-import llm_utils
+from autoclip.ai import analyze, llm_utils
 
 
 def _clip(title, start, end):
     return analyze.Clip(
-        start_time=start, end_time=end, title=title, hook_explanation="x", hook_style="other",
-        viral_score=5, energy_rating=5, description="x", hashtags=["#fyp"],
+        start_time=start,
+        end_time=end,
+        title=title,
+        hook_explanation="x",
+        hook_style="other",
+        viral_score=5,
+        energy_rating=5,
+        description="x",
+        hashtags=["#fyp"],
     )
 
 
@@ -36,12 +42,14 @@ def _no_real_genai_client(monkeypatch):
 # scores as incoherent and deletes. select_clips() now drops any clip whose timestamps fall
 # outside the transcript's own known duration before it ever reaches rendering.
 
+
 def test_select_clips_drops_a_clip_hallucinated_past_the_transcript_duration(monkeypatch):
     in_bounds = _clip("Real Moment", 10.0, 30.0)
     hallucinated = _clip("Hallucinated Moment", 221.9, 240.6)  # transcript only covers 0-180s
 
     monkeypatch.setattr(
-        llm_utils, "call_with_fallback",
+        llm_utils,
+        "call_with_fallback",
         lambda fn, description, model_pool: _fake_response([in_bounds, hallucinated]),
     )
 
@@ -54,7 +62,8 @@ def test_select_clips_allows_a_clip_within_a_small_rounding_tolerance(monkeypatc
     almost_in_bounds = _clip("Almost At The Edge", 160.0, 180.4)  # 0.4s past a 180.0s transcript
 
     monkeypatch.setattr(
-        llm_utils, "call_with_fallback",
+        llm_utils,
+        "call_with_fallback",
         lambda fn, description, model_pool: _fake_response([almost_in_bounds]),
     )
 
@@ -67,7 +76,8 @@ def test_select_clips_skips_the_bounds_check_when_transcript_duration_is_not_giv
     far_out = _clip("No Duration Known", 500.0, 520.0)
 
     monkeypatch.setattr(
-        llm_utils, "call_with_fallback",
+        llm_utils,
+        "call_with_fallback",
         lambda fn, description, model_pool: _fake_response([far_out]),
     )
 

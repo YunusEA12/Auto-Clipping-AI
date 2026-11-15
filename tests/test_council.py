@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 _spec = importlib.util.spec_from_file_location(
-    "council", Path(__file__).resolve().parent.parent / "scripts" / "council.py")
+    "council", Path(__file__).resolve().parent.parent / "scripts" / "council.py"
+)
 council = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(council)
 
@@ -16,8 +17,9 @@ def no_env_blocklist(monkeypatch):
 
 
 def test_job_stores_review_own_answer_and_chatgpt_prompt(tmp_path):
-    job = council.run_job("review", "Frage", "Kontext", "meine Antwort",
-                          jobs_dir=tmp_path, gemini=lambda p: "gemini says")
+    job = council.run_job(
+        "review", "Frage", "Kontext", "meine Antwort", jobs_dir=tmp_path, gemini=lambda p: "gemini says"
+    )
     assert job["gemini"] == {"ok": True, "text": "gemini says"}
     stored = json.loads((tmp_path / f"{job['job_id']}.json").read_text(encoding="utf-8"))
     assert stored["own_answer"] == "meine Antwort"
@@ -28,8 +30,14 @@ def test_job_stores_review_own_answer_and_chatgpt_prompt(tmp_path):
 def test_secret_blocks_before_gemini_and_prompt_file(tmp_path):
     calls = []
     with pytest.raises(council.SensitiveContentError):
-        council.run_job("answer", "Frage", "GEMINI_API_KEY=AIzaSyA1234567890abcdefghijklmnopqrstu", "",
-                        jobs_dir=tmp_path, gemini=lambda p: calls.append(p) or "x")
+        council.run_job(
+            "answer",
+            "Frage",
+            "GEMINI_API_KEY=AIzaSyA1234567890abcdefghijklmnopqrstu",
+            "",
+            jobs_dir=tmp_path,
+            gemini=lambda p: calls.append(p) or "x",
+        )
     assert calls == []
     assert not list(tmp_path.glob("*"))
 
@@ -37,8 +45,7 @@ def test_secret_blocks_before_gemini_and_prompt_file(tmp_path):
 def test_blocklist_term_blocks(tmp_path, monkeypatch):
     monkeypatch.setenv("COUNCIL_BLOCKLIST", "Geheimkunde GmbH")
     with pytest.raises(council.SensitiveContentError):
-        council.run_job("answer", "Analyse für geheimkunde gmbh", "", "",
-                        jobs_dir=tmp_path, gemini=lambda p: "x")
+        council.run_job("answer", "Analyse für geheimkunde gmbh", "", "", jobs_dir=tmp_path, gemini=lambda p: "x")
 
 
 def test_gemini_failure_is_reported_and_redacted(tmp_path, monkeypatch):

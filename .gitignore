@@ -1,4 +1,11 @@
 venv/
+var/
+dist/
+build/
+*.egg-info/
+config/streamers.json
+config/streamers.json.lock
+config/profiles/
 .venv/
 .streamlit/secrets.toml
 .env

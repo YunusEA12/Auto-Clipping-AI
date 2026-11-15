@@ -10,7 +10,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import login_instagram
-import upload_instagram_playwright as igp
+
+from autoclip.publishing import upload_instagram_playwright as igp
 
 
 class FakePage:
@@ -107,6 +108,7 @@ def test_resolved_immediately_saves_cookies(tmp_path, monkeypatch):
     assert browser.closed is True
     assert igp.COOKIES_PATH.exists()
     import json
+
     assert json.loads(igp.COOKIES_PATH.read_text()) == fresh_cookies
 
 

@@ -7,13 +7,19 @@
 
 import json
 
-import analyze
+from autoclip.ai import analyze
 
 
 def _clip(**overrides):
     base = dict(
-        start_time=0.0, end_time=40.0, title="Titel", hook_explanation="Weil es lustig ist",
-        hook_style="other", viral_score=7, energy_rating=6, description="Krasser Moment!",
+        start_time=0.0,
+        end_time=40.0,
+        title="Titel",
+        hook_explanation="Weil es lustig ist",
+        hook_style="other",
+        viral_score=7,
+        energy_rating=6,
+        description="Krasser Moment!",
         hashtags=["#gaming", "#viral"],
     )
     base.update(overrides)
@@ -22,12 +28,14 @@ def _clip(**overrides):
 
 # --- clip duration bounds -------------------------------------------------------------
 
+
 def test_clip_duration_bounds_are_15_to_150_seconds():
     assert analyze.MIN_CLIP_DURATION == 15
     assert analyze.MAX_CLIP_DURATION == 150
 
 
 # --- hashtag validator -----------------------------------------------------------------
+
 
 def test_hashtag_validator_strips_empty_and_whitespace_only_tags():
     clip = _clip(hashtags=["#gaming", "#", "# ", "", "   ", "#viral"])
@@ -51,6 +59,7 @@ def test_hashtag_validator_keeps_well_formed_tags_untouched():
 
 # --- streamer @-mention section ---------------------------------------------------------
 
+
 def test_build_streamer_mention_section_empty_without_name():
     assert analyze.build_streamer_mention_section(None) == ""
     assert analyze.build_streamer_mention_section("") == ""
@@ -71,6 +80,7 @@ def test_build_system_prompt_threads_streamer_name_through():
 # --- language section (2026-08-19: found live -- a German clip got an English on-screen
 # title and caption; Whisper's own detected language (transcript["language"]) is threaded
 # through so the LLM writes in the language actually spoken, hashtags exempted) ------------
+
 
 def test_build_language_section_empty_without_language():
     assert analyze.build_language_section(None) == ""
@@ -111,7 +121,9 @@ def test_analyze_reads_transcript_language_and_passes_it_to_select_clips(tmp_pat
 
     captured = {}
 
-    def fake_select_clips(transcript_text, energy_spikes, window_scores, model, profile, streamer_name, language, transcript_duration=None):
+    def fake_select_clips(
+        transcript_text, energy_spikes, window_scores, model, profile, streamer_name, language, transcript_duration=None
+    ):
         captured["language"] = language
         return analyze.ClipSelection(clips=[])
 
@@ -123,6 +135,7 @@ def test_analyze_reads_transcript_language_and_passes_it_to_select_clips(tmp_pat
 
 
 # --- fallback clip (find_longest_segment_fallback) --------------------------------------
+
 
 def _transcript_with_one_long_segment(duration=40.0):
     return {"segments": [{"start": 0.0, "end": duration, "text": "Ein langer, zusammenhängender Moment."}]}

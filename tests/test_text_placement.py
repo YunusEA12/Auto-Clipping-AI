@@ -1,14 +1,17 @@
 """Title/subtitle placement, checked on the real build_ass_for_clip() output."""
+
 import re
 
-import auto_qc
-import process
-import text_placement
+from autoclip.quality import auto_qc
+from autoclip.rendering import process, text_placement
 
 W, H = 1080, 1920
 WORDS = ["UNGLAUBLICH", "SPANNENDER", "AUGENBLICK", "GEWESEN"]
-TRANSCRIPT = {"segments": [{"start": 0, "end": 4, "words": [
-    {"start": i, "end": i + .9, "text": w} for i, w in enumerate(WORDS)]}]}
+TRANSCRIPT = {
+    "segments": [
+        {"start": 0, "end": 4, "words": [{"start": i, "end": i + 0.9, "text": w} for i, w in enumerate(WORDS)]}
+    ]
+}
 CLIP = {"start_time": 0, "end_time": 4, "title": "Dieser Moment ist einfach"}
 # 1600x900 source, face ~200px wide padded 2.5x -> typical split_screen crop
 SPLIT_BOX = (550, 150, 500, 360)
@@ -56,7 +59,8 @@ def test_subtitle_moves_when_face_would_cover_it(tmp_path, monkeypatch):
     default_y = int(H * process.SUBTITLE_Y_RATIO)
     rects = [(0, default_y - 150, W, default_y + 150)]
     placed = text_placement.compute_text_placement(
-        "multi_cam", W, H, "Titel", process.SUBTITLE_Y_RATIO, process.TITLE_BOX_Y_RATIO, rects)
+        "multi_cam", W, H, "Titel", process.SUBTITLE_Y_RATIO, process.TITLE_BOX_Y_RATIO, rects
+    )
     assert abs(placed["subtitle_y"] - default_y) >= 150
     half = text_placement.subtitle_half_height()
     assert not (rects[0][1] < placed["subtitle_y"] + half and placed["subtitle_y"] - half < rects[0][3])

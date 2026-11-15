@@ -1,0 +1,1582 @@
+"""Processing step: burn word-by-word highlighted subtitles into split-screen/blur-background clips via FFmpeg."""
+
+import argparse
+import json
+import logging
+import random
+import re
+import subprocess
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterator, List, Optional, Tuple
+
+import cv2
+from filelock import FileLock
+
+from autoclip import runtime
+from autoclip.ai import vision
+from autoclip.configuration import streamers
+from autoclip.core import atomic_io, logging_setup
+from autoclip.observability import optimization_engine
+from autoclip.quality import auto_qc
+from autoclip.rendering import music_matching, text_placement
+from autoclip.rendering.settings import (
+    DEFAULT_FORMAT,
+    DEFAULT_HIGHLIGHT_COLOR,
+    LAYOUT_AUTO,
+    LAYOUT_BLUR_BACKGROUND,
+    LAYOUT_CENTER_CROP,
+    LAYOUT_FULL_CAM,
+    LAYOUT_MULTI_CAM,
+    LAYOUT_RETRY_FRACTIONS,
+    LAYOUT_SPLIT_SCREEN,
+    SELECTABLE_LAYOUTS,
+    VIDEO_FORMATS,
+)
+from autoclip.rendering.settings import (
+    HIGHLIGHT_COLORS as HIGHLIGHT_COLORS,
+)
+from autoclip.runtime import RESOURCES
+
+logging_setup.configure_logging()
+logger = logging.getLogger(__name__)
+
+TEMP_DIR = runtime.path("temp")
+OUTPUT_DIR = runtime.path("output")
+
+# Royalty-free background tracks live here — see background_music/README.md for what belongs
+# in this folder and licensing expectations. One is picked at random per render (2026-08-21,
+# replacing the dropped YouTube Studio Playwright automation — see README_UPLOAD.md for why).
+MUSIC_DIR = RESOURCES / "background_music"
+MUSIC_EXTENSIONS = {".mp3", ".m4a", ".aac", ".wav", ".ogg"}
+
+# Linear amplitude multiplier applied to the music track before mixing (~-18.4dB) — quiet
+# enough to sit under speech without masking it, audible enough to actually register. Starting
+# point, not measured against real speech levels; adjust after listening to a real render.
+BACKGROUND_MUSIC_VOLUME = 0.12
+
+# Supported output canvases, keyed by aspect ratio label.
+
+
+# Facecam gets the top third of the canvas, gameplay the bottom two-thirds — TikTok's
+# standard "reaction on top, content below" reaction-cam layout.
+SPLIT_SCREEN_FACE_RATIO = 1 / 3
+
+# Auto-layout decision (2026-08-19): with exactly one face detected, which of full_cam vs
+# split_screen applies depends on how much of the SOURCE frame the face already covers, not
+# just its presence. A face filling a large share of the frame (a Just-Chatting-style stream
+# where the whole picture IS the person, no separate gameplay feed) reads as full_cam
+# content; a small corner webcam box over a much bigger gameplay area reads as split_screen.
+# Empirical starting point, not derived from a spec — render real clips from both kinds of
+# source content and check which side of this threshold they land on before trusting it.
+FULL_CAM_MIN_FACE_AREA_RATIO = 0.28
+
+# Area alone misfires on a Just-Chatting streamer sitting far back from the camera: the face
+# reads small (below FULL_CAM_MIN_FACE_AREA_RATIO) even though the whole frame IS the person,
+# no separate gameplay feed anywhere (found live, 2026-08-19 — a wide-angle "just chatting"
+# clip got wrongly split_screen'd). Position is the second signal: a real gameplay-corner
+# facecam sits pushed to an edge, while a wide/distant Just-Chatting shot still centers the
+# face horizontally. A centrally-located face forces full_cam even under the area threshold;
+# only a face that's BOTH small AND off-center reads as a genuine corner facecam box.
+CENTRAL_FACE_X_MIN_RATIO = 0.25
+CENTRAL_FACE_X_MAX_RATIO = 0.75
+
+# get_facecam_coordinates()'s default PADDING_FACTOR (2.5) is tuned for split_screen's top-
+# third zone — cover-fitting that same padded box into full_cam's much taller full-canvas
+# target crops far tighter than intended (more of the padding gets consumed matching the 9:16
+# aspect than filling it). A larger factor keeps more headroom/shoulders/background visible
+# instead of an overly tight face-only crop. Same "empirical, verify by rendering and
+# eyeballing" caveat as vision.PADDING_FACTOR itself.
+FULL_CAM_PADDING_FACTOR = 4.5
+
+WORD_BASE_COLOR = "FFFFFF"
+WORDS_PER_BLOCK = 4
+
+# TitleBox style (2026-08-19): BorderStyle=3 ("opaque box") is documented as using BackColour
+# to fill the box behind the text — verified live by actually rendering a real clip and
+# looking at it (not just trusting the ASS spec), which showed the box filling with
+# OutlineColour instead, rendering solid black text-on-black when only BackColour was set to
+# white. Both OutlineColour and BackColour are now set to the same white, so the box renders
+# correctly regardless of which field this libass build actually consults.
+ASS_HEADER_TEMPLATE = """[Script Info]
+Title: Auto-generated subtitles
+ScriptType: v4.00+
+PlayResX: {width}
+PlayResY: {height}
+WrapStyle: 1
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial Black,80,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,5,2,5,50,50,50,1
+Style: TitleBox,Arial Black,58,&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,-1,0,0,0,100,100,0,0,3,24,0,5,50,50,50,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+# Where the white title-box hook sits vertically, as a fraction of canvas height, for layouts
+# with no facecam/gameplay seam to anchor to (full_cam, blur_background) — the upper half, but
+# clear of TikTok's own top UI chrome (back arrow, search icon), which occupies roughly the
+# top 8-10% at typical zoom. Empirical/eyeballed against the reference posts this feature was
+# built from (2026-08-19), same "verify by rendering and looking" caveat as every other
+# *_Y_RATIO constant in this file.
+#
+# split_screen does NOT use this — see SPLIT_SCREEN_TITLE_Y_RATIO below instead.
+TITLE_BOX_Y_RATIO = 0.16
+
+# Where split_screen's title sits, as a fraction of canvas height — a safe top-edge margin
+# (180px at 1920 canvas height), NOT SPLIT_SCREEN_FACE_RATIO (the facecam/gameplay seam).
+# 2026-08-19's original design centered the title ON that seam deliberately (see this file's
+# git history), on the assumption it would read as a natural "hook caption" spot. Account-owner
+# report, 2026-08-22, with a real render attached: since the title is center-anchored (\an5),
+# centering it exactly on the seam put roughly half the box ABOVE the seam, inside the facecam
+# zone's bottom edge — which, for a typical centered face crop, is right where the mouth/chin
+# sits. Moved to a fixed near-top margin instead: clears the whole facecam zone regardless of
+# exactly how a given face crop is framed within it, rather than depending on box-height math
+# staying below whatever fraction of the seam a particular render's title text happens to need.
+# Allow title half-height (58px font + 24px box border) below the 5% safe top edge.
+SPLIT_SCREEN_TITLE_Y_RATIO = 180 / 1920
+
+# Where the subtitle block sits vertically, as a fraction of the canvas height — the TikTok
+# "lower third", clear of both the top facecam split and bottom platform UI icons. Empirical
+# (eyeballed against TikTok's own like/comment/share icon column and caption placement in
+# the app, not derived from a published spec), and only checked at the SPLIT_SCREEN_FACE_RATIO
+# = 1/3 default — if that ratio is ever retuned significantly, re-check this against the app
+# again rather than assuming it still clears the facecam split. Raised from 0.70 to 0.78
+# (2026-08-19) to clear both the new TITLE_BOX_Y_RATIO hook above and full_cam's full-frame
+# subject (a person's torso can extend further down a full-bleed face crop than gameplay or a
+# blurred background ever did, which the original 0.70 was tuned against); push it lower
+# (toward 1.0) if captions overlap the platform's icon column, higher if they sit
+# uncomfortably close to the bottom edge or start overlapping the title box / a full_cam
+# subject's face.
+SUBTITLE_Y_RATIO = 0.78
+
+
+def format_ass_timestamp(seconds: float) -> str:
+    if seconds < 0:
+        seconds = 0
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = seconds % 60
+    return f"{hours}:{minutes:02d}:{secs:05.2f}"
+
+
+def slugify(text: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_")
+    return slug or "clip"
+
+
+# Single source of truth for the rendered-clip filename format — render_clip() below writes
+# it, and train_loop.py's extract_frames_for_clips() re-derives it via clip_glob_pattern()
+# when no explicit rendered-path dict was handed to it (its standalone-CLI code path). The
+# two used to be independently hardcoded in both files, kept in sync only by convention.
+def clip_output_filename(index: int, title: str) -> str:
+    return f"clip_{index}_{slugify(title)}.mp4"
+
+
+def clip_glob_pattern(index: int) -> str:
+    return f"clip_{index}_*.mp4"
+
+
+def load_json(path: Path) -> dict:
+    if not path.exists():
+        raise FileNotFoundError(f"Required file not found: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _escape_ass_text(text: str) -> str:
+    """A literal '{' or '}' in transcribed speech would be parsed by libass as an
+    override-tag delimiter, corrupting or swallowing that (or a subsequent) subtitle line
+    when burned into the final render (found in review, 2026-08-18). ASS has no native
+    escape sequence for a literal brace, and spoken text has no legitimate use for
+    override-tag-only characters, so they're stripped rather than escaped."""
+    return text.replace("{", "").replace("}", "")
+
+
+def _fallback_segment_event(
+    seg: dict, clip_start: float, clip_end: float, position_tag: str, margin_r: int = 0
+) -> Optional[str]:
+    """Whole-segment subtitle line used when word-level timestamps are unavailable."""
+    rel_start = max(seg["start"], clip_start) - clip_start
+    rel_end = min(seg["end"], clip_end) - clip_start
+    if rel_end <= rel_start:
+        return None
+
+    text = _escape_ass_text(seg["text"].strip().replace("\n", " ").upper())
+    if not text:
+        return None
+
+    return f"Dialogue: 0,{format_ass_timestamp(rel_start)},{format_ass_timestamp(rel_end)},Default,,0,{margin_r},0,,{position_tag}{text}"
+
+
+def _word_block_events(
+    words: list, clip_start: float, clip_end: float, position_tag: str, highlight_color: str, margin_r: int = 0
+) -> List[str]:
+    """Karaoke-style word-by-word highlighting: one Dialogue line per word, timed to that word."""
+    events = []
+    for block_start in range(0, len(words), WORDS_PER_BLOCK):
+        block = words[block_start : block_start + WORDS_PER_BLOCK]
+        block_texts = [_escape_ass_text(w["text"].strip().upper()) for w in block]
+
+        for i, word in enumerate(block):
+            w_start = word["start"]
+            w_end = word["end"]
+            if w_end <= clip_start or w_start >= clip_end:
+                continue
+
+            rel_start = max(w_start, clip_start) - clip_start
+            rel_end = min(w_end, clip_end) - clip_start
+            if rel_end <= rel_start:
+                continue
+
+            rendered = [
+                f"{{\\c&H{highlight_color}&}}{text}{{\\c&H{WORD_BASE_COLOR}&}}" if j == i else text
+                for j, text in enumerate(block_texts)
+            ]
+            line_text = " ".join(rendered)
+
+            events.append(
+                f"Dialogue: 0,{format_ass_timestamp(rel_start)},{format_ass_timestamp(rel_end)},Default,,0,{margin_r},0,,{position_tag}{line_text}"
+            )
+
+    return events
+
+
+def build_ass_for_clip(
+    clip: dict,
+    transcript: dict,
+    index: int,
+    highlight_color: str = DEFAULT_HIGHLIGHT_COLOR,
+    output_w: int = 1080,
+    output_h: int = 1920,
+    layout: str = LAYOUT_SPLIT_SCREEN,
+    facecam_box: Optional[Tuple[int, int, int, int]] = None,
+    multi_cam_boxes: Optional[list] = None,
+) -> Path:
+    clip_start = clip["start_time"]
+    clip_end = clip["end_time"]
+    segments = transcript.get("segments", [])
+
+    # Lower third, where TikTok viewers expect captions (e.g. y=1350-1400 at 1080x1920),
+    # nudged clear of the face(s) this layout puts on the canvas and of TikTok's right-hand
+    # button column (see text_placement.py). Without face boxes the legacy ratios apply.
+    rects = text_placement.face_rects(
+        layout,
+        output_w,
+        output_h,
+        facecam_box,
+        multi_cam_boxes,
+        face_zone_ratio=SPLIT_SCREEN_FACE_RATIO,
+    )
+    title_y_ratio = SPLIT_SCREEN_TITLE_Y_RATIO if layout == LAYOUT_SPLIT_SCREEN else TITLE_BOX_Y_RATIO
+    placement = text_placement.compute_text_placement(
+        layout,
+        output_w,
+        output_h,
+        clip.get("title") or "",
+        SUBTITLE_Y_RATIO,
+        title_y_ratio,
+        rects,
+        face_zone_ratio=SPLIT_SCREEN_FACE_RATIO,
+    )
+    column = text_placement.subtitle_column(output_w)
+    pos_x = column["x"]
+    pos_y = placement["subtitle_y"]
+    margin_r = column["margin_r"]
+    position_tag = f"{{\\an5\\pos({pos_x},{pos_y})}}"
+
+    events = []
+    for seg in segments:
+        if seg["end"] <= clip_start or seg["start"] >= clip_end:
+            continue
+
+        words = seg.get("words") or []
+        if not words:
+            event = _fallback_segment_event(seg, clip_start, clip_end, position_tag, margin_r)
+            if event:
+                events.append(event)
+            continue
+
+        events.extend(_word_block_events(words, clip_start, clip_end, position_tag, highlight_color, margin_r))
+
+    if not events:
+        logger.warning(
+            "No transcribed words found for clip %d (%.2fs-%.2fs); writing subtitle-free .ass",
+            index,
+            clip_start,
+            clip_end,
+        )
+
+    # White title-box hook, upper half of the canvas, visible for the clip's whole duration —
+    # separate from the word-by-word subtitle events above (different style, different fixed
+    # position, TITLE_BOX_Y_RATIO instead of SUBTITLE_Y_RATIO so the two can never overlap).
+    # Reuses clip["title"] (already LLM-generated per clip, e.g. "Krasser Moment!") rather
+    # than asking the LLM for a second, separate hook string.
+    title_text = _escape_ass_text((clip.get("title") or "").strip())
+    if title_text:
+        # split_screen uses its own safe top-margin ratio instead of TITLE_BOX_Y_RATIO — see
+        # SPLIT_SCREEN_TITLE_Y_RATIO's own docstring for why (must clear the facecam zone
+        # entirely, not sit on the seam).
+        title_pos_y = placement["title_y"]
+        title_tag = f"{{\\an5\\pos({output_w // 2},{title_pos_y})}}"
+        clip_duration = clip_end - clip_start
+        events.append(
+            f"Dialogue: 0,{format_ass_timestamp(0)},{format_ass_timestamp(clip_duration)},TitleBox,,0,0,0,,{title_tag}{title_text}"
+        )
+
+    # Concurrent streamer processes reuse clip indices. A unique file per invocation
+    # prevents one render from burning another streamer's captions/title into its video.
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix=f"clip_{index}_",
+        suffix=".ass",
+        dir=TEMP_DIR,
+        delete=False,
+    ) as f:
+        ass_path = Path(f.name)
+        f.write(ASS_HEADER_TEMPLATE.format(width=output_w, height=output_h))
+        if events:
+            f.write("\n".join(events))
+            f.write("\n")
+
+    logger.info("Wrote subtitles: %s (%d lines)", ass_path, len(events))
+    return ass_path
+
+
+def _read_video_properties(video_path: Path) -> Tuple[int, int, float, float]:
+    """Raw (width, height, fps, frame_count) from a single cv2.VideoCapture open — no
+    validation here, since the three public functions below each need a different subset
+    and must only raise over the property they actually care about (e.g.
+    get_video_dimensions() must not fail a video whose width/height are fine but whose fps
+    metadata happens to be unreliable, which does happen with some live-recorded streams)."""
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+    try:
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0
+        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+    finally:
+        cap.release()
+    return width, height, fps, frame_count
+
+
+def get_video_properties(video_path: Path) -> Tuple[int, int, float]:
+    """(width, height, duration_seconds), validating all three — the function to reach for
+    whenever a caller needs more than one of these for the same file, instead of the
+    individual functions below each opening their own separate capture."""
+    width, height, fps, frame_count = _read_video_properties(video_path)
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"Could not determine dimensions for video: {video_path}")
+    if fps <= 0 or frame_count <= 0:
+        raise RuntimeError(f"Could not determine duration for video: {video_path}")
+    return width, height, frame_count / fps
+
+
+def get_video_dimensions(video_path: Path) -> Tuple[int, int]:
+    width, height, _, _ = _read_video_properties(video_path)
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"Could not determine dimensions for video: {video_path}")
+    return width, height
+
+
+def get_video_duration(video_path: Path) -> float:
+    _, _, fps, frame_count = _read_video_properties(video_path)
+    if fps <= 0 or frame_count <= 0:
+        raise RuntimeError(f"Could not determine duration for video: {video_path}")
+    return frame_count / fps
+
+
+# Near-start, middle, near-end rather than literal 0%/50%/100% — the very first/last frame
+# of a render is occasionally black (encoder ramp-up/fade), which would otherwise starve
+# the vision critic (train_loop.py) of a usable image for that slot.
+PREVIEW_FRAME_FRACTIONS = (0.05, 0.5, 0.95)
+
+
+def extract_preview_frames(video_path: Path, frames_dir: Path = TEMP_DIR) -> List[Path]:
+    """Extract 3 evenly spaced frames (near-start, middle, near-end) from a rendered clip
+    via FFmpeg, as JPEGs — used by train_loop.py's multimodal vision critic to inspect
+    visual composition (facecam position, gameplay visibility, black bars, glitches).
+
+    Best-effort: if a given timestamp's frame can't be extracted, it's skipped rather than
+    failing the whole batch — the caller (train_loop.py) degrades to text-only evaluation
+    if too few frames come back."""
+    try:
+        duration = get_video_duration(video_path)
+    except RuntimeError as e:
+        logger.warning("Could not determine duration for %s, skipping frame extraction: %s", video_path, e)
+        return []
+
+    frames_dir.mkdir(exist_ok=True)
+    video_mtime = video_path.stat().st_mtime
+
+    def _extract_one(i: int, fraction: float) -> Optional[Path]:
+        timestamp = max(0.0, duration * fraction)
+        frame_path = frames_dir / f"{video_path.stem}_frame{i}.jpg"
+
+        # Cache hit: a frame already exists AND is at least as new as the source video, so
+        # it was extracted from this exact render, not a stale one — output filenames are
+        # reused across cycles (ffmpeg -y overwrites the same clip_<index>_<slug>.mp4), so a
+        # frame older than its video is from a *different* render under the same name and
+        # must not be trusted. This is what lets a clip re-evaluated across cycles (e.g.
+        # after a purge-threshold change, with no actual re-render) skip re-extraction
+        # entirely instead of re-encoding frames from scratch every time.
+        if frame_path.exists() and frame_path.stat().st_mtime >= video_mtime:
+            return frame_path
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            str(timestamp),
+            "-i",
+            str(video_path),
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
+            str(frame_path),
+        ]
+        try:
+            result = _run_ffmpeg(cmd, timeout=FFMPEG_FRAME_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "Preview frame extraction at %.2fs from %s timed out after %ds",
+                timestamp,
+                video_path,
+                FFMPEG_FRAME_TIMEOUT_SECONDS,
+            )
+            return None
+        if result.returncode != 0 or not frame_path.exists():
+            logger.warning(
+                "Could not extract preview frame at %.2fs from %s: %s",
+                timestamp,
+                video_path,
+                extract_ffmpeg_error_summary(result.stderr),
+            )
+            return None
+        return frame_path
+
+    # The 3 frame grabs read the same source video but write distinct output files and share
+    # no mutable state — an independent, embarrassingly-parallel ffmpeg subprocess spawn each,
+    # so running them concurrently is a safe, meaningful cut in wall-clock time per clip.
+    with ThreadPoolExecutor(max_workers=len(PREVIEW_FRAME_FRACTIONS)) as pool:
+        results = list(pool.map(lambda args: _extract_one(*args), enumerate(PREVIEW_FRAME_FRACTIONS)))
+
+    return [p for p in results if p is not None]
+
+
+def escape_subtitles_path(path: Path) -> str:
+    p = str(path.resolve()).replace("\\", "/")
+    p = p.replace(":", "\\:")
+    return p
+
+
+def build_filter_complex(
+    layout: str,
+    ass_path: Path,
+    output_w: int,
+    output_h: int,
+    facecam_box: Tuple[int, int, int, int] | None = None,
+    gameplay_box: Tuple[int, int, int, int] | None = None,
+    multi_cam_boxes: List[Tuple[int, int, int, int]] | None = None,
+) -> str:
+    subtitles = escape_subtitles_path(ass_path)
+
+    if layout == LAYOUT_MULTI_CAM:
+        # Discord call / podcast / multi-participant grid (2026-08-24 incident: see
+        # vision.is_multi_cam_scene()'s own docstring) — N individual speaker crops (2-4,
+        # vision.MULTI_CAM_MIN_FACES..MAX_FACES), each "cover" fit into its OWN equal-height
+        # slot exactly like split_screen's face/game zones, then vstacked. Slot heights are
+        # computed to sum to EXACTLY output_h (the last slot absorbs the // remainder) — the
+        # single-vstack-of-two-zones version of this bug (2026-08-24 incident) was a vertical
+        # gap between zones whose heights didn't actually sum to the canvas height; this
+        # generalizes the fix to N slots instead of assuming N=2.
+        n = len(multi_cam_boxes)
+        base_h = output_h // n
+        slot_heights = [base_h] * (n - 1) + [output_h - base_h * (n - 1)]
+        filters = []
+        labels = []
+        for i, (box, slot_h) in enumerate(zip(multi_cam_boxes, slot_heights, strict=True)):
+            bx, by, bw, bh = box
+            label = f"cam{i}"
+            filters.append(
+                f"[0:v]crop={bw}:{bh}:{bx}:{by},"
+                f"scale={output_w}:{slot_h}:force_original_aspect_ratio=increase,"
+                f"crop={output_w}:{slot_h},setsar=1,format=yuv420p[{label}]"
+            )
+            labels.append(f"[{label}]")
+        return (
+            ";".join(filters) + f";{''.join(labels)}vstack=inputs={n}[stacked];[stacked]subtitles='{subtitles}'[outv]"
+        )
+
+    if layout == LAYOUT_SPLIT_SCREEN:
+        # TikTok's standard "reaction on top, content below" split: the facecam gets the
+        # top third, the gameplay gets the bottom two-thirds — not an even 50/50 stack,
+        # since the facecam is a reaction reference, not the main attraction.
+        # Each zone is exactly ONE filter chain over ONE crop of [0:v] — no split/overlay
+        # of two copies of the same source, which previously made the gameplay render as
+        # a visually duplicated screen.
+        face_x, face_y, face_w, face_h = facecam_box
+        game_x, game_y, game_w, game_h = gameplay_box
+        face_zone_h = int(output_h * SPLIT_SCREEN_FACE_RATIO)
+        game_zone_h = output_h - face_zone_h
+
+        # Facecam: "cover" fit — scale up with force_original_aspect_ratio=increase (so no
+        # axis is ever stretched) and crop the overhang — fills its zone edge-to-edge with
+        # no gaps, since a tight face crop rarely needs to show its full source frame.
+        # format=yuv420p pins a consistent pixel format going into vstack — mixing formats
+        # at a merge point is what produces the green/corrupted-color artifacts.
+        face_filter = (
+            f"[0:v]crop={face_w}:{face_h}:{face_x}:{face_y},"
+            f"scale={output_w}:{face_zone_h}:force_original_aspect_ratio=increase,"
+            f"crop={output_w}:{face_zone_h},setsar=1,format=yuv420p[face]"
+        )
+
+        # Gameplay: "cover" fit — same technique as the facecam zone above, scaled UP with
+        # force_original_aspect_ratio=increase and the overhang cropped, so it fills its zone
+        # edge-to-edge with no black bars (2026-08-21, account-owner request: split_screen's
+        # gameplay zone previously used "contain" fit + black padding, which showed as visible
+        # letterbox bars around a typical 16:9 source squeezed into this narrower zone).
+        # Trade-off, accepted deliberately: unlike the old contain-fit, this DOES crop some of
+        # the source frame's left/right edges — a corner HUD element or minimap sitting right
+        # at the crop line can get clipped. Centered crop (the default -2 in crop=W:H with no
+        # explicit x/y offset) is the safest default for typical centered gameplay action.
+        game_filter = (
+            f"[0:v]crop={game_w}:{game_h}:{game_x}:{game_y},"
+            f"scale={output_w}:{game_zone_h}:force_original_aspect_ratio=increase,"
+            f"crop={output_w}:{game_zone_h},setsar=1,format=yuv420p[game]"
+        )
+
+        return (
+            f"{face_filter};"
+            f"{game_filter};"
+            f"[face][game]vstack=inputs=2,format=yuv420p[stacked];"
+            f"[stacked]subtitles='{subtitles}'[outv]"
+        )
+
+    if layout == LAYOUT_FULL_CAM:
+        # Single-face content where the whole source frame IS the subject (no separate
+        # gameplay feed to show alongside it) — same "cover" crop technique as split_screen's
+        # face zone above, just filling the ENTIRE canvas instead of only the top third.
+        # facecam_box here was detected with FULL_CAM_PADDING_FACTOR, not the tighter default
+        # used for split_screen's short zone — see that constant's own docstring.
+        face_x, face_y, face_w, face_h = facecam_box
+        return (
+            f"[0:v]crop={face_w}:{face_h}:{face_x}:{face_y},"
+            f"scale={output_w}:{output_h}:force_original_aspect_ratio=increase,"
+            f"crop={output_w}:{output_h},setsar=1,format=yuv420p[cropped];"
+            f"[cropped]subtitles='{subtitles}'[outv]"
+        )
+
+    if layout == LAYOUT_CENTER_CROP:
+        # No facecam detected -- smart/center-crop the gameplay footage to fill the ENTIRE
+        # canvas edge-to-edge (2026-08-21, account-owner request: no black bars/blur fallback
+        # when there's no facecam to split off). Same "cover" fit technique as full_cam's
+        # face-crop step above, just applied to the whole source frame with no pre-crop toward
+        # a detected face box -- crop=W:H with no explicit x/y offset centers on the frame's
+        # own middle, the standard assumption for gameplay content where the action tends to
+        # sit centered. Trade-off, accepted deliberately: unlike blur_background's contain-fit
+        # (which this now replaces as resolve_layout()'s own no-face fallback -- still
+        # available as an explicit manual choice), a HUD/minimap element sitting at a source
+        # frame's edge can get clipped by this crop.
+        return (
+            f"[0:v]setsar=1,scale={output_w}:{output_h}:force_original_aspect_ratio=increase,"
+            f"crop={output_w}:{output_h},format=yuv420p[cropped];"
+            f"[cropped]subtitles='{subtitles}'[outv]"
+        )
+
+    if layout == LAYOUT_BLUR_BACKGROUND:
+        # setsar=1 right at the source reference (not just on the outputs) so a source
+        # with non-square sample-aspect-ratio metadata can never throw off the aspect math
+        # below. Blur a heavily downscaled copy, then upscale — far cheaper than blurring
+        # full-res.
+        small_w, small_h = output_w // 4, output_h // 4
+        return (
+            f"[0:v]setsar=1,scale={small_w}:{small_h}:force_original_aspect_ratio=increase,"
+            f"crop={small_w}:{small_h},boxblur=20:20,scale={output_w}:{output_h},"
+            # Slight darkening (2026-08-24, account-owner spec: eq brightness=-0.15) so the
+            # sharp foreground reads as clearly "the real content" against the blurred fill,
+            # not just a same-brightness backdrop it visually competes with.
+            f"eq=brightness=-0.15,setsar=1,format=yuv420p[bg];"
+            # Contain-fit within the FULL canvas — both width AND height are bounded here
+            # (force_original_aspect_ratio=decrease against output_w:output_h), not just
+            # width. The previous width-only scale (scale=W:-2) left height unconstrained,
+            # so a less-widescreen source could produce a foreground TALLER than the
+            # canvas, pushing the centering overlay negative and corrupting the composite.
+            f"[0:v]setsar=1,scale={output_w}:{output_h}:force_original_aspect_ratio=decrease,"
+            f"setsar=1,format=yuv420p[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[stacked];"
+            f"[stacked]subtitles='{subtitles}'[outv]"
+        )
+
+    raise ValueError(f"Unknown layout: {layout}")
+
+
+def pick_background_track(clip: Optional[dict] = None) -> Optional[Path]:
+    """Mood-weighted random track from MUSIC_DIR, or None if the folder is missing/empty — the "randomly,
+    if any are configured" contract render_clip() relies on to fall back to the old
+    music-free render untouched.
+
+    Epsilon-greedy bias (2026-08-21, see optimization_engine.py): once enough real measured
+    uploads exist to name a preferred track, most picks still land on it, but
+    MUSIC_EXPLORATION_RATE of picks stay uniformly random regardless — every track keeps
+    accumulating real samples instead of the picker locking onto whichever one got lucky
+    first with too little data to trust.
+
+    Non-preferred picks are weighted by how well a track's tags (background_music/tags.json)
+    match the clip (energy_rating, hook_style, title keywords — see music_matching.py); with
+    no clip or no tags this is the old uniform random choice."""
+    if not MUSIC_DIR.is_dir():
+        return None
+    tracks = [p for p in MUSIC_DIR.iterdir() if p.is_file() and p.suffix.lower() in MUSIC_EXTENSIONS]
+    if not tracks:
+        return None
+
+    preferred_name = optimization_engine.preferred_music_track()
+    if preferred_name and random.random() >= optimization_engine.MUSIC_EXPLORATION_RATE:
+        preferred_path = MUSIC_DIR / preferred_name
+        if preferred_path in tracks:
+            return preferred_path
+
+    tracks.sort()
+    weights = music_matching.track_weights(tracks, music_matching.load_track_tags(MUSIC_DIR), clip)
+    return random.choices(tracks, weights=weights, k=1)[0]
+
+
+def _has_audio_stream(video_path: Path) -> bool:
+    """ffprobe check so build_audio_filter() never references a [0:a] stream that doesn't
+    exist — a source clip with no audio track (rare, but seen from corrupted stream chunks)
+    would otherwise make ffmpeg fail outright instead of just skipping the mix. Assumes yes on
+    a probe failure: matches the old unconditional "-map 0:a?" behavior's own bias (let ffmpeg
+    itself decide at map time) rather than silently dropping audio on a probe hiccup."""
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "csv=p=0",
+        str(video_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except (subprocess.TimeoutExpired, OSError):
+        return True
+    if result.returncode != 0:
+        # A real ffprobe failure (corrupted container, unreadable file) is exactly the
+        # "probe hiccup" case this function's docstring already says to assume yes on — found
+        # in review, 2026-08-21: the original version only checked for a raised exception,
+        # not a clean-but-nonzero exit, so a real failure here read as "confirmed no audio"
+        # and could silently drop a clip's real voice track in favor of music-only.
+        logger.warning(
+            "ffprobe failed checking audio streams in %s (exit %d): %s",
+            video_path,
+            result.returncode,
+            result.stderr.strip(),
+        )
+        return True
+    return bool(result.stdout.strip())
+
+
+AUDIO_LOUDNORM = "loudnorm=I=-14:TP=-1:LRA=11"
+
+
+def build_audio_filter(has_source_audio: bool, clip_duration: float) -> str:
+    """Audio half of the filter graph when a background track is in play: the source clip's
+    own audio (if any) at full volume, the (looped, via -stream_loop -1 on the music input so
+    it always covers clips longer than the track itself) music track well underneath it via
+    BACKGROUND_MUSIC_VOLUME, summed with normalize=0 (amix's default divide-by-input-count
+    normalization would quietly halve the voice track, not just the music) and capped with a
+    limiter as cheap insurance against the two signals summing past 0dBFS. duration=first trims
+    the mix to the voice track's length; without a voice track there's nothing to trim against,
+    so clip_duration does that job explicitly instead. Normalize the final mix to
+    -14 LUFS / -1 dBTP, matching the post-render QC target."""
+    if has_source_audio:
+        return (
+            "[0:a]volume=1.0[voice];"
+            f"[1:a]volume={BACKGROUND_MUSIC_VOLUME}[bg];"
+            "[voice][bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mixed];"
+            f"[mixed]alimiter=limit=0.98,{AUDIO_LOUDNORM}[outa]"
+        )
+    return f"[1:a]volume={BACKGROUND_MUSIC_VOLUME},atrim=duration={clip_duration},alimiter=limit=0.98,{AUDIO_LOUDNORM}[outa]"
+
+
+# Intel Quick Sync hardware H.264 encoder — was tried as the encode step (usually the single
+# most expensive part of rendering 15-20 clips per video) to offload it to the iGPU. Disabled
+# 2026-08-22: confirmed /dev/dri does not exist on this VPS at all (no iGPU passed through),
+# so every single h264_qsv attempt failed (exit 234, or exit 0 with an unplayable 0-packet
+# file per _is_valid_render()'s own docstring) and every render paid for a wasted attempt
+# before falling back to CPU. Left defined (unused) in case a future box does have a working
+# iGPU — QSV has no CRF; -global_quality is its closest equivalent (ICQ mode, lower = better).
+# -movflags +faststart moves the MP4 moov atom to the front of the file — required for the
+# platforms this renders for (TikTok/YouTube/Instagram) to start playback/processing before
+# the full file downloads, instead of needing to seek to the end of the file first.
+QSV_ENCODE_ARGS = ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "25", "-movflags", "+faststart"]
+CPU_ENCODE_ARGS = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+
+
+def _build_render_cmd(
+    source_video: Path,
+    start: float,
+    end: float,
+    filter_complex: str,
+    encode_args: list,
+    output_path: Path,
+    music_path: Optional[Path] = None,
+    has_source_audio: bool = True,
+) -> list:
+    inputs = ["-ss", str(start), "-to", str(end), "-i", str(source_video)]
+    audio_map = "0:a?"
+
+    if music_path is not None:
+        # -stream_loop -1 on the music input (not the source) so a track shorter than the
+        # clip repeats instead of leaving the tail silent; amix's duration=first (or the
+        # explicit atrim in the no-source-audio case) trims the result back down regardless.
+        inputs += ["-stream_loop", "-1", "-i", str(music_path)]
+        audio_filter = build_audio_filter(has_source_audio, end - start)
+        filter_complex = f"{filter_complex};{audio_filter}"
+        audio_map = "[outa]"
+
+    return [
+        "ffmpeg",
+        "-y",
+        *inputs,
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[outv]",
+        "-map",
+        audio_map,
+        *encode_args,
+        *(["-af", AUDIO_LOUDNORM] if music_path is None and has_source_audio else []),
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ar",
+        "44100",
+        str(output_path),
+    ]
+
+
+# A full clip render (decode + filter graph + encode) legitimately needs minutes; a single
+# still-frame grab should take well under a second. These used to share one 600s timeout,
+# so a hung ffmpeg during a trivial preview-frame extraction could stall an entire cycle for
+# up to 30 minutes (3 frames x 10 minutes each) before the vision critic even got a chance
+# to degrade to text-only.
+FFMPEG_RENDER_TIMEOUT_SECONDS = 600
+FFMPEG_FRAME_TIMEOUT_SECONDS = 30
+
+
+def _run_ffmpeg(cmd: list, timeout: int = FFMPEG_RENDER_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
+    # encoding="utf-8" is required here: without it, subprocess.run's text mode falls back
+    # to the system locale (cp1252/"charmap" on German Windows), which crashes with
+    # UnicodeDecodeError the moment ffmpeg's UTF-8 log output contains a German umlaut.
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+
+
+# ffmpeg always prints its own build-info banner to stderr before any real output: a version
+# line, a "built with" line, a "configuration:" line listing every --enable-lib... flag it
+# was compiled with (hundreds of them, confirmed live 2026-08-19 to run past 2000 characters
+# on a single line by itself), then several library-version lines. A plain stderr[-N:] tail
+# truncation does NOT reliably exclude this banner when ffmpeg fails fast (e.g. right at
+# "Invalid data found when processing input") — the whole captured stderr can be shorter
+# than the truncation window, banner included, which is exactly what ended up dumped into
+# agent_state.json's current_action and made the dashboard unreadable.
+_FFMPEG_BANNER_PREFIXES = (
+    "ffmpeg version",
+    "built with",
+    "configuration:",
+    "libavutil",
+    "libavcodec",
+    "libavformat",
+    "libavdevice",
+    "libavfilter",
+    "libswscale",
+    "libswresample",
+)
+
+
+def extract_ffmpeg_error_summary(stderr: Optional[str], max_lines: int = 3) -> str:
+    """The real error is reliably one of the LAST few non-empty lines of ffmpeg's stderr
+    regardless of total output length, so this filters by content (dropping known banner
+    line prefixes) instead of by position/character count, then keeps the last `max_lines`.
+    Shared by every ffmpeg-invoking module (process.py, stream_watcher.py) instead of each
+    re-truncating stderr by hand."""
+    if not stderr:
+        return ""
+    lines = [
+        stripped
+        for line in stderr.splitlines()
+        if (stripped := line.strip()) and not stripped.startswith(_FFMPEG_BANNER_PREFIXES)
+    ]
+    return "\n".join(lines[-max_lines:])
+
+
+def _is_valid_render(output_path: Path) -> bool:
+    """True if output_path is a real, decodable video — not just a nonempty file. Found live,
+    2026-08-21: h264_qsv on this VPS has been observed to exit 0 while writing a small,
+    nonzero-size container with zero actual video packets in it (no working iGPU/driver under
+    load — confirmed separately that /dev/dri doesn't exist on this box at all), which the old
+    exists()/size>0 check alone could not catch. The corrupt file then silently passed the
+    render guard and only surfaced three steps later as a best-effort-skipped warning in
+    extract_preview_frames() ("Could not determine duration ... Could not open video") — or,
+    for a clip that happened not to need preview frames, not at all, reaching the critic and
+    potentially upload as an unplayable video. Reuses get_video_properties()'s own cv2-backed
+    validation (the same check extract_preview_frames() already trusts as authoritative)
+    rather than a second, separate ffprobe-based check."""
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        return False
+    try:
+        get_video_properties(output_path)
+        return True
+    except RuntimeError:
+        return False
+
+
+def render_clip(
+    source_video: Path,
+    clip: dict,
+    ass_path: Path,
+    index: int,
+    layout: str,
+    output_w: int,
+    output_h: int,
+    facecam_box: Tuple[int, int, int, int] | None = None,
+    gameplay_box: Tuple[int, int, int, int] | None = None,
+    output_dir: Path | None = None,
+    music_path: Path | None = "unset",  # type: ignore[assignment]
+    has_source_audio: bool | None = None,
+    multi_cam_boxes: List[Tuple[int, int, int, int]] | None = None,
+) -> Path:
+    # output_dir defaults to the shared OUTPUT_DIR (single-video/manual/Streamlit usage,
+    # unchanged behavior) — auto_pilot.py passes a streamer-namespaced subdirectory instead
+    # when running under orchestrator.py, so two streamers rendering concurrently can never
+    # collide on the same clip_<index>_<slug>.mp4 path (found in review, 2026-08-18: H-14).
+    if output_dir is None:
+        output_dir = OUTPUT_DIR
+    start = clip["start_time"]
+    end = clip["end_time"]
+    output_path = output_dir / clip_output_filename(index, clip["title"])
+
+    filter_complex = build_filter_complex(
+        layout,
+        ass_path,
+        output_w,
+        output_h,
+        facecam_box,
+        gameplay_box,
+        multi_cam_boxes,
+    )
+
+    # music_path defaults to the sentinel "unset" (not None) so a caller can explicitly pass
+    # music_path=None to render silently even when tracks exist — distinct from "caller didn't
+    # know/care, pick one automatically" (the old, still-default behavior every existing
+    # caller/test relies on). process_clips_iter() below passes an explicit pre-picked track
+    # so it can record which one was actually used; picked once per clip either way (not once
+    # per encoder attempt) so a QSV->CPU fallback retries with the SAME track rather than
+    # silently swapping to a different random one mid-render.
+    if music_path == "unset":
+        music_path = pick_background_track(clip)
+    # has_source_audio, when given, lets a caller that already knows the answer (e.g.
+    # process_clips_iter() below, which re-renders the SAME source_video across an entire
+    # batch) skip a redundant ffprobe subprocess per clip — found in review, 2026-08-21, the
+    # same pattern get_video_dimensions() already avoids by being hoisted outside that loop.
+    if has_source_audio is None:
+        has_source_audio = _has_audio_stream(source_video) if music_path else True
+
+    logger.info("Rendering clip %d (layout=%s) via libx264 -> %s", index, layout, output_path)
+    cmd = _build_render_cmd(
+        source_video, start, end, filter_complex, CPU_ENCODE_ARGS, output_path, music_path, has_source_audio
+    )
+    result = _run_ffmpeg(cmd)
+    encode_ok = result.returncode == 0 and _is_valid_render(output_path)
+
+    if not encode_ok:
+        if music_path is not None:
+            # A bad/corrupt file in background_music/ shouldn't be able to take an otherwise
+            # good clip down — one more attempt with music dropped entirely before giving up.
+            logger.warning(
+                "Render failed for clip %d with background music (%s), retrying without it: %s",
+                index,
+                music_path.name,
+                extract_ffmpeg_error_summary(result.stderr),
+            )
+            cmd = _build_render_cmd(source_video, start, end, filter_complex, CPU_ENCODE_ARGS, output_path)
+            result = _run_ffmpeg(cmd)
+            encode_ok = result.returncode == 0 and _is_valid_render(output_path)
+
+        if not encode_ok:
+            detail = (
+                extract_ffmpeg_error_summary(result.stderr)
+                if result.returncode != 0
+                else "produced an unplayable file (exits 0 but 0 usable video packets — the "
+                "requested start/end time is likely past the source clip's actual "
+                "duration; see analyze.py's select_clips() transcript_duration bound)"
+            )
+            logger.error("FFmpeg failed for clip %d: %s", index, detail)
+            raise RuntimeError(f"FFmpeg failed for clip {index} (exit code {result.returncode})")
+
+    logger.info("Finished clip %d: %s", index, output_path)
+    return output_path
+
+
+def find_source_video(explicit: Path | None) -> Path:
+    if explicit is not None:
+        if not explicit.exists():
+            raise FileNotFoundError(f"Source video not found: {explicit}")
+        return explicit
+
+    candidates: List[Path] = []
+    for ext in ("*.mp4", "*.mkv"):
+        candidates.extend(Path(".").glob(ext))
+
+    if not candidates:
+        raise FileNotFoundError("No source video found in the project root. Pass one explicitly with --video.")
+    if len(candidates) > 1:
+        raise RuntimeError(
+            f"Multiple candidate source videos found ({[str(c) for c in candidates]}); pass one explicitly with --video."
+        )
+    return candidates[0]
+
+
+# A face_count != 1 reading from a SINGLE sampled frame is ambiguous: it might genuinely be
+# zero/multiple people on screen for the whole clip, or it might be one unlucky frame (a
+# blink, motion blur, a HUD element briefly overlapping the webcam) in an otherwise ordinary
+# single-webcam clip. Retrying at a couple more timestamps before committing to
+# blur_background costs at most a couple extra detection passes per clip, only ever paid when
+# the first frame was already ambiguous. Fractions of the clip's own duration, not fixed
+# second offsets, so this scales sensibly across the full MIN/MAX_CLIP_DURATION range.
+
+
+def resolve_layout(
+    layout: str,
+    video_path: Path,
+    clip_start: float,
+    clip_end: float | None = None,
+    has_static_override: bool = False,
+    facecam_scan: "vision.FacecamScan | None" = None,
+    crop_box: tuple[int, int, int, int] | None = None,
+    validation_result: dict | None = None,
+) -> tuple[str, float]:
+    """Returns (resolved_layout, detection_ts) — NOT just the layout string (2026-08-22 fix).
+    Previously process_clips_iter() always called vision.get_facecam_coordinates() at
+    clip_start regardless of which timestamp this function actually found a face at, so a
+    face found only on a LAYOUT_RETRY_FRACTIONS retry (clip_start was ambiguous/faceless) had
+    the layout decision say "split_screen"/"full_cam" while the real crop, detected
+    independently at clip_start, silently fell back to vision._fallback_box() — a static
+    corner box that may not contain the face at all. detection_ts is the exact timestamp this
+    function's own detection succeeded at (or clip_start, for a manual/non-auto layout or the
+    no-face fallback, where no successful detection exists to reuse); the caller now passes
+    this straight into get_facecam_coordinates() instead of re-deriving/guessing a timestamp,
+    so the crop is always keyed off the SAME frame the layout decision was actually made from.
+
+    Three-way auto-layout decision: center_crop only when NO face clears
+    vision.FACE_COUNT_MIN_CONFIDENCE at all — there's nothing to crop toward. Any confident
+    face count >= 1 goes to the full_cam/split_screen decision below, keyed off the PRIMARY
+    (highest-scoring) detection's area/position; face_area_ratio (how much of the SOURCE frame
+    the raw box covers) and its horizontal centering tell a close-up/full-cam subject (a
+    Just-Chatting-style stream where the whole frame IS the person) apart from a small corner
+    webcam box over a separate gameplay feed (traditional split-screen streaming layout).
+
+    2026-08-21, changed from a strict face_count == 1 gate (found live: a real single-webcam
+    Fortnite clip has a confident corner facecam AND a confident-enough kill-cam/character
+    portrait alongside it — vision.py's 0.65 confidence floor already filters out weaker HUD
+    icons, but realistic in-game character faces can still clear that bar, landing on
+    face_count=2 and discarding a perfectly good corner-cam detection into the no-face
+    fallback). Trade-off, accepted deliberately: a genuine multi-person stream (a real second
+    guest, not a game-content false positive) now also resolves off the single highest-scoring
+    face instead of falling back — for this pipeline's actual content (solo Twitch gaming
+    clips), a confident non-webcam detection is far more often a game-HUD false positive than
+    a real second person, so biasing toward "use the best face found" rather than "give up on
+    any ambiguity" is the better default here.
+
+    2026-08-21: no-face fallback changed from blur_background to center_crop (account-owner
+    request: fill the canvas edge-to-edge, no blur/letterbox bars, when there's no facecam to
+    split off) — blur_background itself is untouched and still available as an explicit manual
+    --layout choice, just no longer AUTO's own default.
+
+    A face_count == 0 result is retried at a couple more timestamps within the clip (when
+    `clip_end` is given) before falling back to center_crop — see LAYOUT_RETRY_FRACTIONS.
+
+    `has_static_override`, when True (the streamer has a known `facecam_box` configured in
+    streamers.json — see streamers.StreamerEntry.facecam_box), skips that center_crop fallback
+    even after every retry comes up faceless: the streamer's own webcam position is known
+    independently of this clip's own dynamic detection, so split_screen (cropping toward that
+    known box, via get_facecam_coordinates()'s own override_box_ratio handling) is still the
+    right call rather than giving up on the facecam entirely. Only affects the zero-face case —
+    a face_count >= 1 result still resolves off the real detection as usual.
+
+    `facecam_scan` (2026-08-25) is this chunk's whole-recording webcam search — see
+    vision.locate_persistent_facecam(). When it ran successfully and found NO persistent
+    position, a small off-center face in this clip is not a corner webcam but something the
+    GAME drew (an EA FC player-card portrait is a real photograph of a real face, and scores
+    like one), so split_screen is vetoed down to center_crop rather than cropping game content
+    into the face zone — the exact defect that shipped on 2026-08-25. A scan that could not run
+    at all (`scan_succeeded` False) is no evidence either way and changes nothing.
+
+    Deliberately scoped to the split_screen branch only. full_cam's big/centered face could in
+    principle be a card portrait too, but a genuine full_cam subject (a Just-Chatting talking
+    head) moves around far more than a fixed corner cam, so it is the case most likely to miss
+    FACECAM_MIN_PERSISTENCE legitimately — vetoing it would risk downgrading real talking-head
+    clips to fix a defect that has not actually been observed there.
+    """
+    if crop_box is not None and layout in (LAYOUT_SPLIT_SCREEN, LAYOUT_FULL_CAM):
+        result = vision.validate_facecam_crop(str(video_path), clip_start, clip_end or clip_start, crop_box)
+        if validation_result is not None:
+            validation_result.update(result)
+        if not result["passed"]:
+            logger.warning(
+                "Layout changed/unsafe crop at %.2fs: %s -> %s", clip_start, result["reason"], LAYOUT_BLUR_BACKGROUND
+            )
+            return LAYOUT_BLUR_BACKGROUND, clip_start
+        return layout, clip_start
+    if layout != LAYOUT_AUTO:
+        return layout, clip_start
+
+    timestamps = [clip_start]
+    if clip_end is not None and clip_end > clip_start:
+        duration = clip_end - clip_start
+        timestamps += [clip_start + f * duration for f in LAYOUT_RETRY_FRACTIONS]
+
+    face_count, raw_box, frame_w, frame_h = 0, None, 0, 0
+    # Accumulated across every timestamp actually sampled below, not just the last one tried —
+    # see vision.looks_like_busy_multi_face_scene()'s own docstring for why this signal exists.
+    # A single frame's raw detection count is noisy on a 9-tile grid (real observed spread
+    # across timestamps a few seconds apart, same chunk: 1, 2, 1, 0 detections) — checking only
+    # the final retry timestamp would miss a busy scene whose last-tried frame happened to catch
+    # nobody clearly enough even at the permissive raw-count bar, undercounting exactly the
+    # scenario this exists to catch.
+    saw_busy_scene = False
+    for attempt, ts in enumerate(timestamps):
+        # Multi-cam grid check first (2026-08-24 incident — see vision.is_multi_cam_scene()'s
+        # own docstring): a Discord call / podcast / collab grid needs a completely different
+        # treatment (N individual speaker slots, or blur_background if too crowded to slot)
+        # than the single-primary-face full_cam/split_screen decision below, which assumes
+        # exactly one real streamer face plus at most incidental false positives. Runs as its
+        # own detection pass; fails open (returns None) on any read error, same as the
+        # single-face path below, so this never turns a working single-cam clip into a
+        # crash — it just falls through to that existing path unchanged.
+        multi_cam = vision.detect_multi_cam_faces(str(video_path), ts)
+        if multi_cam is not None:
+            boxes, _, _ = multi_cam
+            logger.info(
+                "Auto-layout at %.2fs: %d similarly-sized confident faces at %.2fs -> %s",
+                clip_start,
+                len(boxes),
+                ts,
+                LAYOUT_MULTI_CAM,
+            )
+            return LAYOUT_MULTI_CAM, ts
+
+        if vision.looks_like_busy_multi_face_scene(str(video_path), ts):
+            saw_busy_scene = True
+
+        try:
+            face_count, raw_box, frame_w, frame_h = vision.detect_faces_for_layout(str(video_path), ts)
+        except RuntimeError as e:
+            # Found live, 2026-08-20: a retry timestamp (clip_start + fraction * duration)
+            # can land just past the chunk .ts file's actual readable length — the recording
+            # can end up a little shorter than the clip's own end_time suggests (e.g. the
+            # stream cut out mid-chunk) — cv2 then fails the frame read outright instead of
+            # returning 0 faces. That's a single-timestamp problem, not a reason to crash the
+            # whole cycle (and every OTHER clip in it) the way an uncaught RuntimeError would.
+            # Treat it exactly like an ambiguous 0-face reading: try the next retry timestamp,
+            # or fall through to the blur_background fallback below if this was the last one.
+            logger.warning(
+                "Auto-layout at %.2fs: could not read frame at %.2fs (%s) — trying next timestamp", clip_start, ts, e
+            )
+            face_count, raw_box, frame_w, frame_h = 0, None, 0, 0
+            continue
+
+        if face_count > vision.MULTI_CAM_MAX_FACES:
+            # Too many faces on screen to slot individually (a 9-player Werwolf/Among Us/
+            # poker-table overlay) — neither a 2-4-way multi_cam stack nor the single-primary
+            # full_cam/split_screen decision make sense here. blur_background shows the WHOLE
+            # event uncropped (foreground contain-fit) instead of guessing which one face out
+            # of 9+ is "the" subject.
+            logger.info(
+                "Auto-layout at %.2fs: face_count=%d (> %d) at %.2fs, too crowded to slot individually -> %s",
+                clip_start,
+                face_count,
+                vision.MULTI_CAM_MAX_FACES,
+                ts,
+                LAYOUT_BLUR_BACKGROUND,
+            )
+            return LAYOUT_BLUR_BACKGROUND, ts
+
+        if face_count >= 1:
+            if attempt > 0:
+                logger.info("Auto-layout at %.2fs: face_count=%d found on retry at %.2fs", clip_start, face_count, ts)
+            break
+
+    if face_count >= 1:
+        ratio = vision.face_area_ratio(raw_box, frame_w, frame_h)
+        center_x_ratio = vision.face_center_x_ratio(raw_box, frame_w)
+        is_centered = CENTRAL_FACE_X_MIN_RATIO <= center_x_ratio <= CENTRAL_FACE_X_MAX_RATIO
+        resolved = LAYOUT_FULL_CAM if ratio >= FULL_CAM_MIN_FACE_AREA_RATIO or is_centered else LAYOUT_SPLIT_SCREEN
+        if (
+            resolved == LAYOUT_SPLIT_SCREEN
+            and facecam_scan is not None
+            and facecam_scan.scan_succeeded
+            and facecam_scan.box_ratio is None
+        ):
+            # See this function's docstring: no position held still across the whole chunk, so
+            # this small off-center "face" is game content, not a corner webcam.
+            logger.warning(
+                "Auto-layout at %.2fs: face_count=%d looks like a corner facecam, but the "
+                "whole-chunk scan found no persistent webcam position (best held %d/%d "
+                "sample(s)) — this is game-rendered content, not a camera. Using %s instead "
+                "of %s so no game footage gets cropped into the face zone.",
+                clip_start,
+                face_count,
+                facecam_scan.samples_with_face,
+                facecam_scan.samples_read,
+                LAYOUT_CENTER_CROP,
+                resolved,
+            )
+            resolved = LAYOUT_CENTER_CROP
+        logger.info(
+            "Auto-layout at %.2fs: face_count=%d, face_area_ratio=%.3f (threshold %.2f), "
+            "face_center_x_ratio=%.3f (centered=%s) -> %s",
+            clip_start,
+            face_count,
+            ratio,
+            FULL_CAM_MIN_FACE_AREA_RATIO,
+            center_x_ratio,
+            is_centered,
+            resolved,
+        )
+        # ts is the timestamp THIS detection actually succeeded at (clip_start, or a later
+        # LAYOUT_RETRY_FRACTIONS retry) — the caller reuses it for the real facecam crop
+        # instead of re-detecting at clip_start, which could miss a face this function only
+        # found on a retry. See this function's own docstring for the incident this fixes.
+        detection_ts = ts
+    elif has_static_override and not saw_busy_scene:
+        resolved = LAYOUT_SPLIT_SCREEN
+        detection_ts = clip_start
+        logger.info(
+            "Auto-layout at %.2fs: face_count=0 after %d attempt(s), but streamer has a static "
+            "facecam override -> %s (crop toward the known box)",
+            clip_start,
+            len(timestamps),
+            resolved,
+        )
+    elif has_static_override:
+        # Zero CONFIDENT faces, but not an ordinary dropout either — see
+        # vision.looks_like_busy_multi_face_scene()'s own docstring (2026-08-24 incident: a
+        # 9-tile Werwolf collab grid's small tiles detect at low confidence, never clearing
+        # FACE_COUNT_MIN_CONFIDENCE, reading as "zero faces" exactly like this streamer's
+        # ordinary solo layout would when they're briefly out of frame). Trusting the static
+        # override here would crop toward their SOLO webcam position on a frame that isn't
+        # their solo layout at all — blur_background shows the whole busy scene uncropped
+        # instead of guessing.
+        resolved = LAYOUT_BLUR_BACKGROUND
+        detection_ts = clip_start
+        logger.info(
+            "Auto-layout at %.2fs: face_count=0 after %d attempt(s), but frame looks like a "
+            "busy multi-face scene, not this streamer's own solo layout — %s instead of the "
+            "static override",
+            clip_start,
+            len(timestamps),
+            resolved,
+        )
+    else:
+        resolved = LAYOUT_CENTER_CROP
+        detection_ts = clip_start
+        logger.info(
+            "Auto-layout at %.2fs: face_count=0 after %d attempt(s) -> %s",
+            clip_start,
+            len(timestamps),
+            resolved,
+        )
+
+    return resolved, detection_ts
+
+
+def _write_clip_metadata_sidecar(output_path: Path, clip: dict) -> None:
+    """A small .json next to each rendered clip recording exactly what it is — title,
+    hook_explanation, viral_score, energy_rating, whatever else analyze.py/train_loop.py put
+    on the clip dict, plus when it was rendered. Lets a reader (app.py's Clip Archiv) look up
+    a clip's real metadata directly instead of re-deriving it from the filename's numeric
+    index against "whichever *_clips.json happens to be newest" — that reverse-engineering
+    breaks as soon as two cycles (or two concurrent streamers) both produce a clip_1_*.mp4
+    (found in review, 2026-08-18: H-14). Best-effort: a failed write never fails the render
+    it's describing."""
+    try:
+        atomic_io.atomic_write_json(
+            output_path.with_suffix(".json"),
+            {
+                **clip,
+                "rendered_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    except OSError as e:
+        logger.warning("Could not write clip metadata sidecar for %s: %s", output_path, e)
+
+
+def process_clips_iter(
+    source_video: Path | None = None,
+    layout: str = LAYOUT_SPLIT_SCREEN,
+    video_format: str = DEFAULT_FORMAT,
+    highlight_color: str = DEFAULT_HIGHLIGHT_COLOR,
+    transcript: dict | None = None,
+    output_dir: Path | None = None,
+    streamer_name: str | None = None,
+) -> Iterator[Tuple[int, int, dict, Path]]:
+    """Render clips one at a time, yielding (position, total, clip, output_path) as each one
+    finishes — lets a caller (e.g. the Streamlit UI) show real per-clip progress instead of
+    blocking on the whole batch. `process()` below is a thin wrapper for callers that just
+    want the final list. `transcript`, if given, overrides temp/transcription.json.
+    `output_dir`, if given, overrides OUTPUT_DIR — see render_clip()'s docstring.
+
+    `streamer_name`, when given, looks up a matching streamers.json entry (by its `name`
+    field) for that streamer's optional `facecam_box`/`facecam_padding` overrides — see
+    StreamerEntry's own docstrings in streamers.py — and threads them through every facecam
+    detection call for this batch (same box/padding source for every clip, since they describe
+    the streamer's own layout, not anything clip-specific). None (the default, e.g. a manual
+    single-video run with no known streamer identity) means dynamic detection only, exactly
+    the previous behavior."""
+    if layout not in SELECTABLE_LAYOUTS:
+        raise ValueError(f"Unknown layout '{layout}', expected one of {SELECTABLE_LAYOUTS}")
+    if video_format not in VIDEO_FORMATS:
+        raise ValueError(f"Unknown video format '{video_format}', expected one of {tuple(VIDEO_FORMATS)}")
+
+    if output_dir is None:
+        output_dir = OUTPUT_DIR
+    output_w, output_h = VIDEO_FORMATS[video_format]
+
+    video_path = find_source_video(source_video)
+    # Per-video file names (e.g. temp/my_video_clips.json) so re-running the pipeline on a
+    # different source video doesn't read stale clips/transcript left over from another run.
+    clips_path = TEMP_DIR / f"{video_path.stem}_clips.json"
+    clips_data = load_json(clips_path)
+    if transcript is None:
+        transcription_path = TEMP_DIR / f"{video_path.stem}_transcription.json"
+        transcript = load_json(transcription_path)
+
+    clips = clips_data.get("clips", [])
+    if not clips:
+        raise RuntimeError(f"No clips found in {clips_path}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    TEMP_DIR.mkdir(exist_ok=True)
+
+    gameplay_box = None
+    if layout in (LAYOUT_SPLIT_SCREEN, LAYOUT_AUTO):
+        video_w, video_h = get_video_dimensions(video_path)
+        # Gameplay uses the FULL source frame (not a fixed bottom-half slice): a fixed
+        # bottom-half box would frequently overlap the actual facecam region — streamer
+        # webcams are commonly positioned in a bottom corner — causing both halves to
+        # show near-identical content. The full frame is always visually distinct from
+        # the zoomed-in facecam crop above it, so the two halves never duplicate.
+        gameplay_box = (0, 0, video_w, video_h)
+
+    # Hoisted outside the per-clip loop below — video_path is the SAME source file for every
+    # clip in this batch, so whether it has an audio stream can't change per clip (same
+    # reasoning as get_video_dimensions() above, found in review 2026-08-21).
+    has_source_audio = _has_audio_stream(video_path)
+
+    # Streamer-specific facecam override, looked up once for the whole batch (see this
+    # function's own docstring) — None/None when streamer_name wasn't given, or no entry
+    # matches it, or the matching entry hasn't set these fields, all of which mean "dynamic
+    # detection only", unchanged from before this feature existed.
+    override_box_ratio = None
+    padding_margin = None
+    if streamer_name is not None:
+        for entry in streamers.load_streamers():
+            if entry["name"] == streamer_name:
+                override_box_ratio = entry.get("facecam_box")
+                padding_margin = entry.get("facecam_padding")
+                break
+
+    # Whole-chunk webcam search ("Facecam-Agent", 2026-08-25) — run ONCE for this source file,
+    # not per clip: where the streamer's camera sits is a property of the RECORDING, and
+    # sampling only inside one clip is exactly the mistake that lets a single pack-opening
+    # sequence pass as a stable face (see vision.locate_persistent_facecam). Its result does
+    # two jobs below: it supplies the authoritative crop box when a camera really is there, and
+    # it vetoes split_screen when one demonstrably isn't. Skipped for layouts that never crop a
+    # face zone at all, where the scan would be pure cost.
+    facecam_scan = None
+    if layout in (LAYOUT_AUTO, LAYOUT_SPLIT_SCREEN, LAYOUT_FULL_CAM):
+        facecam_scan = vision.locate_persistent_facecam(str(video_path))
+    verified_box_ratio = facecam_scan.box_ratio if facecam_scan is not None else None
+
+    total = len(clips)
+    for i, clip in enumerate(clips, start=1):
+        effective_layout, detection_ts = resolve_layout(
+            layout,
+            video_path,
+            clip["start_time"],
+            clip["end_time"],
+            has_static_override=override_box_ratio is not None,
+            facecam_scan=facecam_scan,
+        )
+
+        # Presence is not provenance: a persistent face in a reacted interview can
+        # otherwise be duplicated above that same interview. Require a plausible
+        # overlay region before making a separate face panel, even in forced split mode.
+        source_evidence = vision.assess_facecam_source(facecam_scan, override_box_ratio)
+        clip["facecam_source"] = source_evidence
+        if effective_layout == LAYOUT_SPLIT_SCREEN and not source_evidence["passed"]:
+            logger.warning("Facecam source unverified: %s; preserving whole source", source_evidence["reason"])
+            effective_layout = LAYOUT_BLUR_BACKGROUND
+            clip["layout_validation"] = source_evidence.copy()
+
+        # detection_ts (not clip["start_time"]) — the exact frame resolve_layout()'s own
+        # detection succeeded at, which may be a LAYOUT_RETRY_FRACTIONS retry rather than
+        # clip_start. Re-detecting at clip["start_time"] here unconditionally used to be able
+        # to silently disagree with the layout decision above (face found on a retry, but
+        # clip_start itself faceless) and fall back to vision._fallback_box()'s static corner
+        # box instead of the real, just-confirmed face — see resolve_layout()'s own docstring.
+        #
+        # clip["end_time"] is passed as clip_end so get_facecam_coordinates() samples and
+        # smooths the box across the REST of the clip (detection_ts -> end) rather than a
+        # single frame — see vision._sample_smoothed_box's docstring for why. override_box_ratio
+        # and padding_margin (converted to a padding_factor) carry this streamer's
+        # streamers.json overrides, when any are configured — see this function's own
+        # docstring.
+        facecam_box = None
+        multi_cam_boxes = None
+        if effective_layout == LAYOUT_SPLIT_SCREEN:
+            padding_factor = (
+                vision.padding_factor_from_margin(padding_margin)
+                if padding_margin is not None
+                else vision.PADDING_FACTOR
+            )
+            facecam_box = vision.get_facecam_coordinates(
+                str(video_path),
+                detection_ts,
+                padding_factor=padding_factor,
+                clip_end=clip["end_time"],
+                override_box_ratio=override_box_ratio,
+                verified_box_ratio=verified_box_ratio,
+                configured_roi_only=override_box_ratio is not None,
+            )
+        elif effective_layout == LAYOUT_FULL_CAM:
+            padding_factor = (
+                vision.padding_factor_from_margin(padding_margin)
+                if padding_margin is not None
+                else FULL_CAM_PADDING_FACTOR
+            )
+            facecam_box = vision.get_facecam_coordinates(
+                str(video_path),
+                detection_ts,
+                padding_factor=padding_factor,
+                clip_end=clip["end_time"],
+                override_box_ratio=override_box_ratio,
+                verified_box_ratio=verified_box_ratio,
+            )
+        elif effective_layout == LAYOUT_MULTI_CAM:
+            # Re-detects at detection_ts rather than threading the boxes resolve_layout()
+            # already found through its return value — same "single source of truth for which
+            # frame this is keyed off of, re-query for the actual data" pattern the
+            # split_screen/full_cam branches above already use with get_facecam_coordinates().
+            multi_cam = vision.detect_multi_cam_faces(str(video_path), detection_ts)
+            if multi_cam is not None:
+                raw_boxes, frame_w, frame_h = multi_cam
+                multi_cam_boxes = vision.get_multi_cam_coordinates(raw_boxes, frame_w, frame_h)
+            else:
+                # The grid moved on since resolve_layout()'s own detection a moment ago (rare —
+                # same frame, re-queried immediately after) — fail open to center_crop rather
+                # than crash the render on an empty box list.
+                logger.warning(
+                    "Auto-layout: multi_cam re-detection at %.2fs found no grid — falling back "
+                    "to center_crop for this clip",
+                    detection_ts,
+                )
+                effective_layout = LAYOUT_CENTER_CROP
+
+        if facecam_box is not None:
+            validation = {}
+            effective_layout, _ = resolve_layout(
+                effective_layout,
+                video_path,
+                clip["start_time"],
+                clip["end_time"],
+                crop_box=facecam_box,
+                validation_result=validation,
+            )
+            clip["layout_validation"] = validation
+            if validation.get("passed") is False:
+                facecam_box = None
+
+        if multi_cam_boxes is not None:
+            slot_checks = [
+                vision.validate_facecam_crop(str(video_path), clip["start_time"], clip["end_time"], box)
+                for box in multi_cam_boxes
+            ]
+            passed = all(item["passed"] for item in slot_checks)
+            clip["layout_validation"] = {
+                "passed": passed,
+                "slots": slot_checks,
+                "reason": None if passed else "multi_cam_face_missing_or_outside_crop",
+            }
+            if not passed:
+                logger.warning("Layout changed/unsafe multi-cam slots: falling back to %s", LAYOUT_BLUR_BACKGROUND)
+                effective_layout = LAYOUT_BLUR_BACKGROUND
+                multi_cam_boxes = None
+
+        # Final safety net (2026-08-24 incident) — verify the ACTUAL pixel content of whatever
+        # box(es) were just computed before committing to split_screen/full_cam/multi_cam, no
+        # matter how the box was chosen (dynamic detection or a streamer's static override):
+        # see vision.box_is_mostly_black()'s own docstring for why this check is scene-agnostic
+        # by design rather than another face-count heuristic. Downgrades to blur_background
+        # (shows the whole frame uncropped) rather than shipping a render with a black slot in
+        # it — the exact defect this whole incident was about.
+        if facecam_box is not None and vision.box_is_mostly_black(str(video_path), detection_ts, facecam_box):
+            logger.warning(
+                "Auto-layout: facecam_box %s at %.2fs is mostly black (a collab/grid gap, not "
+                "real content) — falling back to %s instead of %s",
+                facecam_box,
+                detection_ts,
+                LAYOUT_BLUR_BACKGROUND,
+                effective_layout,
+            )
+            effective_layout = LAYOUT_BLUR_BACKGROUND
+            facecam_box = None
+        elif multi_cam_boxes is not None:
+            black_slots = sum(
+                1 for box in multi_cam_boxes if vision.box_is_mostly_black(str(video_path), detection_ts, box)
+            )
+            if black_slots > 0:
+                logger.warning(
+                    "Auto-layout: %d/%d multi_cam slot(s) at %.2fs are mostly black — falling back to %s instead of %s",
+                    black_slots,
+                    len(multi_cam_boxes),
+                    detection_ts,
+                    LAYOUT_BLUR_BACKGROUND,
+                    effective_layout,
+                )
+                effective_layout = LAYOUT_BLUR_BACKGROUND
+                multi_cam_boxes = None
+
+        # Picked once here (not inside render_clip) so it can be recorded below — see
+        # optimization_engine.py's module docstring for why this attribute is tracked. Passed
+        # into render_clip() explicitly so both are describing the SAME render, not two
+        # independent random picks.
+        music_path = pick_background_track(clip)
+
+        ass_path = build_ass_for_clip(
+            clip,
+            transcript,
+            i,
+            highlight_color,
+            output_w,
+            output_h,
+            effective_layout,
+            facecam_box=facecam_box,
+            multi_cam_boxes=multi_cam_boxes,
+        )
+        qc_face_rects = text_placement.face_rects(
+            effective_layout,
+            output_w,
+            output_h,
+            facecam_box,
+            multi_cam_boxes,
+            face_zone_ratio=SPLIT_SCREEN_FACE_RATIO,
+        )
+        try:
+            # Separate streamer processes share one CPU/iGPU. Serialize final renders
+            # across processes, while acquisition/transcription can continue in parallel.
+            with FileLock(str(TEMP_DIR / "render.lock")):
+                output_path = render_clip(
+                    video_path,
+                    clip,
+                    ass_path,
+                    i,
+                    effective_layout,
+                    output_w,
+                    output_h,
+                    facecam_box,
+                    gameplay_box,
+                    output_dir=output_dir,
+                    music_path=music_path,
+                    has_source_audio=has_source_audio,
+                    multi_cam_boxes=multi_cam_boxes,
+                )
+            clip["auto_qc"] = auto_qc.check_render(
+                output_path, layout=effective_layout, subtitle_path=ass_path, face_rects=qc_face_rects
+            )
+            clip["auto_qc"].setdefault("checks", {})["facecam_source"] = {
+                **source_evidence,
+                "applicable": effective_layout == LAYOUT_SPLIT_SCREEN,
+                "passed": effective_layout != LAYOUT_SPLIT_SCREEN or source_evidence["passed"],
+            }
+        finally:
+            ass_path.unlink(missing_ok=True)
+
+        # Recorded onto the SAME dict object that lives inside clips_data["clips"] (clips is
+        # clips_data["clips"] by reference, not a copy) — clips_data is written back to
+        # clips_path below so train_loop.py's own independent re-read of that file a few
+        # seconds later (run_training_loop(), then purge_low_scoring_clips()) still has these
+        # fields on every surviving clip, all the way through to the uploaded_clips/ sidecar
+        # metadata dict (auto_pilot.run_deployment_phase()) that actually feeds
+        # viral_memory.json. Without this write-back, these fields would only ever have
+        # existed in this function's local, throwaway copy of the clip dict.
+        clip["layout"] = effective_layout
+        clip["music_track"] = music_path.name if music_path else None
+        clip["title_style"] = optimization_engine.classify_title_style(clip.get("title", ""))
+        atomic_io.atomic_write_json(clips_path, clips_data)
+
+        _write_clip_metadata_sidecar(output_path, clip)
+        yield i, total, clip, output_path
+
+    logger.info("Processing complete: %d clips rendered to %s", total, output_dir)
+
+
+def process(
+    source_video: Path | None = None,
+    layout: str = LAYOUT_SPLIT_SCREEN,
+    video_format: str = DEFAULT_FORMAT,
+    highlight_color: str = DEFAULT_HIGHLIGHT_COLOR,
+    transcript: dict | None = None,
+    streamer_name: str | None = None,
+) -> List[Path]:
+    """Render all clips and return the output paths. See process_clips_iter() for a
+    version that yields progress per clip instead of blocking until everything is done."""
+    return [
+        output_path
+        for _, _, _, output_path in process_clips_iter(
+            source_video,
+            layout,
+            video_format,
+            highlight_color,
+            transcript,
+            streamer_name=streamer_name,
+        )
+    ]
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Render clips with burned-in, word-by-word highlighted subtitles.")
+    parser.add_argument("--video", type=Path, default=None, help="Path to the source video (auto-detected if omitted)")
+    parser.add_argument("--layout", choices=SELECTABLE_LAYOUTS, default=LAYOUT_SPLIT_SCREEN, help="Video layout mode")
+    parser.add_argument(
+        "--format",
+        dest="video_format",
+        choices=tuple(VIDEO_FORMATS),
+        default=DEFAULT_FORMAT,
+        help="Output aspect ratio",
+    )
+    parser.add_argument(
+        "--highlight-color", default=DEFAULT_HIGHLIGHT_COLOR, help="ASS BGR hex color for the active word (e.g. 00FFFF)"
+    )
+    args = parser.parse_args()
+
+    process(args.video, args.layout, args.video_format, args.highlight_color)
+
+
+if __name__ == "__main__":
+    main()

@@ -12,16 +12,16 @@ import sys
 import psutil
 import pytest
 
-import process_supervisor
+from autoclip.control import process_supervisor
 
 
 @pytest.fixture(autouse=True)
 def windows_constants_for_simulated_platform(monkeypatch):
     """Simulating sys.platform does not add Windows-only stdlib constants on Linux."""
     for module, name, value in (
-        (process_supervisor.signal, 'CTRL_BREAK_EVENT', 1),
-        (subprocess, 'CREATE_NEW_PROCESS_GROUP', 0x00000200),
-        (subprocess, 'CREATE_NO_WINDOW', 0x08000000),
+        (process_supervisor.signal, "CTRL_BREAK_EVENT", 1),
+        (subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200),
+        (subprocess, "CREATE_NO_WINDOW", 0x08000000),
     ):
         if not hasattr(module, name):
             monkeypatch.setattr(module, name, value, raising=False)
@@ -29,12 +29,14 @@ def windows_constants_for_simulated_platform(monkeypatch):
 
 def test_watchdog_import_resolves_to_the_real_package_not_ours():
     import watchdog
+
     assert "site-packages" in watchdog.__file__.replace("\\", "/")
     assert watchdog.__file__ != process_supervisor.__file__
 
 
 def test_no_module_named_watchdog_in_this_project():
     from pathlib import Path
+
     project_root = Path(process_supervisor.__file__).parent
     assert not (project_root / "watchdog.py").exists()
 
@@ -48,6 +50,7 @@ def test_crash_backoff_still_works_under_the_new_name():
 # agent_state.json sat alongside the real per-streamer file, both showing "papaplatte" in the
 # dashboard, one of them 9+ hours stale — process_supervisor.py now purges these every poll
 # cycle, not just on startup, so a long-running supervisor stays self-healing) -------------
+
 
 def test_purge_runs_every_poll_cycle(monkeypatch):
     # Real subprocess spawning is stubbed out — this test only cares that the ghost-state
@@ -71,6 +74,7 @@ def test_purge_failure_does_not_crash_the_supervisor(monkeypatch):
 
     def boom():
         raise RuntimeError("streamers.json transiently unreadable")
+
     monkeypatch.setattr(process_supervisor.streamers_module, "purge_stale_agent_states", boom)
 
     # Must not raise.
@@ -82,6 +86,7 @@ def test_purge_failure_does_not_crash_the_supervisor(monkeypatch):
 # SupervisedProcess.stop() used to send a plain terminate() — an unconditional hard kill on
 # Windows, with zero chance for orchestrator.py's own already-correct KeyboardInterrupt
 # cleanup to run at all, let alone its own children's children) --------------------------
+
 
 class FakePsutilProcess:
     """Same fake used by test_orchestrator_reconciliation.py, extended with kill()/name()
@@ -143,7 +148,7 @@ def _make_supervised(monkeypatch, root_pid=100, descendants=None, wait_should_ti
     # succeeded — a real OS process that Popen.wait() confirmed exited is genuinely gone by
     # the time _kill_if_alive() looks it up again; only a real timeout leaves it truly alive.
     registry = {root_pid: FakePsutilProcess(root_pid, running=wait_should_time_out, name="fake_root")}
-    for d in (descendants or []):
+    for d in descendants or []:
         registry[d.pid] = d
 
     def fake_process_ctor(pid):
@@ -154,7 +159,7 @@ def _make_supervised(monkeypatch, root_pid=100, descendants=None, wait_should_ti
     monkeypatch.setattr(process_supervisor.psutil, "Process", fake_process_ctor)
     monkeypatch.setattr(process_supervisor.sys, "platform", platform)
     # children(recursive=True) is looked up through the ROOT's own psutil.Process object.
-    registry[root_pid].children = lambda recursive=False: (descendants or [])
+    registry[root_pid].children = lambda recursive=False: descendants or []
 
     return proc, fake_popen, registry
 
@@ -202,9 +207,9 @@ def test_stop_snapshots_descendants_before_sending_the_stop_signal(monkeypatch):
     proc, fake_popen, registry = _make_supervised(monkeypatch, descendants=[descendant])
 
     real_children = registry[100].children
-    registry[100].children = lambda recursive=False: (order.append("snapshot") or real_children(recursive))
+    registry[100].children = lambda recursive=False: order.append("snapshot") or real_children(recursive)
     original_send_signal = fake_popen.send_signal
-    fake_popen.send_signal = lambda sig: (order.append("signal") or original_send_signal(sig))
+    fake_popen.send_signal = lambda sig: order.append("signal") or original_send_signal(sig)
 
     proc.stop()
 
@@ -220,6 +225,7 @@ def test_stop_is_a_no_op_when_nothing_is_running():
 def test_kill_if_alive_skips_a_pid_that_is_already_gone(monkeypatch):
     def raise_no_such(pid):
         raise psutil.NoSuchProcess(pid)
+
     monkeypatch.setattr(process_supervisor.psutil, "Process", raise_no_such)
 
     process_supervisor.SupervisedProcess._kill_if_alive(999)  # must not raise
@@ -250,6 +256,7 @@ def test_start_uses_new_process_group_and_suppresses_window_on_windows(monkeypat
 # --- SIGTERM handling (2026-08-19: required for the systemd deployment — `systemctl stop`
 # sends SIGTERM, not SIGINT, and Python's default SIGTERM handling has zero cleanup) --------
 
+
 def test_sigterm_handler_raises_keyboard_interrupt():
     with pytest.raises(KeyboardInterrupt):
         process_supervisor._raise_keyboard_interrupt(process_supervisor.signal.SIGTERM, None)
@@ -263,7 +270,8 @@ def test_run_supervisor_registers_a_sigterm_handler(monkeypatch):
 
     registered = []
     monkeypatch.setattr(
-        process_supervisor.signal, "signal",
+        process_supervisor.signal,
+        "signal",
         lambda signum, handler: registered.append((signum, handler)),
     )
 
@@ -276,8 +284,11 @@ def test_run_supervisor_registers_a_sigterm_handler(monkeypatch):
 # was frustrating for iterative testing — fleet_control.json lets app.py request a pause/
 # resume without process_supervisor.py itself ever exiting) --------------------------------
 
+
 def test_read_fleet_target_state_defaults_to_running_when_file_missing(tmp_path):
-    assert process_supervisor.read_fleet_target_state(tmp_path / "missing.json") == process_supervisor.FLEET_STATE_RUNNING
+    assert (
+        process_supervisor.read_fleet_target_state(tmp_path / "missing.json") == process_supervisor.FLEET_STATE_RUNNING
+    )
 
 
 def test_read_fleet_target_state_defaults_to_running_on_corrupt_file(tmp_path):
@@ -449,6 +460,9 @@ def test_streamlit_actually_imports_its_own_file_watcher_dependency():
     project_root = Path(process_supervisor.__file__).parent
     result = subprocess.run(
         [sys.executable, "-c", "from streamlit.watcher.event_based_path_watcher import EventBasedPathWatcher"],
-        capture_output=True, text=True, timeout=30, cwd=project_root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=project_root,
     )
     assert result.returncode == 0, result.stderr

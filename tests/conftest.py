@@ -25,12 +25,8 @@ since it's applied later in the same test's setup."""
 
 import pytest
 
-import stream_watcher
-import upload
-import upload_instagram_playwright
-import upload_ledger
-import upload_manager
-import tiktok_uploader
+from autoclip.capture import stream_watcher
+from autoclip.publishing import tiktok_uploader, upload, upload_instagram_playwright, upload_ledger, upload_manager
 
 
 class RealYouTubeCallBlocked(RuntimeError):
@@ -38,9 +34,26 @@ class RealYouTubeCallBlocked(RuntimeError):
 
 
 @pytest.fixture(autouse=True)
+def _block_real_paid_model_calls_and_notifications(monkeypatch):
+    from google.genai.files import Files
+    from google.genai.models import Models
+
+    from autoclip.core import notify
+
+    def blocked(*args, **kwargs):
+        raise RuntimeError("A test tried a real external write/API request. Provide an explicit fake.")
+
+    for name in ("generate_content", "generate_content_stream"):
+        monkeypatch.setattr(Models, name, blocked)
+    monkeypatch.setattr(Files, "upload", blocked)
+    monkeypatch.setattr(notify.requests, "post", blocked)
+
+
+@pytest.fixture(autouse=True)
 def _block_real_tiktok_browser(monkeypatch):
     def blocked(*args, **kwargs):
         raise RuntimeError("A test tried to launch a real TikTok browser. Supply a fake sync_playwright explicitly.")
+
     monkeypatch.setattr(tiktok_uploader, "sync_playwright", blocked)
 
 
@@ -67,6 +80,7 @@ def _block_real_youtube_calls(monkeypatch):
             "explicitly (see tests/test_upload.py's fake_youtube fixture) if this test "
             "genuinely needs to exercise that code path."
         )
+
     monkeypatch.setattr(upload, "get_authenticated_service", _raise)
 
     def _raise_stats(*args, **kwargs):
@@ -75,6 +89,7 @@ def _block_real_youtube_calls(monkeypatch):
             "metrics_tracker.py's YouTube view/like fetch). Mock it explicitly if this test "
             "genuinely needs to exercise that code path."
         )
+
     monkeypatch.setattr(upload, "get_stats_service", _raise_stats)
 
 
@@ -83,10 +98,11 @@ def _block_real_instagram_calls(monkeypatch):
     def _raise(*args, **kwargs):
         raise RealInstagramCallBlocked(
             "A test tried to call upload_instagram_playwright.upload_video() for real. Mock "
-            "upload_instagram_playwright.try_upload_clip() (or .upload_video()) explicitly if "
+            "autoclip.publishing.upload_instagram_playwright.try_upload_clip() (or .upload_video()) explicitly if "
             "this test genuinely needs to exercise that code path — see "
             "tests/test_upload_manager.py's Instagram-gating tests for the pattern."
         )
+
     monkeypatch.setattr(upload_instagram_playwright, "upload_video", _raise)
 
 
@@ -148,7 +164,7 @@ def _isolated_pending_sweep_state(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _block_real_chunk_cleanup(monkeypatch):
-    """stream_watcher.cleanup_stale_chunks() deletes real files under TEMP_DIR by default.
+    """autoclip.capture.stream_watcher.cleanup_stale_chunks() deletes real files under TEMP_DIR by default.
     Found live, 2026-08-25: test_orchestrator_backoff.py exercises orchestrator.run_orchestrator()
     for real (its own proper max_iterations=1/poll_interval=0 pattern, with optimization_engine's
     state paths correctly isolated) — but had no isolation at all for orchestrator's new periodic
@@ -160,6 +176,7 @@ def _block_real_chunk_cleanup(monkeypatch):
     every path that could reach it. A test that genuinely needs to exercise real cleanup
     behavior restores the real function locally first — see
     tests/test_stream_watcher_chunks.py's own _real_cleanup_stale_chunks module-level capture."""
+
     def _raise(*args, **kwargs):
         raise RealChunkCleanupBlocked(
             "A test tried to call stream_watcher.cleanup_stale_chunks() for real — this "
@@ -167,6 +184,7 @@ def _block_real_chunk_cleanup(monkeypatch):
             "tests/test_stream_watcher_chunks.py's own pattern) if this test genuinely needs "
             "to exercise it."
         )
+
     monkeypatch.setattr(stream_watcher, "cleanup_stale_chunks", _raise)
 
 

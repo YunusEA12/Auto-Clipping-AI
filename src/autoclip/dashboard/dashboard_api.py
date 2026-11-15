@@ -1,0 +1,417 @@
+"""Stable interface boundary between app.py (the Streamlit dashboard) and the pipeline
+modules it needs (analyze, auto_pilot, ingest, notify, orchestrator, process, profiles,
+streamers, tiktok_uploader, train_loop, transcribe, upload).
+
+Before this existed, app.py imported and called into all twelve of those modules directly,
+with no boundary between the dashboard and their internals — a signature change in any one
+of them was a silent breakage risk for the UI, discoverable only at runtime via a Streamlit
+traceback (see M-06 in the audit). Every function app.py actually uses is re-exposed here
+with an explicit, fixed signature matching how app.py calls it; if an underlying module's
+real signature ever changes, this is the one file that needs updating to match, not every
+call site scattered across a 680-line dashboard.
+
+This intentionally does not wrap auto_pilot.py, orchestrator.py, or metrics_tracker.py's
+actual behavior — app.py never calls into those at runtime, it only reads the state files
+they write (AGENT_STATE_PATH, ORCHESTRATOR_STATE_PATH), which are plain paths re-exported
+below, not functions to wrap.
+"""
+
+import json
+import subprocess
+from functools import partial
+from pathlib import Path
+from typing import Dict, Iterator, List, Optional, Tuple
+from uuid import uuid4
+
+from autoclip import runtime
+from autoclip.configuration import profiles
+from autoclip.configuration import streamers as streamers_module
+from autoclip.control import process_supervisor
+from autoclip.publishing import tiktok_uploader, upload_ledger
+from autoclip.rendering import settings as render_settings
+
+# --- Paths the dashboard reads directly (written by the background processes) -------------
+AGENT_STATE_PATH = runtime.path("agent_state.json")
+AI_GUIDELINES_PATH = runtime.path("ai_guidelines.txt")
+ORCHESTRATOR_STATE_PATH = runtime.path("orchestrator_state.json")
+VIRAL_MEMORY_PATH = runtime.path("viral_memory.json")
+
+
+def archive_page(page: int = 1, page_size: int = 6, root: Optional[Path] = None) -> tuple[List[Path], int]:
+    if page < 1 or not 1 <= page_size <= 24:
+        raise ValueError("Invalid archive page")
+    videos = sorted(
+        (root or runtime.path("output")).rglob("*.mp4"), key=lambda p: (p.stat().st_mtime_ns, str(p)), reverse=True
+    )
+    start = (page - 1) * page_size
+    return videos[start : start + page_size], len(videos)
+
+
+def clip_download(path: Path):
+    """Return a deferred reader, so Streamlit loads bytes only on download."""
+    return partial(Path(path).read_bytes)
+
+
+def clip_metadata(path: Path) -> Optional[dict]:
+    try:
+        value = json.loads(Path(path).with_suffix(".json").read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def store_source_upload(filename: str, data) -> Path:
+    basename = Path(filename.replace("\\", "/")).name
+    if Path(basename).suffix.lower() not in {".mp4", ".mkv"}:
+        raise ValueError("Unsupported source video format")
+    directory = runtime.path("temp") / "uploads"
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / f"{uuid4().hex}_{basename}"
+    with target.open("xb") as output:
+        output.write(data)
+    return target
+
+
+def delete_local_clip(path: Path) -> None:
+    path = Path(path)
+    if not path.resolve().is_relative_to(runtime.path("output").resolve()) or path.suffix != ".mp4":
+        raise ValueError("Clip must be inside the local output directory")
+    sidecar = path.with_suffix(".json")
+    if sidecar.is_symlink():
+        raise ValueError("Refusing a symlinked clip sidecar")
+    path.unlink()
+    sidecar.unlink(missing_ok=True)
+
+
+def tiktok_upload_summary() -> dict:
+    """Persisted outcomes survive agent restarts; pending is never a confirmed post."""
+    try:
+        ledger = json.loads(upload_ledger.LEDGER_PATH.read_text(encoding="utf-8"))
+        entries = [row.get("tiktok", {}) for row in ledger.values() if isinstance(row, dict)]
+        return {
+            status: sum(entry.get("status") == status for entry in entries) for status in ("done", "pending", "failed")
+        }
+    except (OSError, ValueError, AttributeError):
+        return {status: None for status in ("done", "pending", "failed")}
+
+
+def upload_queue_status() -> dict:
+    try:
+        value = json.loads(runtime.path("upload_worker_state.json").read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def load_quality_audit_report(root: Optional[Path] = None) -> Optional[dict]:
+    root = root or runtime.path("quality_audit")
+    try:
+        report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+        if not isinstance(report, dict) or not isinstance(report.get("clips"), list):
+            return None
+        return report
+    except (OSError, ValueError):
+        return None
+
+
+def list_auto_qc_failures(root: Optional[Path] = None) -> List[dict]:
+    """Locally retained technical failures, independent of the ten-clip AI campaign."""
+    from autoclip.quality import auto_qc
+
+    rows = []
+    for path in sorted((root or runtime.path("output")).rglob("*.json")):
+        if not path.with_suffix(".mp4").is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or not auto_qc.metadata_blocked(data):
+                continue
+            qc = data.get("auto_qc") or {}
+            rows.append(
+                {
+                    "Clip": data.get("title", path.stem),
+                    "Datei": str(path.with_suffix(".mp4")),
+                    "Gründe": "; ".join(qc.get("reasons", ["Ungültiger QC-Bericht"]))
+                    if isinstance(qc, dict)
+                    else "Ungültiger QC-Bericht",
+                    "Geprüft": qc.get("checked_at") if isinstance(qc, dict) else None,
+                }
+            )
+        except (OSError, ValueError):
+            continue
+    return rows
+
+
+def list_agent_state_paths(root: Path = None) -> List[Path]:
+    """Every agent-state file currently on disk: the legacy shared AGENT_STATE_PATH (a
+    manual/standalone auto_pilot.py run with no --streamer-name) plus one
+    agent_state_<slug>.json per streamer orchestrator.py is running concurrently. Multiple
+    streamers used to all write the single shared file, corrupting each other's dashboard
+    state (see H-14 in the audit) — each now gets its own, so app.py just needs to read all
+    of them instead of assuming exactly one exists. `root` defaults to the project's own
+    directory (`.`), overridable for tests."""
+    if root is None:
+        root = runtime.path("agent_state.json").parent
+    return sorted(root.glob("agent_state*.json"))
+
+
+def purge_stale_agent_states() -> List[str]:
+    """Self-heal on dashboard load (2026-08-19): removes orphaned/stale agent_state*.json
+    files (see streamers.purge_stale_agent_states()'s own docstring for the full story —
+    found live as a "papaplatte" entry showing twice, one copy 9+ hours stale) so a page
+    reload fixes the display even before process_supervisor.py's own periodic purge gets to
+    it. Returns the filenames actually deleted."""
+    return streamers_module.purge_stale_agent_states()
+
+
+# --- Fleet Start/Stop (2026-08-19) ----------------------------------------------------------
+# app.py's "Start/Stop Fleet" button and process_supervisor.py's poll loop, decoupled through
+# fleet_control.json (see process_supervisor.py's own read_fleet_target_state/
+# write_fleet_target_state docstrings for the file's shape and fail-safe-to-running default).
+# app.py is the only writer, process_supervisor.py the only reader — no lock needed.
+FLEET_STATE_RUNNING = process_supervisor.FLEET_STATE_RUNNING
+FLEET_STATE_PAUSED = process_supervisor.FLEET_STATE_PAUSED
+
+
+def read_fleet_target_state() -> str:
+    return process_supervisor.read_fleet_target_state()
+
+
+def set_fleet_target_state(target_state: str) -> None:
+    process_supervisor.write_fleet_target_state(target_state)
+
+
+# --- Remote deployment control (2026-08-21) --------------------------------------------------
+# Lets the VPS deployment (see SETUP_SERVER.md) pull the latest code and restart itself from
+# the dashboard, instead of needing an SSH session every time. Deliberately named after the
+# exact systemd unit names deploy/*.service installs — this only works on that specific
+# deployment, never on a local Windows dev checkout (see is_systemd_deployment()).
+SUPERVISOR_SYSTEMD_UNIT = "auto-clipping-supervisor"
+DASHBOARD_SYSTEMD_UNIT = "auto-clipping-dashboard"
+_SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
+
+
+def is_systemd_deployment() -> bool:
+    """Whether this process is running under the systemd units SETUP_SERVER.md installs —
+    used to hide the Deployment controls entirely on a local Windows/manual checkout, where
+    `sudo systemctl restart ...` has nothing to act on (no `sudo`, no systemd, no such unit)."""
+    return (_SYSTEMD_UNIT_DIR / f"{SUPERVISOR_SYSTEMD_UNIT}.service").exists()
+
+
+def git_pull_and_restart_supervisor(cwd: Optional[Path] = None) -> Tuple[bool, str]:
+    """Compatibility response: deployment belongs to the maintenance entry point."""
+    return (
+        False,
+        "Updates werden mit `sudo bash deploy/update.sh` installiert und geprüft. Ein Git-Pull allein ist kein Deployment.",
+    )
+
+
+def restart_dashboard_service() -> None:
+    """Restarts the dashboard's OWN systemd unit — deliberately fire-and-forget
+    (subprocess.Popen, not run()): this call is made from inside the very process about to be
+    killed, so nothing after it is guaranteed to execute once systemctl sends the signal. The
+    browser tab shows a dropped connection for a few seconds until the new process comes up;
+    reloading the page reconnects to it."""
+    subprocess.Popen(
+        ["sudo", "systemctl", "restart", DASHBOARD_SYSTEMD_UNIT],
+        start_new_session=True,
+    )
+
+
+# --- Rendering constants ---------------------------------------------------------------
+LAYOUT_AUTO = render_settings.LAYOUT_AUTO
+LAYOUT_SPLIT_SCREEN = render_settings.LAYOUT_SPLIT_SCREEN
+LAYOUT_BLUR_BACKGROUND = render_settings.LAYOUT_BLUR_BACKGROUND
+LAYOUT_FULL_CAM = render_settings.LAYOUT_FULL_CAM
+HIGHLIGHT_COLORS = render_settings.HIGHLIGHT_COLORS
+DEFAULT_HASHTAGS = tiktok_uploader.DEFAULT_HASHTAGS
+
+
+# --- TikTok -------------------------------------------------------------------------------
+
+
+def tiktok_cookies_status() -> Tuple[bool, str]:
+    return tiktok_uploader.cookies_status()
+
+
+def upload_clip_to_tiktok(
+    video_path: Path, description: str, hashtags: Optional[List[str]] = None, publish: bool = False
+) -> tiktok_uploader.UploadOutcome:
+    from autoclip.quality import auto_qc
+
+    if auto_qc.upload_blocked(video_path):
+        return tiktok_uploader.UploadOutcome(success=False, confirmed=False)
+    from autoclip.publishing import upload_manager
+
+    return upload_manager.upload_tiktok_clip(video_path, description, hashtags, publish=publish)
+
+
+# --- Streamer profiles ("Streamer-Mitarbeiter") --------------------------------------------
+
+
+def list_profiles() -> List[str]:
+    return profiles.list_profiles()
+
+
+def load_profile(name: str) -> dict:
+    return profiles.load_profile(name).model_dump()
+
+
+# --- Streamer fleet (streamers.json) --------------------------------------------------------
+
+
+def load_streamers() -> List[dict]:
+    return streamers_module.load_streamers()
+
+
+def load_streamers_diagnostics() -> dict:
+    return streamers_module.load_streamers_diagnostics()
+
+
+def get_stale_pending_uploads(stale_minutes: int = upload_ledger.PENDING_STALE_MINUTES) -> Dict[str, int]:
+    """2026-08-24 incident remediation — per-platform count of upload_ledger.json entries
+    stuck in "pending" longer than `stale_minutes` (default: the same PENDING_STALE_MINUTES
+    the ledger itself uses to decide a pending entry is abandoned, not fresh-in-flight). See
+    upload_ledger.stale_pending_counts()'s own docstring for why this counts, rather than
+    reclaims, stale entries."""
+    return upload_ledger.stale_pending_counts(stale_minutes)
+
+
+def add_streamer(name: str, url: str, profile: str = "", auto_upload: bool = False, publish: bool = False) -> None:
+    streamers_module.add_streamer(name, url, profile=profile, auto_upload=auto_upload, publish=publish)
+
+
+def update_streamer(
+    name: str,
+    url: Optional[str] = None,
+    profile: Optional[str] = None,
+    auto_upload: Optional[bool] = None,
+    publish: Optional[bool] = None,
+) -> bool:
+    return streamers_module.update_streamer(name, url, profile, auto_upload, publish)
+
+
+def remove_streamer(name: str) -> bool:
+    return streamers_module.remove_streamer(name)
+
+
+def agent_live_status_by_slug(orchestrator_state: Optional[dict]) -> Dict[str, Dict[str, bool]]:
+    """slug -> {"live": bool, "recording": bool} for every configured streamer, from
+    orchestrator_state.json's real-time ground truth (the same source the "Konfigurierte
+    Streamer" section already trusts) — lets the sidebar's Agent Status cards cross-check a
+    state file's own staleness against whether the streamer is actually still live/recording
+    right now, instead of judging "online vs. offline" from file staleness alone.
+
+    Found live, 2026-08-20: right after process_supervisor.py restarted, several streamers'
+    agent_state_<slug>.json files were still showing a 21+ hour old leftover from before a
+    long gap (auto_pilot.py hadn't written its first update since restarting yet — a full
+    record+transcribe+analyze cycle can easily take longer than the dashboard's 5-minute
+    staleness threshold), so the sidebar wrongly showed "⚠️ Offline" for streamers the main
+    content area correctly showed as 🔴 LIVE and recording, right next to each other."""
+    result: Dict[str, Dict[str, bool]] = {}
+    orchestrator_streamers = (orchestrator_state or {}).get("streamers", {})
+    for entry in streamers_module.load_streamers():
+        slug = streamers_module._slugify(entry["name"])
+        info = orchestrator_streamers.get(entry["name"], {})
+        result[slug] = {"live": bool(info.get("live")), "recording": bool(info.get("recording"))}
+    return result
+
+
+# --- Critic memory (ai_guidelines.txt) -------------------------------------------------------
+
+
+def parse_guidelines_file(content: str) -> Dict[str, List[str]]:
+    from autoclip.ai import train_loop
+
+    return train_loop.parse_guidelines_file(content)
+
+
+# --- Human feedback (feedback.json) ----------------------------------------------------------
+
+
+def save_feedback(clip_title: str, feedback_text: str) -> None:
+    from autoclip.ai import analyze
+
+    analyze.save_feedback(clip_title, feedback_text)
+
+
+# --- Ingestion / transcription / analysis (Manual Mode pipeline) ---------------------------
+
+
+def download_from_url(url: str) -> Path:
+    from autoclip.capture import ingest
+
+    return ingest.download_from_url(url)
+
+
+def extract_audio(video_path: Path) -> Path:
+    from autoclip.capture import ingest
+
+    return ingest.extract_audio(video_path)
+
+
+def transcribe_audio(wav_path: Path) -> Path:
+    from autoclip.ai import transcribe
+
+    return transcribe.transcribe(wav_path)
+
+
+def analyze_transcript(
+    transcription_path: Path, audio_path: Optional[Path] = None, profile: Optional[dict] = None
+) -> Path:
+    from autoclip.ai import analyze
+
+    return analyze.analyze(transcription_path, audio_path=audio_path, profile=profile)
+
+
+def load_transcript(transcription_path: Path) -> dict:
+    from autoclip.ai import analyze
+
+    return analyze.load_transcript(transcription_path)
+
+
+def process_clips_iter(
+    source_video: Optional[Path] = None,
+    layout: str = LAYOUT_SPLIT_SCREEN,
+    video_format: str = render_settings.DEFAULT_FORMAT,
+    highlight_color: str = render_settings.DEFAULT_HIGHLIGHT_COLOR,
+    transcript: Optional[dict] = None,
+) -> Iterator[Tuple[int, int, dict, Path]]:
+    from autoclip.rendering import process as process_module
+
+    return process_module.process_clips_iter(
+        source_video,
+        layout=layout,
+        video_format=video_format,
+        highlight_color=highlight_color,
+        transcript=transcript,
+    )
+
+
+# --- Notifications & YouTube upload (Manual Mode pipeline) ---------------------------------
+
+
+def send_notification(
+    title: str,
+    energy: int,
+    filepath: Path,
+    upload_status: str,
+    description: str = "",
+    hashtags: Optional[List[str]] = None,
+) -> bool:
+    from autoclip.core import notify
+
+    return notify.send_notification(
+        title=title,
+        energy=energy,
+        filepath=filepath,
+        upload_status=upload_status,
+        description=description,
+        hashtags=hashtags,
+    )
+
+
+def upload_all_to_youtube() -> list:
+    from autoclip.publishing import upload as upload_module
+
+    return upload_module.upload_all()

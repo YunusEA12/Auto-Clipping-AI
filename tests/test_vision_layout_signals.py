@@ -4,10 +4,10 @@ webcam box over a much bigger gameplay area" (split_screen) — face COUNT alone
 that, since both are "one face" by count. These functions supply the second signal
 (face_area_ratio) and the count itself (previously discarded after result.detections[0])."""
 
-import vision
-
+from autoclip.ai import vision
 
 # --- face_area_ratio (pure function, no MediaPipe involved) -------------------------------
+
 
 def test_face_area_ratio_full_frame_face():
     # A face box covering the whole frame -> ratio 1.0.
@@ -29,6 +29,7 @@ def test_face_area_ratio_zero_frame_area_does_not_crash():
 
 # --- face_center_x_ratio (pure function, no MediaPipe involved) ---------------------------
 
+
 def test_face_center_x_ratio_centered_face():
     assert vision.face_center_x_ratio((400, 0, 200, 200), 1000) == 0.5
 
@@ -49,6 +50,7 @@ def test_face_center_x_ratio_zero_frame_width_does_not_crash():
 
 # --- detect_faces_for_layout ---------------------------------------------------------------
 
+
 def test_detect_faces_for_layout_no_faces(monkeypatch):
     monkeypatch.setattr(vision, "_detect_faces", lambda video_path, timestamp: ([], [], 1920, 1080))
     count, box, w, h = vision.detect_faces_for_layout("video.mp4", 1.0)
@@ -59,7 +61,8 @@ def test_detect_faces_for_layout_no_faces(monkeypatch):
 
 def test_detect_faces_for_layout_one_face(monkeypatch):
     monkeypatch.setattr(
-        vision, "_detect_faces",
+        vision,
+        "_detect_faces",
         lambda video_path, timestamp: ([(10, 20, 300, 300)], [0.9], 1920, 1080),
     )
     count, box, w, h = vision.detect_faces_for_layout("video.mp4", 1.0)
@@ -69,9 +72,13 @@ def test_detect_faces_for_layout_one_face(monkeypatch):
 
 def test_detect_faces_for_layout_multiple_confident_faces_returns_highest_scoring_box(monkeypatch):
     monkeypatch.setattr(
-        vision, "_detect_faces",
+        vision,
+        "_detect_faces",
         lambda video_path, timestamp: (
-            [(10, 20, 300, 300), (500, 20, 300, 300)], [0.7, 0.95], 1920, 1080,
+            [(10, 20, 300, 300), (500, 20, 300, 300)],
+            [0.7, 0.95],
+            1920,
+            1080,
         ),
     )
     count, box, w, h = vision.detect_faces_for_layout("video.mp4", 1.0)
@@ -84,9 +91,13 @@ def test_detect_faces_for_layout_low_confidence_second_detection_not_counted(mon
     # baseline 0.5 floor but not FACE_COUNT_MIN_CONFIDENCE shouldn't be counted as a second
     # person and push a genuine single-webcam clip into the blur_background fallback.
     monkeypatch.setattr(
-        vision, "_detect_faces",
+        vision,
+        "_detect_faces",
         lambda video_path, timestamp: (
-            [(10, 20, 300, 300), (500, 20, 50, 50)], [0.9, 0.55], 1920, 1080,
+            [(10, 20, 300, 300), (500, 20, 50, 50)],
+            [0.9, 0.55],
+            1920,
+            1080,
         ),
     )
     count, box, w, h = vision.detect_faces_for_layout("video.mp4", 1.0)
@@ -95,6 +106,7 @@ def test_detect_faces_for_layout_low_confidence_second_detection_not_counted(mon
 
 
 # --- has_face built on the same shared detection call --------------------------------------
+
 
 def test_has_face_true_with_detections(monkeypatch):
     monkeypatch.setattr(vision, "_detect_faces", lambda video_path, timestamp: ([(0, 0, 100, 100)], [0.9], 1920, 1080))
@@ -110,9 +122,11 @@ def test_has_face_false_without_detections(monkeypatch):
 # split_screen's default when the same padded box gets stretched to fill the whole tall
 # canvas instead of just a short top-third zone) --------------------------------------------
 
+
 def test_get_facecam_coordinates_larger_padding_factor_yields_larger_box(monkeypatch):
     monkeypatch.setattr(
-        vision, "_detect_faces",
+        vision,
+        "_detect_faces",
         lambda video_path, timestamp: ([(500, 500, 200, 200)], [0.9], 1920, 1080),
     )
 
@@ -132,9 +146,13 @@ def test_get_facecam_coordinates_falls_back_without_a_face(monkeypatch):
 
 def test_get_facecam_coordinates_uses_highest_scoring_box(monkeypatch):
     monkeypatch.setattr(
-        vision, "_detect_faces",
+        vision,
+        "_detect_faces",
         lambda video_path, timestamp: (
-            [(10, 20, 300, 300), (500, 20, 50, 50)], [0.6, 0.95], 1920, 1080,
+            [(10, 20, 300, 300), (500, 20, 50, 50)],
+            [0.6, 0.95],
+            1920,
+            1080,
         ),
     )
     box = vision.get_facecam_coordinates("video.mp4", 1.0)
@@ -143,6 +161,7 @@ def test_get_facecam_coordinates_uses_highest_scoring_box(monkeypatch):
 
 
 # --- padding_factor_from_margin -------------------------------------------------------------
+
 
 def test_padding_factor_from_margin_zero_margin_is_identity():
     assert vision.padding_factor_from_margin(0.0) == 1.0
@@ -154,6 +173,7 @@ def test_padding_factor_from_margin_quarter_margin():
 
 
 # --- get_facecam_coordinates temporal smoothing (clip_end given) ---------------------------
+
 
 def test_get_facecam_coordinates_smooths_across_multiple_samples(monkeypatch):
     # A single outlier sample (far off from the rest, simulating a blink/motion-blur/HUD-
@@ -205,15 +225,19 @@ def test_get_facecam_coordinates_with_clip_end_samples_multiple_frames(monkeypat
 
 # --- get_facecam_coordinates streamer override (low-confidence fallback) -------------------
 
+
 def test_get_facecam_coordinates_uses_override_below_confidence_threshold(monkeypatch):
     monkeypatch.setattr(
-        vision, "_detect_faces",
+        vision,
+        "_detect_faces",
         # 0.3 is below MediaPipe's own ~0.5 baseline floor, so this score can't occur with the
         # real detector -- it only exists here to exercise the low-confidence override branch.
         lambda video_path, timestamp: ([(10, 20, 300, 300)], [0.3], 1920, 1080),  # below 0.50
     )
     box = vision.get_facecam_coordinates(
-        "video.mp4", 1.0, override_box_ratio=[0.5, 0.0, 1.0, 0.5],
+        "video.mp4",
+        1.0,
+        override_box_ratio=[0.5, 0.0, 1.0, 0.5],
     )
     assert box == (960, 0, 960, 540)
 
@@ -223,11 +247,14 @@ def test_get_facecam_coordinates_ignores_override_at_or_above_confidence_thresho
     # moved/resized their cam still has a genuine, if marginal, detection at this score, and
     # that real detection must win over the stale static override.
     monkeypatch.setattr(
-        vision, "_detect_faces",
+        vision,
+        "_detect_faces",
         lambda video_path, timestamp: ([(10, 20, 300, 300)], [0.5], 1920, 1080),
     )
     box = vision.get_facecam_coordinates(
-        "video.mp4", 1.0, override_box_ratio=[0.5, 0.0, 1.0, 0.5],
+        "video.mp4",
+        1.0,
+        override_box_ratio=[0.5, 0.0, 1.0, 0.5],
     )
     # Dynamic detection wins -- override box (960, 0, 960, 540) was not used.
     assert box != (960, 0, 960, 540)
@@ -236,7 +263,9 @@ def test_get_facecam_coordinates_ignores_override_at_or_above_confidence_thresho
 def test_get_facecam_coordinates_uses_override_when_no_face_detected(monkeypatch):
     monkeypatch.setattr(vision, "_detect_faces", lambda video_path, timestamp: ([], [], 1920, 1080))
     box = vision.get_facecam_coordinates(
-        "video.mp4", 1.0, override_box_ratio=[0.5, 0.0, 1.0, 0.5],
+        "video.mp4",
+        1.0,
+        override_box_ratio=[0.5, 0.0, 1.0, 0.5],
     )
     assert box == (960, 0, 960, 540)
 
@@ -253,6 +282,7 @@ def test_get_facecam_coordinates_falls_back_to_generic_box_without_override(monk
 # slots, not the single-primary-face full_cam/split_screen decision — see resolve_layout()'s
 # own docstring in process.py for the live symptom (a forced 2-slot split onto a multi-tile
 # grid producing large black gaps between zones).
+
 
 def test_is_multi_cam_scene_true_for_similarly_sized_faces_in_range():
     boxes = [(0, 0, 100, 100), (200, 0, 100, 100), (400, 0, 100, 100)]
@@ -294,6 +324,7 @@ def test_is_multi_cam_scene_true_at_the_area_ratio_spread_boundary():
 
 # --- detect_multi_cam_faces -----------------------------------------------------------------
 
+
 def test_detect_multi_cam_faces_returns_boxes_in_reading_order(monkeypatch):
     # Bottom-left, top-right, top-left -- must come back sorted (y, x): top-left, top-right,
     # bottom-left.
@@ -309,7 +340,9 @@ def test_detect_multi_cam_faces_returns_boxes_in_reading_order(monkeypatch):
 
 def test_detect_multi_cam_faces_none_when_not_a_multi_cam_scene(monkeypatch):
     monkeypatch.setattr(
-        vision, "_detect_faces", lambda video_path, timestamp: ([(0, 0, 100, 100)], [0.9], 1920, 1080),
+        vision,
+        "_detect_faces",
+        lambda video_path, timestamp: ([(0, 0, 100, 100)], [0.9], 1920, 1080),
     )
     assert vision.detect_multi_cam_faces("video.mp4", 1.0) is None
 
@@ -317,17 +350,19 @@ def test_detect_multi_cam_faces_none_when_not_a_multi_cam_scene(monkeypatch):
 def test_detect_multi_cam_faces_none_on_read_error(monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("could not read frame")
+
     monkeypatch.setattr(vision, "_detect_faces", boom)
     assert vision.detect_multi_cam_faces("video.mp4", 1.0) is None
 
 
 # --- get_multi_cam_coordinates ---------------------------------------------------------------
 
+
 def test_get_multi_cam_coordinates_pads_each_box():
     boxes = [(100, 100, 100, 100), (500, 100, 100, 100)]
     result = vision.get_multi_cam_coordinates(boxes, 1920, 1080, padding_factor=2.0)
     assert len(result) == 2
-    for (_x, _y, w, h) in result:
+    for _x, _y, w, h in result:
         assert w > 100 and h > 100  # padded larger than the raw 100x100 box
 
 
@@ -342,11 +377,13 @@ def test_get_multi_cam_coordinates_falls_back_to_raw_box_when_padding_degenerate
 
 # --- looks_like_busy_multi_face_scene ---------------------------------------------------------
 
+
 def test_looks_like_busy_multi_face_scene_true_with_two_raw_detections(monkeypatch):
     # Below FACE_COUNT_MIN_CONFIDENCE but still 2 raw detections -- a 9-tile collab grid's
     # small tiles routinely score this low without ever reading as "zero faces" in reality.
     monkeypatch.setattr(
-        vision, "_detect_faces",
+        vision,
+        "_detect_faces",
         lambda video_path, timestamp: ([(0, 0, 50, 50), (100, 0, 50, 50)], [0.5, 0.52], 1920, 1080),
     )
     assert vision.looks_like_busy_multi_face_scene("video.mp4", 1.0) is True
@@ -360,11 +397,13 @@ def test_looks_like_busy_multi_face_scene_false_with_one_or_zero_detections(monk
 def test_looks_like_busy_multi_face_scene_false_on_read_error(monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("could not read frame")
+
     monkeypatch.setattr(vision, "_detect_faces", boom)
     assert vision.looks_like_busy_multi_face_scene("video.mp4", 1.0) is False
 
 
 # --- box_is_mostly_black ----------------------------------------------------------------------
+
 
 class _FakeCapture:
     def __init__(self, frame):
@@ -388,6 +427,7 @@ class _FakeCapture:
 
 def test_box_is_mostly_black_true_for_a_black_region(monkeypatch):
     import numpy as np
+
     frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
     monkeypatch.setattr(vision.cv2, "VideoCapture", lambda path: _FakeCapture(frame))
     assert vision.box_is_mostly_black("video.mp4", 1.0, (0, 0, 500, 500)) is True
@@ -395,6 +435,7 @@ def test_box_is_mostly_black_true_for_a_black_region(monkeypatch):
 
 def test_box_is_mostly_black_false_for_a_bright_region(monkeypatch):
     import numpy as np
+
     frame = np.full((1080, 1920, 3), 200, dtype=np.uint8)
     monkeypatch.setattr(vision.cv2, "VideoCapture", lambda path: _FakeCapture(frame))
     assert vision.box_is_mostly_black("video.mp4", 1.0, (0, 0, 500, 500)) is False
@@ -402,6 +443,7 @@ def test_box_is_mostly_black_false_for_a_bright_region(monkeypatch):
 
 def test_box_is_mostly_black_false_below_the_fraction_threshold(monkeypatch):
     import numpy as np
+
     # 25% black -- below the 0.3 default threshold for "mostly" black.
     frame = np.full((1080, 1920, 3), 200, dtype=np.uint8)
     frame[:, :125] = 0  # left quarter of the 500-wide sample box is black -> 25% black
@@ -416,6 +458,7 @@ def test_box_is_mostly_black_false_when_capture_fails_to_open(monkeypatch):
 
 def test_box_is_mostly_black_false_on_degenerate_zero_size_region(monkeypatch):
     import numpy as np
+
     frame = np.full((1080, 1920, 3), 200, dtype=np.uint8)
     monkeypatch.setattr(vision.cv2, "VideoCapture", lambda path: _FakeCapture(frame))
     assert vision.box_is_mostly_black("video.mp4", 1.0, (0, 0, 0, 0)) is False

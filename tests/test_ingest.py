@@ -1,21 +1,40 @@
 """ingest.py against real ffmpeg on a tiny synthetic clip; yt-dlp is faked (no network)."""
+
 import subprocess
 import wave
 
 import pytest
 import yt_dlp
 
-import ingest
+from autoclip.capture import ingest
 
 
 @pytest.fixture
 def video(tmp_path):
     path = tmp_path / "stream_clip.mp4"
     subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error",
-         "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15:duration=2",
-         "-f", "lavfi", "-i", "sine=frequency=440:duration=2:sample_rate=44100",
-         "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(path)],
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x240:rate=15:duration=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2:sample_rate=44100",
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(path),
+        ],
         check=True,
     )
     return path

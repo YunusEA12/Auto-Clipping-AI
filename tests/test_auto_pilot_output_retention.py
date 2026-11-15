@@ -8,7 +8,7 @@ import os
 import time
 from pathlib import Path
 
-import auto_pilot
+from autoclip.control import auto_pilot
 
 
 def _write_clip(output_dir: Path, name: str, age_days: float) -> Path:

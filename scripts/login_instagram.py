@@ -39,10 +39,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from playwright.sync_api import sync_playwright  # noqa: E402
 
-import atomic_io  # noqa: E402
-import upload_instagram_playwright as igp  # noqa: E402
-
-import logging_setup  # noqa: E402
+from autoclip.core import (
+    atomic_io,  # noqa: E402
+    logging_setup,  # noqa: E402
+)
+from autoclip.publishing import upload_instagram_playwright as igp  # noqa: E402
 
 logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
@@ -59,7 +60,9 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "--timeout", type=int, default=DEFAULT_WAIT_TIMEOUT_SECONDS,
+        "--timeout",
+        type=int,
+        default=DEFAULT_WAIT_TIMEOUT_SECONDS,
         help=f"Seconds to wait for the interstitial/login to clear before giving up (default: {DEFAULT_WAIT_TIMEOUT_SECONDS})",
     )
     args = parser.parse_args()
@@ -70,7 +73,8 @@ def main() -> int:
     else:
         logger.warning(
             "No existing cookies found at %s — starting from a blank session. Log in from "
-            "scratch in the browser window that opens.", igp.COOKIES_PATH,
+            "scratch in the browser window that opens.",
+            igp.COOKIES_PATH,
         )
 
     with sync_playwright() as pw:
@@ -95,7 +99,8 @@ def main() -> int:
             logger.info(
                 "Waiting up to %ds for you to resolve the account-chooser interstitial (or "
                 "log in) by hand in the browser window — this script checks automatically, "
-                "just interact with the window normally.", args.timeout,
+                "just interact with the window normally.",
+                args.timeout,
             )
 
             deadline = time.monotonic() + args.timeout
@@ -110,7 +115,8 @@ def main() -> int:
                 logger.error(
                     "Timed out after %ds still on the login page or account-chooser "
                     "interstitial — nothing saved. Re-run with a longer --timeout if you "
-                    "need more time.", args.timeout,
+                    "need more time.",
+                    args.timeout,
                 )
                 return 1
 
@@ -120,8 +126,9 @@ def main() -> int:
             atomic_io.atomic_write_json(igp.COOKIES_PATH, fresh_cookies)
             atomic_io.secure_file_permissions(igp.COOKIES_PATH)
             logger.info(
-                "Saved %d cookie(s) to %s. The automated pipeline will use these on its next "
-                "Instagram upload attempt.", len(fresh_cookies), igp.COOKIES_PATH,
+                "Saved %d cookie(s) to %s. The automated pipeline will use these on its next Instagram upload attempt.",
+                len(fresh_cookies),
+                igp.COOKIES_PATH,
             )
             return 0
         finally:

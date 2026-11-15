@@ -1,6 +1,6 @@
 import pytest
 
-import get_cookies
+from autoclip.tools import get_cookies
 
 
 class _FakeRequiresAdminError(Exception):
@@ -12,6 +12,7 @@ class _FakeRequiresAdminError(Exception):
 def _loader_raising(exc):
     def _loader(domain_name):
         raise exc
+
     return _loader
 
 
@@ -48,7 +49,8 @@ def test_second_browser_succeeds_after_first_needs_admin(monkeypatch):
         return ["fake_cookie"]
 
     monkeypatch.setattr(
-        get_cookies, "BROWSER_LOADERS",
+        get_cookies,
+        "BROWSER_LOADERS",
         [("chrome", _loader_raising(_FakeRequiresAdminError("needs admin"))), ("edge", working_loader)],
     )
 
@@ -61,7 +63,8 @@ def test_app_bound_encryption_points_at_the_manual_login(monkeypatch):
     """Chrome 127+ ties the cookie key to the browser binary, so no amount of closing the
     browser or elevating fixes it — the message has to send the user somewhere that works."""
     monkeypatch.setattr(
-        get_cookies, "BROWSER_LOADERS",
+        get_cookies,
+        "BROWSER_LOADERS",
         [("chrome", _loader_raising(Exception("Unable to get key for cookie decryption")))],
     )
     with pytest.raises(RuntimeError, match="--manual-login"):
@@ -73,7 +76,8 @@ def test_app_bound_encryption_rules_out_the_admin_workaround(monkeypatch):
     the same way — so this message has to say outright that it won't help, rather than
     leaving them to try it."""
     monkeypatch.setattr(
-        get_cookies, "BROWSER_LOADERS",
+        get_cookies,
+        "BROWSER_LOADERS",
         [("chrome", _loader_raising(Exception("Failed to decrypt cookie value")))],
     )
     with pytest.raises(RuntimeError) as excinfo:
@@ -83,7 +87,8 @@ def test_app_bound_encryption_rules_out_the_admin_workaround(monkeypatch):
 
 def test_app_bound_failure_still_tries_the_next_browser(monkeypatch):
     monkeypatch.setattr(
-        get_cookies, "BROWSER_LOADERS",
+        get_cookies,
+        "BROWSER_LOADERS",
         [
             ("chrome", _loader_raising(Exception("Unable to get key for cookie decryption"))),
             ("firefox", lambda domain_name: ["a cookie"]),

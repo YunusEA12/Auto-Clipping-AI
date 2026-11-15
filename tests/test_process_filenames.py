@@ -1,9 +1,10 @@
-import pytest
 import fnmatch
 import subprocess
 from pathlib import Path
 
-import process
+import pytest
+
+from autoclip.rendering import process
 
 
 def test_clip_output_filename_matches_its_own_glob_pattern():
@@ -36,6 +37,7 @@ def test_empty_title_still_produces_a_valid_filename():
 # the shared flat output/ dir could both produce clip_1_*.mp4 and clobber each other; a
 # namespaced output_dir per streamer is what auto_pilot.py now passes here) ----------------
 
+
 def _fake_success(cmd, timeout=None):
     return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
@@ -61,8 +63,15 @@ def test_render_clip_writes_into_given_output_dir(tmp_path, monkeypatch):
     # out to a real ffprobe against a source.mp4 that's never actually created here (found in
     # review, 2026-08-21: ambient-repo-state-dependent, non-hermetic test behavior).
     result = process.render_clip(
-        tmp_path / "source.mp4", clip, tmp_path / "subs.ass", 1, process.LAYOUT_BLUR_BACKGROUND,
-        1080, 1920, output_dir=output_dir, music_path=None,
+        tmp_path / "source.mp4",
+        clip,
+        tmp_path / "subs.ass",
+        1,
+        process.LAYOUT_BLUR_BACKGROUND,
+        1080,
+        1920,
+        output_dir=output_dir,
+        music_path=None,
     )
     assert result == expected_path
 
@@ -72,6 +81,7 @@ def test_render_clip_writes_into_given_output_dir(tmp_path, monkeypatch):
 # exit, or exit 0 while writing a nonempty but undecodable file, which the old exists()/size>0
 # guard alone could not catch) and only ever wasted an attempt before the CPU fallback anyway.
 # render_clip() now goes straight to libx264.) -------------------------------------------------
+
 
 def test_render_clip_never_invokes_h264_qsv(tmp_path, monkeypatch):
     calls = []
@@ -86,8 +96,15 @@ def test_render_clip_never_invokes_h264_qsv(tmp_path, monkeypatch):
 
     clip = {"title": "Test Clip", "start_time": 0.0, "end_time": 1.0}
     process.render_clip(
-        tmp_path / "source.mp4", clip, tmp_path / "subs.ass", 1, process.LAYOUT_BLUR_BACKGROUND,
-        1080, 1920, output_dir=tmp_path, music_path=None,
+        tmp_path / "source.mp4",
+        clip,
+        tmp_path / "subs.ass",
+        1,
+        process.LAYOUT_BLUR_BACKGROUND,
+        1080,
+        1920,
+        output_dir=tmp_path,
+        music_path=None,
     )
 
     assert len(calls) == 1  # succeeds on the first (and only) attempt
@@ -109,8 +126,16 @@ def test_render_clip_retries_without_music_when_the_music_mix_is_unplayable(tmp_
 
     clip = {"title": "Test Clip", "start_time": 0.0, "end_time": 1.0}
     result = process.render_clip(
-        tmp_path / "source.mp4", clip, tmp_path / "subs.ass", 1, process.LAYOUT_BLUR_BACKGROUND,
-        1080, 1920, output_dir=tmp_path, music_path=tmp_path / "track.mp3", has_source_audio=True,
+        tmp_path / "source.mp4",
+        clip,
+        tmp_path / "subs.ass",
+        1,
+        process.LAYOUT_BLUR_BACKGROUND,
+        1080,
+        1920,
+        output_dir=tmp_path,
+        music_path=tmp_path / "track.mp3",
+        has_source_audio=True,
     )
 
     assert calls == ["music", "no_music"]
@@ -128,8 +153,15 @@ def test_render_clip_raises_when_every_attempt_produces_an_unplayable_file(tmp_p
     clip = {"title": "Test Clip", "start_time": 0.0, "end_time": 1.0}
     try:
         process.render_clip(
-            tmp_path / "source.mp4", clip, tmp_path / "subs.ass", 1, process.LAYOUT_BLUR_BACKGROUND,
-            1080, 1920, output_dir=tmp_path, music_path=None,
+            tmp_path / "source.mp4",
+            clip,
+            tmp_path / "subs.ass",
+            1,
+            process.LAYOUT_BLUR_BACKGROUND,
+            1080,
+            1920,
+            output_dir=tmp_path,
+            music_path=None,
         )
         pytest.fail("expected RuntimeError")
     except RuntimeError as e:
@@ -145,8 +177,14 @@ def test_render_clip_defaults_to_shared_output_dir_when_none_given(tmp_path, mon
     expected_path.write_bytes(b"fake video bytes")
 
     result = process.render_clip(
-        tmp_path / "source.mp4", clip, tmp_path / "subs.ass", 1, process.LAYOUT_BLUR_BACKGROUND,
-        1080, 1920, music_path=None,
+        tmp_path / "source.mp4",
+        clip,
+        tmp_path / "subs.ass",
+        1,
+        process.LAYOUT_BLUR_BACKGROUND,
+        1080,
+        1920,
+        music_path=None,
     )
     assert result == expected_path
 
@@ -155,6 +193,7 @@ def test_render_clip_defaults_to_shared_output_dir_when_none_given(tmp_path, mon
 # re-derive a clip's metadata from its filename index against "whichever *_clips.json is
 # newest," which attributes the wrong clip's title/score once cycles or streamers overlap
 # on the same index; a sidecar written right next to the render is unambiguous) -----------
+
 
 def test_metadata_sidecar_written_next_to_clip(tmp_path):
     output_path = tmp_path / "clip_1_Test_Clip.mp4"
@@ -165,6 +204,7 @@ def test_metadata_sidecar_written_next_to_clip(tmp_path):
     sidecar = output_path.with_suffix(".json")
     assert sidecar.exists()
     import json
+
     saved = json.loads(sidecar.read_text(encoding="utf-8"))
     assert saved["title"] == "Test Clip"
     assert saved["viral_score"] == 8
@@ -174,6 +214,7 @@ def test_metadata_sidecar_written_next_to_clip(tmp_path):
 def test_metadata_sidecar_write_failure_does_not_raise(tmp_path, monkeypatch):
     def _boom(*a, **k):
         raise OSError("disk full")
+
     monkeypatch.setattr(process.atomic_io, "atomic_write_json", _boom)
     # Must not raise — a failed debug/metadata write must never fail the render it describes.
     process._write_clip_metadata_sidecar(tmp_path / "clip_1_x.mp4", {"title": "x"})

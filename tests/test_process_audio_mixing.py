@@ -1,13 +1,14 @@
 import subprocess
 
-import process
-
+from autoclip.rendering import process
 
 # --- _has_audio_stream (2026-08-21) --------------------------------------------------------
+
 
 def _fake_run(returncode, stdout="", stderr=""):
     def _run(cmd, capture_output=None, text=None, timeout=None):
         return subprocess.CompletedProcess(args=cmd, returncode=returncode, stdout=stdout, stderr=stderr)
+
     return _run
 
 
@@ -24,6 +25,7 @@ def test_has_audio_stream_false_when_ffprobe_succeeds_with_no_streams(monkeypatc
 def test_has_audio_stream_true_on_process_exception(monkeypatch):
     def _raise(*a, **k):
         raise OSError("no such file")
+
     monkeypatch.setattr(process.subprocess, "run", _raise)
     assert process._has_audio_stream(process.Path("x.mp4")) is True
 
@@ -37,6 +39,7 @@ def test_has_audio_stream_true_on_nonzero_returncode_not_just_exception(monkeypa
 
 
 # --- build_audio_filter --------------------------------------------------------------------
+
 
 def test_build_audio_filter_with_source_audio_mixes_both_tracks():
     filt = process.build_audio_filter(has_source_audio=True, clip_duration=10.0)
@@ -55,7 +58,7 @@ def test_build_audio_filter_without_source_audio_uses_music_only():
 
 def test_loudnorm_applies_to_voice_music_and_music_only():
     for has_audio in (True, False):
-        filt = process.build_audio_filter(has_audio, 10.)
+        filt = process.build_audio_filter(has_audio, 10.0)
         assert filt.endswith("loudnorm=I=-14:TP=-1:LRA=11[outa]")
 
 
@@ -65,6 +68,14 @@ def test_source_only_audio_normalized_without_background_track():
 
 
 def test_music_mix_normalized_once_in_filtergraph():
-    cmd = process._build_render_cmd(process.Path("source.mp4"), 0, 10, "null[outv]", [], process.Path("out.mp4"), music_path=process.Path("music.mp3"))
+    cmd = process._build_render_cmd(
+        process.Path("source.mp4"),
+        0,
+        10,
+        "null[outv]",
+        [],
+        process.Path("out.mp4"),
+        music_path=process.Path("music.mp3"),
+    )
     assert "-af" not in cmd
     assert cmd[cmd.index("-filter_complex") + 1].count("loudnorm=I=-14:TP=-1:LRA=11") == 1

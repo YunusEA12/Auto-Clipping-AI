@@ -1,0 +1,1 @@
+"""Tools services for AutoClip."""

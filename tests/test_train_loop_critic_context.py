@@ -1,4 +1,4 @@
-import train_loop
+from autoclip.ai import train_loop
 
 
 def _transcript(*segs):
@@ -7,6 +7,7 @@ def _transcript(*segs):
 
 # --- extract_clip_context_text (2026-08-22: short reaction clips were reading as "no
 # context" to the critic because it only ever saw the clip's own isolated transcript slice) --
+
 
 def test_context_text_pulls_lead_in_before_clip_start():
     transcript = _transcript(
@@ -41,6 +42,7 @@ def test_context_text_empty_when_clip_opens_the_transcript():
 
 # --- build_critic_user_content wires the lead-in into each clip's block -------------------
 
+
 def test_critic_content_includes_context_block_when_lead_in_exists():
     transcript = _transcript(
         (10.0, 14.0, "Vorher passiert etwas Wichtiges."),
@@ -63,6 +65,7 @@ def test_critic_content_omits_context_block_when_clip_opens_the_transcript():
 
 
 # --- system prompt now explicitly protects short reaction/punchline clips -----------------
+
 
 def test_prompt_tells_critic_not_to_penalize_short_reaction_clips():
     assert "NOT penalize" in train_loop.CRITIC_SYSTEM_PROMPT or "not itself judged" in train_loop.CRITIC_SYSTEM_PROMPT

@@ -5,12 +5,12 @@ from datetime import datetime, timedelta, timezone
 import psutil
 import pytest
 
-import orchestrator
-
+from autoclip.control import orchestrator
 
 # --- Startup reconciliation (2026-08-18: H-14 — orchestrator.py used to start every run
 # with tracked={}, so a restart while a streamer was still being recorded orphaned that
 # subprocess and started a brand-new, duplicate one for the same streamer) -----------------
+
 
 class FakePsutilProcess:
     def __init__(self, pid, cmdline=None, running=True, status="running", cwd=None):
@@ -50,8 +50,17 @@ class FakePsutilProcess:
 
 # --- _is_still_our_auto_pilot ---------------------------------------------------------
 
+
 def test_is_still_our_auto_pilot_true_when_cmdline_matches(monkeypatch):
     fake = FakePsutilProcess(123, cmdline=["python", "auto_pilot.py", "--streamer-name", "eliasn97"])
+    monkeypatch.setattr(orchestrator.psutil, "Process", lambda pid: fake)
+    assert orchestrator._is_still_our_auto_pilot(123, "eliasn97") is True
+
+
+def test_reconciliation_recognizes_installed_module_entry_point(monkeypatch):
+    fake = FakePsutilProcess(
+        123, cmdline=["python", "-m", "autoclip.control.auto_pilot", "--streamer-name", "eliasn97"]
+    )
     monkeypatch.setattr(orchestrator.psutil, "Process", lambda pid: fake)
     assert orchestrator._is_still_our_auto_pilot(123, "eliasn97") is True
 
@@ -65,6 +74,7 @@ def test_is_still_our_auto_pilot_false_when_different_streamer(monkeypatch):
 def test_is_still_our_auto_pilot_false_when_pid_gone(monkeypatch):
     def raise_no_such(pid):
         raise psutil.NoSuchProcess(pid)
+
     monkeypatch.setattr(orchestrator.psutil, "Process", raise_no_such)
     assert orchestrator._is_still_our_auto_pilot(123, "eliasn97") is False
 
@@ -75,9 +85,11 @@ def test_is_still_our_auto_pilot_false_when_pid_gone(monkeypatch):
 # happened there for hours; every clip silently failed at analysis because that checkout's
 # .env was missing GEMINI_API_KEY, and the mismatch was never surfaced.) ---------------------
 
+
 def test_is_still_our_auto_pilot_false_when_cwd_does_not_match(monkeypatch):
     fake = FakePsutilProcess(
-        123, cmdline=["python", "auto_pilot.py", "--streamer-name", "eliasn97"],
+        123,
+        cmdline=["python", "auto_pilot.py", "--streamer-name", "eliasn97"],
         cwd="/root/Auto-Clipping-AI",
     )
     monkeypatch.setattr(orchestrator.psutil, "Process", lambda pid: fake)
@@ -86,7 +98,8 @@ def test_is_still_our_auto_pilot_false_when_cwd_does_not_match(monkeypatch):
 
 def test_is_still_our_auto_pilot_true_when_cwd_matches_explicitly(monkeypatch):
     fake = FakePsutilProcess(
-        123, cmdline=["python", "auto_pilot.py", "--streamer-name", "eliasn97"],
+        123,
+        cmdline=["python", "auto_pilot.py", "--streamer-name", "eliasn97"],
         cwd=str(orchestrator.THIS_DIR),
     )
     monkeypatch.setattr(orchestrator.psutil, "Process", lambda pid: fake)
@@ -95,12 +108,18 @@ def test_is_still_our_auto_pilot_true_when_cwd_matches_explicitly(monkeypatch):
 
 # --- reconcile_with_running_subprocesses ------------------------------------------------
 
+
 def test_reconcile_adopts_a_still_running_streamer(tmp_path, monkeypatch):
     state_path = tmp_path / "orchestrator_state.json"
     started_at = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
-    state_path.write_text(json.dumps({
-        "streamers": {"eliasn97": {"recording": True, "pid": 123, "started_at": started_at}},
-    }), encoding="utf-8")
+    state_path.write_text(
+        json.dumps(
+            {
+                "streamers": {"eliasn97": {"recording": True, "pid": 123, "started_at": started_at}},
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(orchestrator, "_is_still_our_auto_pilot", lambda pid, name: True)
     monkeypatch.setattr(orchestrator, "_AdoptedProcess", lambda pid: f"adopted-{pid}")
 
@@ -113,9 +132,14 @@ def test_reconcile_adopts_a_still_running_streamer(tmp_path, monkeypatch):
 
 def test_reconcile_skips_a_streamer_whose_pid_is_gone(tmp_path, monkeypatch):
     state_path = tmp_path / "orchestrator_state.json"
-    state_path.write_text(json.dumps({
-        "streamers": {"eliasn97": {"recording": True, "pid": 123, "started_at": None}},
-    }), encoding="utf-8")
+    state_path.write_text(
+        json.dumps(
+            {
+                "streamers": {"eliasn97": {"recording": True, "pid": 123, "started_at": None}},
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(orchestrator, "_is_still_our_auto_pilot", lambda pid, name: False)
 
     assert orchestrator.reconcile_with_running_subprocesses(state_path) == {}
@@ -123,9 +147,14 @@ def test_reconcile_skips_a_streamer_whose_pid_is_gone(tmp_path, monkeypatch):
 
 def test_reconcile_skips_streamer_not_marked_recording(tmp_path, monkeypatch):
     state_path = tmp_path / "orchestrator_state.json"
-    state_path.write_text(json.dumps({
-        "streamers": {"eliasn97": {"recording": False, "pid": 123}},
-    }), encoding="utf-8")
+    state_path.write_text(
+        json.dumps(
+            {
+                "streamers": {"eliasn97": {"recording": False, "pid": 123}},
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(orchestrator, "_is_still_our_auto_pilot", lambda pid, name: True)
 
     assert orchestrator.reconcile_with_running_subprocesses(state_path) == {}
@@ -139,6 +168,7 @@ def test_reconcile_returns_empty_when_no_state_file(tmp_path):
 # Wraps psutil.Process behind the same .pid/.poll()/.returncode/.terminate()/.kill()/.wait()
 # interface stop_recording() and the crash-loop poll already use for a real subprocess.Popen
 # — so an adopted (not self-spawned) subprocess can be tracked and stopped identically.
+
 
 def test_adopted_process_poll_returns_none_while_running(monkeypatch):
     fake = FakePsutilProcess(123, running=True)

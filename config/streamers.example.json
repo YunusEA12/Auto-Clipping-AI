@@ -1,0 +1,12 @@
+[
+  {
+    "name": "example_streamer",
+    "url": "https://www.twitch.tv/example_streamer",
+    "profile": "default_streamer",
+    "auto_upload": false,
+    "publish": false,
+    "instagram": false,
+    "facecam_box": null,
+    "facecam_padding": null
+  }
+]
