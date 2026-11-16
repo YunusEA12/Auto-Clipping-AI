@@ -37,6 +37,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, List, Optional, TypeVar
 
+import httpx
+from filelock import FileLock
 from google.genai import errors as genai_errors
 
 from autoclip import runtime
@@ -59,10 +61,10 @@ def _is_retryable(e: Exception) -> bool:
         return True
     if isinstance(e, genai_errors.ClientError):
         return getattr(e, "code", None) == _RATE_LIMIT_STATUS
-    # A transport-level timeout isn't a genai_errors.APIError at all — it surfaces as the
-    # underlying httpx/requests timeout exception, which every such library roots at
-    # TimeoutError (Python's own builtin since 3.11's socket/asyncio unification).
-    return isinstance(e, TimeoutError)
+    # httpx exceptions do not inherit Python's built-in TimeoutError.
+    return isinstance(
+        e, (TimeoutError, ConnectionError, httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+    )
 
 
 # Google's real 429 body names the exact exhausted quota's id, e.g. (confirmed live,
@@ -209,8 +211,10 @@ def _load_budget_state(path: Path) -> dict:
         return {}
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ValueError("Gemini budget state is unreadable; API calls blocked") from exc
+    if not isinstance(state, dict):
+        raise ValueError("Invalid Gemini budget state")
     # Migrate the old single-model shape (`"calls": <int>`, from before per-model tracking
     # existed, 2026-08-21) into the new `"calls": {model: count}` shape, transparently, so an
     # already-accumulated real count isn't lost or silently reset the first time this runs
@@ -219,6 +223,9 @@ def _load_budget_state(path: Path) -> dict:
     calls = state.get("calls")
     if isinstance(calls, int):
         state["calls"] = {_implicit_model_key(): calls}
+    calls = state.get("calls", {})
+    if not isinstance(calls, dict) or any(type(v) is not int or v < 0 for v in calls.values()):
+        raise ValueError("Invalid Gemini budget counters")
     return state
 
 
@@ -233,9 +240,9 @@ def check_and_increment_budget(
     quota is per-model-per-day, not per-project (confirmed live, 2026-08-21 — see
     DEFAULT_MODEL_POOL's own comment). `model=None` (the default) attributes usage to the
     primary/default model — the only behavior that existed before per-model tracking did.
-    Uses UTC calendar days and a plain atomic JSON file — a lost increment under a genuine
-    race between two processes is an acceptable, low-stakes edge case for a soft safety net,
-    not a hard billing ledger.
+    Uses UTC calendar days and locked atomic counters across processes. Each application
+    retry reserves a call; SDK-internal retries and token prices are outside this counter,
+    so it is not a monetary billing ledger.
 
     `path` defaults to the module-level BUDGET_STATE_PATH, looked up dynamically (not bound
     as a default-argument value) specifically so tests can monkeypatch
@@ -249,29 +256,28 @@ def check_and_increment_budget(
     model = model or _implicit_model_key()
     max_calls_per_day = _resolve_max_calls_per_day(max_calls_per_day)
 
-    today = datetime.now(timezone.utc).date().isoformat()
-    state = _load_budget_state(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(str(path) + ".lock", timeout=30):
+        today = datetime.now(timezone.utc).date().isoformat()
+        state = _load_budget_state(path)
 
-    if state.get("date") != today:
-        # A new UTC day also resets which model is "active" for call_with_fallback() — see
-        # its own docstring — by simply not carrying forward the old active_model value here.
-        state = {"date": today, "calls": {}}
+        if state.get("date") != today:
+            # A new UTC day also resets which model is "active" for call_with_fallback() — see
+            # its own docstring — by simply not carrying forward the old active_model value here.
+            state = {"date": today, "calls": {}}
 
-    calls = state.setdefault("calls", {})
-    current = calls.get(model, 0)
-    if current >= max_calls_per_day:
-        raise DailyCallBudgetExceeded(
-            f"Daily Gemini call budget ({max_calls_per_day}) reached for {model} on {today} — "
-            f"no further {model} calls will be made until the next UTC day."
-        )
+        calls = state.setdefault("calls", {})
+        current = calls.get(model, 0)
+        if current >= max_calls_per_day:
+            raise DailyCallBudgetExceeded(
+                f"Daily Gemini call budget ({max_calls_per_day}) reached for {model} on {today} — "
+                f"no further {model} calls will be made until the next UTC day."
+            )
 
-    calls[model] = current + 1
-    try:
+        calls[model] = current + 1
         atomic_io.atomic_write_json(path, state)
-    except OSError as e:
-        logger.warning("Could not persist %s: %s", path, e)
 
-    return calls[model]
+        return calls[model]
 
 
 def _load_active_model_index(pool: List[str], path: Path = None) -> int:
@@ -298,15 +304,14 @@ def _save_active_model_index(idx: int, pool: List[str], path: Path = None) -> No
 
     if path is None:
         path = BUDGET_STATE_PATH
-    today = datetime.now(timezone.utc).date().isoformat()
-    state = _load_budget_state(path)
-    if state.get("date") != today:
-        state = {"date": today, "calls": {}}
-    state["active_model"] = pool[idx]
-    try:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(str(path) + ".lock", timeout=30):
+        today = datetime.now(timezone.utc).date().isoformat()
+        state = _load_budget_state(path)
+        if state.get("date") != today:
+            state = {"date": today, "calls": {}}
+        state["active_model"] = pool[idx]
         atomic_io.atomic_write_json(path, state)
-    except OSError as e:
-        logger.warning("Could not persist active model to %s: %s", path, e)
 
 
 def call_with_retry(
@@ -331,10 +336,9 @@ def call_with_retry(
     check_and_increment_budget's own docstring) — used by call_with_fallback() below. Plain
     callers that don't pass it keep attributing usage to the primary/default model, unchanged
     from before per-model tracking existed."""
-    check_and_increment_budget(model, max_calls_per_day)
-
     attempt = 0
     while True:
+        check_and_increment_budget(model, max_calls_per_day)
         try:
             return fn()
         except Exception as e:

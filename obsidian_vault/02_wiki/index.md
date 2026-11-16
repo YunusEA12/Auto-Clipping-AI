@@ -43,3 +43,6 @@ Wichtige Architektur-Entscheidungen werden hier automatisch als eigene Markdown-
 - [[Codequalitaet-2026-11]] — Durchsicht auf Struktur, Testabdeckung und Wachstumsfaehigkeit (15.11.2026).
 
 - [[Upload-Betriebspruefung-2026-11]] — reale Upload-Blocker, Sitzungsprüfung und technische Bewertung (15.11.2026).
+# Neue Betriebsverbesserungen
+
+- [Inferenz und Audio-Zuverlässigkeit](Inferenz-und-Audio-Zuverlaessigkeit.md)

@@ -41,7 +41,7 @@ def render(document: dict) -> str:
         "- Alle Änderungen werden mit isolierten Tests und echtem CPU-Medienrender geprüft; Betriebsergebnisse stehen im zugehörigen Wiki-Eintrag.",
         "- Die gemessene Coverage umfasst das Paket `autoclip` und bleibt ausdrücklich unter 100 Prozent.",
         "- KI-Clipqualität, Langzeitverfügbarkeit und Produktwirkung werden ohne neue Daten nicht künstlich höher bewertet.",
-        "- Profilbild und Bio sind vorbereitet; eine Captcha-Sperre wird nicht als erfolgreicher Profilwechsel ausgegeben.",
+        "- Profilbild und Bio sind vorbereitet; die Live-Profilpflege übernimmt der Nutzer selbst.",
         "- Bereits veröffentlichte Videos und bestehende Qualitätsgrenzen werden für eine höhere Punktzahl nicht manipuliert.",
         "",
     ]

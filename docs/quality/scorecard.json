@@ -56,8 +56,8 @@
       "id": 7,
       "criterion": "Upload-Zuverlässigkeit",
       "before": 65,
-      "after": 84,
-      "evidence": "Ein Post live bestätigt; verzögerter Login und Onboarding behoben; alle Einstiegspunkte geschützt.",
+      "after": 88,
+      "evidence": "Drei weitere automatisch best?tigte Upload-Signale im Nachtbetrieb; gemeinsame Schutzmechanismen f?r CLI und Fleet.",
       "remaining": "Langzeitquote, weitere Konten, UI-Änderungen und Captchas bleiben offen."
     },
     {
@@ -72,24 +72,24 @@
       "id": 9,
       "criterion": "Rendering und technische QC",
       "before": 62,
-      "after": 68,
-      "evidence": "Echter FFmpeg-/ASS-/Audio-Test, Quelldateierhalt und unveränderte Qualitätsgrenzen.",
+      "after": 75,
+      "evidence": "Reale Renderpr?fung plus gemessene Zwei-Pass-Audiokorrektur mit unver?nderten Videopaketen und erneuter vollst?ndiger QC.",
       "remaining": "900 Alt-Clips waren gesperrt; Freeze-/Audio-Ursachen müssen mit echter Sichtprüfung aufgearbeitet werden."
     },
     {
       "id": 10,
       "criterion": "KI-Auswahl und inhaltliche Qualität",
       "before": 63,
-      "after": 63,
-      "evidence": "Bestehende Zeitstempel-, Kontext- und Critic-Tests bleiben erhalten.",
+      "after": 68,
+      "evidence": "Validierte, atomare Transkripte und begrenzte Transport-Retries verhindern unbrauchbare Auswahlgrundlagen; redaktionelle Qualit?t bleibt separat zu pr?fen.",
       "remaining": "Keine neue belastbare Verbindung zwischen KI-Urteil, Zuschauerbindung und Erfolg."
     },
     {
       "id": 11,
       "criterion": "Tests und nachgewiesene Abdeckung",
       "before": 82,
-      "after": 85,
-      "evidence": "Mehr UI-, CLI-, Sicherheits-, Migrations- und Medienintegrationstests; Coverage wird gemessen.",
+      "after": 88,
+      "evidence": "Zus?tzliche echte Prozess-, Budgetkonkurrenz-, Transport- und Audio-Integrationstests; gemessene Abdeckung bleibt unter 100.",
       "remaining": "Rund 70 Prozent kombinierte Zeilen-/Branch-Abdeckung; insbesondere Browser und optionale Integrationen haben Lücken."
     },
     {
@@ -128,16 +128,16 @@
       "id": 16,
       "criterion": "Ressourcenverbrauch und Leistung",
       "before": 45,
-      "after": 88,
-      "evidence": "Aktiver Tab, sechs Archiv-Clips, verzögerte Downloads und keine Inferenz-Imports im Monitoring.",
+      "after": 90,
+      "evidence": "Begrenzte Dashboard-Daten und prozess?bergreifende Whisper-Kapazit?t; sieben Produktionsbereiche mit 274,7 MiB Testprozess-Spitze gepr?ft.",
       "remaining": "Langzeit-RAM-Messung und Lasttest mit vielen gleichzeitigen Streams fehlen."
     },
     {
       "id": 17,
       "criterion": "Wartbarkeit und Entwicklungsstandard",
       "before": 50,
-      "after": 78,
-      "evidence": "Installierbare Module, Import-/Formatregeln, EditorConfig und dokumentierter Entwicklungsablauf.",
+      "after": 80,
+      "evidence": "Weitere Trennung in Inferenzkapazit?t und Audio-Reparatur mit gepr?ften Vertr?gen; bestehende Gro?module bleiben als technische Schuld.",
       "remaining": "Große Rendering-, Critic- und Autopilot-Funktionen sind noch nicht vollständig zerlegt."
     },
     {
@@ -154,7 +154,7 @@
       "before": 40,
       "after": 50,
       "evidence": "Originales CM-Profilbild und freigegebener moderner ClipMaster-Stil; passender 75-Zeichen-Biotext.",
-      "remaining": "TikTok hat das Speichern mit einem menschlichen Captcha blockiert; Live-Übernahme noch nicht bestätigt."
+      "remaining": "Profilpflege und Captcha ?bernimmt der Nutzer selbst; Live-?bernahme nicht best?tigt."
     },
     {
       "id": 20,

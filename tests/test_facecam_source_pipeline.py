@@ -7,6 +7,31 @@ from autoclip.ai import vision
 from autoclip.rendering import process
 
 
+@pytest.mark.parametrize("reasons", [["loudness"], ["loudness", "frozen_frames"]])
+def test_audio_repair_rechecks_qc_and_never_bypasses_other_failures(tmp_path, monkeypatch, reasons):
+    from autoclip.rendering import audio_repair
+
+    data = {"clips": [{"start_time": 0.0, "end_time": 20.0, "title": "Quiet"}]}
+    _process_clips_iter_common_mocks(monkeypatch, tmp_path, data)
+    monkeypatch.setattr(vision, "locate_persistent_facecam", lambda *a: vision.FacecamScan(None, 0, 0, 0, 0))
+    checks, repairs = [], []
+
+    def qc(*args, **kwargs):
+        checks.append(1)
+        return {"passed": False, "reasons": reasons, "checks": {}}
+
+    monkeypatch.setattr(process.auto_qc, "check_render", qc)
+    monkeypatch.setattr(audio_repair, "repair_render_loudness", lambda path: repairs.append(path) or {"changed": True})
+    results = list(
+        process.process_clips_iter(
+            source_video=tmp_path / "source.mp4", layout="blur_background", output_dir=tmp_path / "out"
+        )
+    )
+    assert results[0][2]["auto_qc"]["passed"] is False
+    assert len(repairs) == (1 if reasons == ["loudness"] else 0)
+    assert len(checks) == (2 if repairs else 1)
+
+
 @pytest.mark.parametrize(
     "scan,reason",
     [

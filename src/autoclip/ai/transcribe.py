@@ -3,13 +3,16 @@
 import argparse
 import json
 import logging
+import math
 import os
 from pathlib import Path
 
 from faster_whisper import WhisperModel
+from filelock import FileLock
 
 from autoclip import runtime
-from autoclip.core import logging_setup
+from autoclip.core import atomic_io, logging_setup
+from autoclip.core.inference_concurrency import inference_slot
 
 logging_setup.configure_logging()
 logger = logging.getLogger(__name__)
@@ -61,10 +64,49 @@ def transcribe(audio_path: Path, model_size: str = MODEL_SIZE) -> Path:
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
     output_path = transcription_path_for(audio_path)
-    if output_path.exists():
-        logger.info("Transkription bereits vorhanden, überspringe Whisper: %s", output_path)
-        return output_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(str(output_path) + ".lock", timeout=1800):
+        if output_path.exists():
+            try:
+                validate_transcript(json.loads(output_path.read_text(encoding="utf-8")))
+                logger.info("Reusing validated transcript: %s", output_path)
+                return output_path
+            except (ValueError, OSError, TypeError, KeyError):
+                logger.warning("Invalid transcript cache; rebuilding %s", output_path)
+        with inference_slot():
+            return _transcribe_uncached(audio_path, output_path, model_size)
 
+
+def validate_transcript(document: dict) -> None:
+    """Reject empty, non-finite or reversed timestamps before downstream selection."""
+    if not isinstance(document, dict) or not isinstance(document.get("segments"), list) or not document["segments"]:
+        raise ValueError("Transcript contains no segments")
+    previous = -1.0
+    for segment in document["segments"]:
+        if not isinstance(segment, dict) or not isinstance(segment.get("text"), str) or not segment["text"].strip():
+            raise ValueError("Invalid transcript text")
+        start, end = segment.get("start"), segment.get("end")
+        if any(type(t) not in (int, float) or not math.isfinite(t) for t in (start, end)):
+            raise ValueError("Invalid transcript timestamp")
+        if start < 0 or end <= start or start < previous:
+            raise ValueError("Invalid transcript ordering")
+        previous = start
+        words = segment.get("words", [])
+        if not isinstance(words, list):
+            raise ValueError("Invalid word list")
+        word_previous = start
+        for word in words:
+            if not isinstance(word, dict) or not isinstance(word.get("text"), str):
+                raise ValueError("Invalid word")
+            a, b = word.get("start"), word.get("end")
+            if any(type(t) not in (int, float) or not math.isfinite(t) for t in (a, b)):
+                raise ValueError("Invalid word timestamp")
+            if a < start or b > end or b < a or a < word_previous:
+                raise ValueError("Word outside its segment")
+            word_previous = a
+
+
+def _transcribe_uncached(audio_path: Path, output_path: Path, model_size: str) -> Path:
     cpu_threads = whisper_cpu_threads()
     logger.info("Loading faster-whisper model '%s' on CPU (int8, %d threads)", model_size, cpu_threads)
     model = WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
@@ -108,9 +150,9 @@ def transcribe(audio_path: Path, model_size: str = MODEL_SIZE) -> Path:
     if not result_segments:
         raise RuntimeError(f"Transcription produced no segments for: {audio_path}")
 
-    TEMP_DIR.mkdir(exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump({"language": info.language, "segments": result_segments}, f, ensure_ascii=False, indent=2)
+    document = {"language": info.language, "segments": result_segments}
+    validate_transcript(document)
+    atomic_io.atomic_write_json(output_path, document)
 
     logger.info("Transcription complete: %s (%d segments)", output_path, len(result_segments))
     return output_path

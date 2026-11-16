@@ -1509,6 +1509,17 @@ def process_clips_iter(
             clip["auto_qc"] = auto_qc.check_render(
                 output_path, layout=effective_layout, subtitle_path=ass_path, face_rects=qc_face_rects
             )
+            if clip["auto_qc"].get("reasons") == ["loudness"]:
+                from autoclip.rendering.audio_repair import repair_render_loudness
+
+                try:
+                    with FileLock(str(TEMP_DIR / "render.lock")):
+                        clip["audio_repair"] = repair_render_loudness(output_path)
+                    clip["auto_qc"] = auto_qc.check_render(
+                        output_path, layout=effective_layout, subtitle_path=ass_path, face_rects=qc_face_rects
+                    )
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    logger.warning("Loudness repair failed; clip remains blocked: %s", output_path)
             clip["auto_qc"].setdefault("checks", {})["facecam_source"] = {
                 **source_evidence,
                 "applicable": effective_layout == LAYOUT_SPLIT_SCREEN,

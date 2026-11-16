@@ -90,9 +90,44 @@ def test_transcribe_writes_expected_json(fake, tmp_path):
 def test_existing_transcript_is_reused(fake, tmp_path):
     existing = tmp_path / "temp"
     existing.mkdir()
-    (existing / "chunk_transcription.json").write_text("{}", encoding="utf-8")
+    (existing / "chunk_transcription.json").write_text(
+        json.dumps({"segments": [{"text": "Valid", "start": 0, "end": 1}]}), encoding="utf-8"
+    )
     transcribe.transcribe(fake)
     assert FakeModel.calls == []  # Whisper never ran
+
+
+@pytest.mark.parametrize("cache", ["{", "{}", '{"segments":[]}', '{"segments":[{"text":"x","start":2,"end":1}]}'])
+def test_invalid_cache_is_rebuilt(fake, tmp_path, cache):
+    destination = tmp_path / "temp/chunk_transcription.json"
+    destination.parent.mkdir()
+    destination.write_text(cache)
+    transcribe.transcribe(fake)
+    assert FakeModel.calls == [True]
+    transcribe.validate_transcript(json.loads(destination.read_text()))
+
+
+def test_invalid_generated_timestamps_never_reach_cache(fake, monkeypatch, tmp_path):
+    monkeypatch.setattr(FakeModel, "transcribe", lambda *a, **k: (iter([S("bad", 0, float("nan"), [])]), INFO))
+    with pytest.raises(ValueError, match="timestamp"):
+        transcribe.transcribe(fake)
+    assert not (tmp_path / "temp/chunk_transcription.json").exists()
+
+
+def test_lazy_inference_holds_global_slot(fake, monkeypatch):
+    from autoclip.core.inference_concurrency import inference_slot
+
+    monkeypatch.setenv("WHISPER_MAX_CONCURRENCY", "1")
+
+    def segments():
+        with pytest.raises(TimeoutError), inference_slot(timeout=0):
+            pytest.fail("Second model acquired the occupied slot")
+        yield SEGMENTS[0]
+
+    monkeypatch.setattr(FakeModel, "transcribe", lambda *a, **k: (segments(), INFO))
+    transcribe.transcribe(fake)
+    with inference_slot(timeout=0):
+        pass  # Released after lazy inference finishes.
 
 
 def test_missing_audio_raises(tmp_path):

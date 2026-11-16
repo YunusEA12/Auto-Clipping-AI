@@ -1,9 +1,59 @@
 import json
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 
 from autoclip.ai import llm_utils
+
+
+@pytest.mark.parametrize(
+    "error", [httpx.ConnectError("reset"), httpx.ReadTimeout("late"), httpx.RemoteProtocolError("EOF")]
+)
+def test_transport_failure_retries_and_accounts_for_each_attempt(error, isolated_budget_path, monkeypatch):
+    monkeypatch.setattr(llm_utils.time, "sleep", lambda _: None)
+    calls = []
+
+    def request():
+        calls.append(1)
+        if len(calls) == 1:
+            raise error
+        return "ok"
+
+    assert llm_utils.call_with_retry(request, "transport", model="test-model") == "ok"
+    assert json.loads(isolated_budget_path.read_text())["calls"]["test-model"] == 2
+
+
+def test_retry_stops_at_call_budget(isolated_budget_path, monkeypatch):
+    monkeypatch.setattr(llm_utils.time, "sleep", lambda _: None)
+    calls = []
+
+    def request():
+        calls.append(1)
+        raise httpx.ConnectError("reset")
+
+    with pytest.raises(llm_utils.DailyCallBudgetExceeded):
+        llm_utils.call_with_retry(request, "budget", max_calls_per_day=2)
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("content", ["{", "[]", '{"calls":{"model":-1}}'])
+def test_corrupt_budget_is_not_reset(tmp_path, content):
+    path = tmp_path / "budget.json"
+    path.write_text(content)
+    with pytest.raises(ValueError):
+        llm_utils.check_and_increment_budget(path=path)
+    assert path.read_text() == content
+
+
+def test_concurrent_budget_reservations_are_not_lost(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    path = tmp_path / "budget.json"
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        results = list(workers.map(lambda _: llm_utils.check_and_increment_budget(path=path), range(30)))
+    assert sorted(results) == list(range(1, 31))
+
 
 # --- secret redaction (L-06) -------------------------------------------------------------
 

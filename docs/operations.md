@@ -73,6 +73,22 @@ attempts per local day and at least three hours between attempts.
 
 ## Remaining operational work
 
+Whisper uses one fleet-wide inference slot by default, held from model construction through
+lazy segment consumption. `WHISPER_MAX_CONCURRENCY=2` permits two on hosts with at least
+four logical CPUs; larger values are capped at two. `WHISPER_CPU_THREADS` still controls
+threads per model. Slot waits time out after 30 minutes and OS locks release after a crash.
+Transcript cache files are validated and atomically written under a per-file lock.
+
+Gemini application-level retries each reserve their own daily call under a shared lock.
+Unreadable budgets block calls instead of resetting spending history. HTTP transport errors
+use bounded backoff; authentication and malformed requests still fail immediately. This is
+a request-count limit, not a token-price budget or a count of SDK-internal retries.
+
+Newly rendered clips failing only loudness receive a measured two-pass audio repair. Video
+packets are copied, and a verified temporary output replaces only the generated render.
+The full QC runs again before the clip can be published. No historical backlog is silently
+rewritten or marked as passed.
+
 Long-run measurements are required for memory behaviour, publishing success rate and
 recovery time. The existing QC backlog must be reviewed against real video/audio before
 thresholds are changed. Browser selectors and human captcha challenges remain external

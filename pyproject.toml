@@ -14,6 +14,7 @@ dependencies = [
     "python-dotenv",
     "pydantic",
     "google-genai",
+    "httpx",
     "opencv-python-headless",
     "mediapipe",
     "google-api-python-client",
