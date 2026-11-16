@@ -94,15 +94,17 @@ def validate_transcript(document: dict) -> None:
         words = segment.get("words", [])
         if not isinstance(words, list):
             raise ValueError("Invalid word list")
-        word_previous = start
+        # Whisper's forced alignment can place words across segment boundaries.
+        # Preserve those measured times; validate each word sequence independently.
+        word_previous = 0.0
         for word in words:
             if not isinstance(word, dict) or not isinstance(word.get("text"), str):
                 raise ValueError("Invalid word")
             a, b = word.get("start"), word.get("end")
             if any(type(t) not in (int, float) or not math.isfinite(t) for t in (a, b)):
                 raise ValueError("Invalid word timestamp")
-            if a < start or b > end or b < a or a < word_previous:
-                raise ValueError("Word outside its segment")
+            if a < 0 or b < a or a < word_previous:
+                raise ValueError("Invalid word ordering")
             word_previous = a
 
 

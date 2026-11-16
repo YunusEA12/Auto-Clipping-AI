@@ -114,6 +114,33 @@ def test_invalid_generated_timestamps_never_reach_cache(fake, monkeypatch, tmp_p
     assert not (tmp_path / "temp/chunk_transcription.json").exists()
 
 
+def test_real_whisper_alignment_can_cross_segment_boundary():
+    transcribe.validate_transcript(
+        {
+            "segments": [
+                {
+                    "start": 137.82,
+                    "end": 138.52,
+                    "text": "Speech",
+                    "words": [{"text": "Speech", "start": 137.54, "end": 138.12}],
+                }
+            ]
+        }
+    )
+
+
+@pytest.mark.parametrize("start,end", [(-1, 1), (2, 1), (float("nan"), 1)])
+def test_invalid_word_times_are_rejected(start, end):
+    with pytest.raises(ValueError):
+        transcribe.validate_transcript(
+            {
+                "segments": [
+                    {"start": 0, "end": 3, "text": "Speech", "words": [{"text": "Speech", "start": start, "end": end}]}
+                ]
+            }
+        )
+
+
 def test_lazy_inference_holds_global_slot(fake, monkeypatch):
     from autoclip.core.inference_concurrency import inference_slot
 
